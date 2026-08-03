@@ -138,7 +138,7 @@ impl PhotonicApp {
             .and_then(|id| doc.timeline.as_ref().and_then(|p| p.sequences.get(&id)))
             .is_some();
         if !has_sequence {
-            draw_empty_affordance(ui, doc, history, frame_rate);
+            self.draw_empty_affordance(ui, doc, history, frame_rate);
             return;
         }
         let seq_id = doc.timeline.as_ref().unwrap().active_sequence.unwrap();
@@ -204,7 +204,7 @@ impl PhotonicApp {
             egui::pos2(full.left(), tabs_rect.bottom()),
             egui::vec2(full.width(), TOOLBAR_H),
         );
-        draw_mini_toolbar(ui, toolbar_rect, doc, seq_id, &mut view, &mut snap);
+        self.draw_mini_toolbar(ui, toolbar_rect, doc, seq_id, &mut view, &mut snap);
 
         let below_full =
             egui::Rect::from_min_max(egui::pos2(full.left(), toolbar_rect.bottom()), full.max);
@@ -922,8 +922,16 @@ impl PhotonicApp {
                 }
             }
         }
+        let mut did = false;
         for (track, clip) in targets {
-            ops_bridge::split(doc, history, seq_id, track, clip, at);
+            if ops_bridge::split(doc, history, seq_id, track, clip, at) {
+                did = true;
+            }
+        }
+        // Proposal 213 coach: Import → Split → Export.
+        if did && !self.prefs.video_coach_dismissed && self.prefs.video_coach_step == 1 {
+            self.prefs.video_coach_step = 2;
+            self.prefs.save();
         }
     }
 }
@@ -968,117 +976,217 @@ fn edit_points(seq: &Sequence) -> Vec<Tick> {
 
 /// Empty-project affordance (04 §1.3): a hint + Add Track buttons that create the
 /// project (and first sequence) lazily on first click.
-fn draw_empty_affordance(
-    ui: &mut egui::Ui,
-    doc: &mut Document,
-    history: &mut CommandHistory,
-    frame_rate: FrameRate,
-) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(24.0);
-        ui.weak("No video track yet — add one or drag media here.");
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let avail = ui.available_width();
-            ui.add_space((avail - 260.0).max(0.0) * 0.5);
-            if ui.button("Add video track").clicked() {
-                if let Some(seq) = ops_bridge::ensure_project_and_sequence(doc, history, frame_rate)
-                {
-                    ops_bridge::add_track(doc, history, seq, TrackKind::Video);
-                }
+impl PhotonicApp {
+    /// CapCut-class empty timeline hero (proposal 213). Primary CTA = Import.
+    fn draw_empty_affordance(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        frame_rate: FrameRate,
+    ) {
+        use crate::panels::DrawerGroup;
+        use egui_phosphor::regular as ph;
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.label(
+                egui::RichText::new("Start a social cut")
+                    .strong()
+                    .size(18.0),
+            );
+            ui.add_space(4.0);
+            ui.weak("Import a clip, cut it, caption it, export Social 9:16.");
+            ui.add_space(14.0);
+
+            // Primary CTA — Import media (opens OS picker + seeds project).
+            let import = ui.add(
+                egui::Button::new(format!("{}  Import media", ph::UPLOAD_SIMPLE))
+                    .min_size(egui::vec2(180.0, 32.0)),
+            );
+            if import
+                .on_hover_text("Pick video/audio files — they land in the media pool")
+                .clicked()
+            {
+                self.open_drawer = Some(DrawerGroup::MediaPool);
+                self.prefs.open_drawer = Some(DrawerGroup::MediaPool);
+                // Inline import (blocking rfd) — same path as Media panel.
+                self.import_media_files(doc, history, None);
             }
-            if ui.button("Add audio track").clicked() {
-                if let Some(seq) = ops_bridge::ensure_project_and_sequence(doc, history, frame_rate)
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let avail = ui.available_width();
+                ui.add_space((avail - 340.0).max(0.0) * 0.5);
+                if ui
+                    .button("Add video track")
+                    .on_hover_text("Create an empty video track")
+                    .clicked()
                 {
-                    ops_bridge::add_track(doc, history, seq, TrackKind::Audio);
+                    if let Some(seq) =
+                        ops_bridge::ensure_project_and_sequence(doc, history, frame_rate)
+                    {
+                        ops_bridge::add_track(doc, history, seq, TrackKind::Video);
+                    }
                 }
-            }
+                if ui.button("Add audio track").clicked() {
+                    if let Some(seq) =
+                        ops_bridge::ensure_project_and_sequence(doc, history, frame_rate)
+                    {
+                        ops_bridge::add_track(doc, history, seq, TrackKind::Audio);
+                    }
+                }
+            });
+
+            // One-click social aspect seeds (creates project + format).
+            ui.add_space(12.0);
+            ui.weak("Quick format");
+            ui.horizontal(|ui| {
+                let avail = ui.available_width();
+                ui.add_space((avail - 280.0).max(0.0) * 0.5);
+                for &(label, name, w, h) in &[
+                    ("Social 9:16", "9:16", 1080u32, 1920u32),
+                    ("Social 16:9", "16:9", 1920, 1080),
+                    ("1:1", "1:1", 1080, 1080),
+                ] {
+                    if ui
+                        .selectable_label(false, label)
+                        .on_hover_text(format!("Start a {w}×{h} sequence"))
+                        .clicked()
+                    {
+                        if let Some(seq) =
+                            ops_bridge::ensure_project_and_sequence(doc, history, frame_rate)
+                        {
+                            ops_bridge::add_track(doc, history, seq, TrackKind::Video);
+                            ops_bridge::switch_to_aspect(history, doc, seq, name, w, h);
+                        }
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+            ui.weak("Tip: drop files on the window · M marker · B bookmark · S split · ? shortcuts");
         });
-    });
-}
+    }
 
-fn draw_mini_toolbar(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    doc: &Document,
-    seq_id: SequenceId,
-    view: &mut TimelineView,
-    snap: &mut bool,
-) {
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
-    let bh = 20.0;
-    let mut x = rect.left() + 4.0;
-    let y = rect.top() + (rect.height() - bh) * 0.5;
+    /// Timeline mini-toolbar (zoom/snap + AS-1 Captions / Export discoverability).
+    fn draw_mini_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        doc: &Document,
+        seq_id: SequenceId,
+        view: &mut TimelineView,
+        snap: &mut bool,
+    ) {
+        use crate::panels::DrawerGroup;
+        use egui_phosphor::regular as ph;
 
-    let fit = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-    if put_fixed(ui, fit, egui::Button::new("⤢").small())
-        .on_hover_text("Zoom to fit (Shift+Z)")
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
+        let bh = 20.0;
+        let mut x = rect.left() + 4.0;
+        let y = rect.top() + (rect.height() - bh) * 0.5;
+
+        let fit = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
+        if put_fixed(ui, fit, egui::Button::new("⤢").small())
+            .on_hover_text("Zoom to fit (Shift+Z)")
+            .clicked()
+        {
+            let extent = doc
+                .timeline
+                .as_ref()
+                .and_then(|p| p.sequences.get(&seq_id))
+                .map(|s| s.content_end())
+                .unwrap_or(Tick::ZERO);
+            view.fit(extent, view.last_lane_width_px.max(1.0));
+        }
+        x += bh + 4.0;
+
+        let zi = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
+        if put_fixed(ui, zi, egui::Button::new("+").small())
+            .on_hover_text("Zoom in (+)")
+            .clicked()
+        {
+            view.zoom_around(ZOOM_STEP, view.scroll_ticks, 0.0);
+        }
+        x += bh + 2.0;
+        let zo = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
+        if put_fixed(ui, zo, egui::Button::new("−").small())
+            .on_hover_text("Zoom out (−)")
+            .clicked()
+        {
+            view.zoom_around(1.0 / ZOOM_STEP, view.scroll_ticks, 0.0);
+        }
+        x += bh + 8.0;
+
+        let snap_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 24.0, bh));
+        if put_fixed(ui, snap_rect, egui::SelectableLabel::new(*snap, "Snap"))
+            .on_hover_text("Toggle snapping (N)")
+            .clicked()
+        {
+            *snap = !*snap;
+        }
+        x += bh + 28.0;
+
+        let fix_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 36.0, bh));
+        if put_fixed(
+            ui,
+            fix_rect,
+            egui::SelectableLabel::new(view.fixed_playhead, "Fixed"),
+        )
+        .on_hover_text("Fixed playhead: centre playhead during playback (K-A10)")
         .clicked()
-    {
-        let extent = doc
-            .timeline
-            .as_ref()
-            .and_then(|p| p.sequences.get(&seq_id))
-            .map(|s| s.content_end())
-            .unwrap_or(Tick::ZERO);
-        view.fit(extent, view.last_lane_width_px.max(1.0));
-    }
-    x += bh + 4.0;
+        {
+            view.fixed_playhead = !view.fixed_playhead;
+        }
+        x += bh + 40.0;
 
-    let zi = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-    if put_fixed(ui, zi, egui::Button::new("+").small())
-        .on_hover_text("Zoom in (+)")
+        let shift = ui.input(|i| i.modifiers.shift);
+        let rip = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(56.0, bh));
+        put_fixed(
+            ui,
+            rip,
+            egui::Label::new(egui::RichText::new("Ripple").small().color(if shift {
+                ui.visuals().selection.stroke.color
+            } else {
+                ui.visuals().weak_text_color()
+            })),
+        )
+        .on_hover_text("Hold Shift while trimming to ripple");
+        x += 60.0;
+
+        // Proposal 213: Captions + Export on the timeline strip (AS-1 steps 3/8).
+        let cap = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(78.0, bh));
+        if put_fixed(
+            ui,
+            cap,
+            egui::Button::new(format!("{} Captions", ph::CLOSED_CAPTIONING)).small(),
+        )
+        .on_hover_text("Open captions panel — auto-caption and styles (AS-1)")
         .clicked()
-    {
-        view.zoom_around(ZOOM_STEP, view.scroll_ticks, 0.0);
-    }
-    x += bh + 2.0;
-    let zo = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-    if put_fixed(ui, zo, egui::Button::new("−").small())
-        .on_hover_text("Zoom out (−)")
+        {
+            self.open_drawer = Some(DrawerGroup::Captions);
+            self.prefs.open_drawer = Some(DrawerGroup::Captions);
+        }
+        x += 82.0;
+
+        let exp = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(70.0, bh));
+        if put_fixed(
+            ui,
+            exp,
+            egui::Button::new(format!("{} Export", ph::EXPORT)).small(),
+        )
+        .on_hover_text("Export — Social 9:16 / 16:9 presets (AS-1)")
         .clicked()
-    {
-        view.zoom_around(1.0 / ZOOM_STEP, view.scroll_ticks, 0.0);
+        {
+            self.export_dialog_open = true;
+            if !self.prefs.video_coach_dismissed && self.prefs.video_coach_step >= 2 {
+                self.prefs.video_coach_dismissed = true;
+                self.prefs.save();
+            }
+        }
     }
-    x += bh + 8.0;
-
-    let snap_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 24.0, bh));
-    if put_fixed(ui, snap_rect, egui::SelectableLabel::new(*snap, "Snap"))
-        .on_hover_text("Toggle snapping (N)")
-        .clicked()
-    {
-        *snap = !*snap;
-    }
-    x += bh + 28.0;
-
-    // K-A10 fixed playhead — keep playhead centred while transporting.
-    let fix_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 36.0, bh));
-    if put_fixed(
-        ui,
-        fix_rect,
-        egui::SelectableLabel::new(view.fixed_playhead, "Fixed"),
-    )
-    .on_hover_text("Fixed playhead: centre playhead during playback (K-A10)")
-    .clicked()
-    {
-        view.fixed_playhead = !view.fixed_playhead;
-    }
-    x += bh + 40.0;
-
-    // Ripple-mode indicator: reflects whether Shift is held live (13 §1.1).
-    let shift = ui.input(|i| i.modifiers.shift);
-    let rip = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(56.0, bh));
-    put_fixed(
-        ui,
-        rip,
-        egui::Label::new(egui::RichText::new("Ripple").small().color(if shift {
-            ui.visuals().selection.stroke.color
-        } else {
-            ui.visuals().weak_text_color()
-        })),
-    )
-    .on_hover_text("Hold Shift while trimming to ripple");
 }
 
 fn handle_scroll_zoom(ui: &egui::Ui, full: egui::Rect, lane_left: f32, view: &mut TimelineView) {

@@ -110,6 +110,75 @@ fn raw_style_override(track: &CaptionTrack, target: &StyleTarget) -> Option<Capt
     }
 }
 
+/// Whole-style looks for social velocity (proposal 213). Distinct from karaoke
+/// *mode* chips — these rewrite font/background/highlight for Clean / Karaoke /
+/// Social delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptionLook {
+    /// White text, light black stroke, no box — broadcast-clean.
+    Clean,
+    /// Karaoke word-pop with yellow active highlight.
+    Karaoke,
+    /// Large bold + semi-opaque pill background — CapCut/TikTok social default.
+    Social,
+}
+
+const CAPTION_LOOKS: &[(CaptionLook, &str)] = &[
+    (CaptionLook::Clean, "Clean"),
+    (CaptionLook::Karaoke, "Karaoke"),
+    (CaptionLook::Social, "Social"),
+];
+
+/// Build a full [`CaptionStyle`] for a look preset (pure — unit-tested).
+fn caption_look_style(look: CaptionLook) -> CaptionStyle {
+    match look {
+        CaptionLook::Clean => CaptionStyle {
+            font_family: "sans-serif".into(),
+            font_size: 42.0,
+            weight: 600,
+            fill: Color::new(1.0, 1.0, 1.0, 1.0),
+            stroke: Some((Color::new(0.0, 0.0, 0.0, 0.85), 1.5)),
+            background: None,
+            highlight: None,
+            position: [0.5, 0.88],
+            max_width: 0.85,
+            animation: CaptionAnim::None,
+        },
+        CaptionLook::Karaoke => CaptionStyle {
+            font_family: "sans-serif".into(),
+            font_size: 52.0,
+            weight: 700,
+            fill: Color::new(1.0, 1.0, 1.0, 1.0),
+            stroke: Some((Color::new(0.0, 0.0, 0.0, 1.0), 2.5)),
+            background: None,
+            highlight: Some(KaraokeStyle {
+                mode: KaraokeMode::WordPop,
+                active_color: Color::new(1.0, 0.85, 0.15, 1.0),
+                inactive_color: Color::new(0.92, 0.92, 0.92, 1.0),
+            }),
+            position: [0.5, 0.82],
+            max_width: 0.9,
+            animation: CaptionAnim::FadeWords,
+        },
+        CaptionLook::Social => CaptionStyle {
+            font_family: "sans-serif".into(),
+            font_size: 56.0,
+            weight: 800,
+            fill: Color::new(1.0, 1.0, 1.0, 1.0),
+            stroke: None,
+            background: Some(CaptionBackground {
+                color: Color::new(0.0, 0.0, 0.0, 0.55),
+                corner_radius: 10.0,
+                padding: 10.0,
+            }),
+            highlight: None,
+            position: [0.5, 0.78],
+            max_width: 0.88,
+            animation: CaptionAnim::SlideUp,
+        },
+    }
+}
+
 /// A karaoke highlight preset — sensible active/inactive colors seeded from
 /// the style's current fill so the inactive-word color still matches the
 /// surrounding caption text (06 §3.7 karaoke presets).
@@ -222,10 +291,14 @@ pub(crate) fn draw_caption_editor(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         draw_cue_list(ui, ctx, track_id, track);
     }
 
+    // Proposal 213: look chips always visible (AS-1 doesn't require opening Style).
     ui.add_space(6.0);
+    draw_caption_look_chips(ui, ctx, track_id, track);
+
+    ui.add_space(4.0);
     egui::CollapsingHeader::new("Style")
         .id_salt("caption_style_section")
-        .default_open(false)
+        .default_open(true)
         .open(ctx.forced_open)
         .show(ui, |ui| {
             draw_style_editor(ui, ctx, track_id, track);
@@ -601,6 +674,39 @@ fn next_cue(track: &CaptionTrack, cue: CueId) -> Option<&CaptionCue> {
     track.cues.get(idx + 1)
 }
 
+// ── Look chips (proposal 213) ───────────────────────────────────────────────
+
+/// Apply a whole-style look to the **track** (one undo step via SetStyle).
+fn draw_caption_look_chips(
+    ui: &mut Ui,
+    ctx: &mut PropPanelCtx,
+    track_id: TrackId,
+    track: &CaptionTrack,
+) {
+    ui.label(RichText::new("Looks").small().weak());
+    ui.horizontal_wrapped(|ui| {
+        for &(look, label) in CAPTION_LOOKS {
+            let style = caption_look_style(look);
+            let active = track.style == style;
+            let resp = ui.selectable_label(active, label).on_hover_text(match look {
+                CaptionLook::Clean => "White text, light stroke — clean social / broadcast",
+                CaptionLook::Karaoke => "Word-pop karaoke highlight with yellow active word",
+                CaptionLook::Social => "Bold pill background — CapCut/TikTok-style social",
+            });
+            if resp.clicked() {
+                let old = Some(track.style.clone());
+                let cmd = TimelineCmd::CaptionEdit(CaptionCmd::SetStyle {
+                    track: track_id,
+                    target: StyleTarget::Track,
+                    old: old.map(Box::new),
+                    new: Some(Box::new(style)),
+                });
+                ctx.action = Some(PanelAction::CaptionEditBatch(vec![cmd]));
+            }
+        }
+    });
+}
+
 // ── Style editor (track → cue → word cascade, 06 §4) ────────────────────────
 
 fn draw_style_editor(ui: &mut Ui, ctx: &mut PropPanelCtx, track_id: TrackId, track: &CaptionTrack) {
@@ -805,9 +911,24 @@ fn draw_style_editor(ui: &mut Ui, ctx: &mut PropPanelCtx, track_id: TrackId, tra
             ui.end_row();
         });
 
-    // ── Karaoke presets (quick-apply onto the draft) ─────────────────────────
+    // ── Look chips (also in draft for cue/word scope) ───────────────────────
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Looks:").weak());
+        for &(look, label) in CAPTION_LOOKS {
+            let style = caption_look_style(look);
+            if ui
+                .selectable_label(draft == style, label)
+                .on_hover_text("Apply full style look to this draft (Apply to commit)")
+                .clicked()
+            {
+                draft = style;
+            }
+        }
+    });
+
+    // ── Karaoke mode chips (highlight only) ─────────────────────────────────
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Presets:").weak());
+        ui.label(RichText::new("Karaoke mode:").weak());
         for (label, mode) in [
             ("Fill sweep", KaraokeMode::FillSweep),
             ("Word pop", KaraokeMode::WordPop),
@@ -1222,6 +1343,25 @@ mod tests {
 
     fn word(text: &str, s: i64, e: i64) -> CaptionWord {
         CaptionWord::new(text, Tick(s), Tick(e))
+    }
+
+    #[test]
+    fn caption_looks_are_distinct_and_stable() {
+        let clean = caption_look_style(CaptionLook::Clean);
+        let karaoke = caption_look_style(CaptionLook::Karaoke);
+        let social = caption_look_style(CaptionLook::Social);
+        assert_ne!(clean, karaoke);
+        assert_ne!(karaoke, social);
+        assert_ne!(clean, social);
+        // Karaoke has highlight; Social has background; Clean has neither box nor karaoke.
+        assert!(karaoke.highlight.is_some());
+        assert!(social.background.is_some());
+        assert!(clean.highlight.is_none());
+        assert!(clean.background.is_none());
+        // Idempotent builders (chips compare for active state).
+        assert_eq!(clean, caption_look_style(CaptionLook::Clean));
+        assert_eq!(karaoke, caption_look_style(CaptionLook::Karaoke));
+        assert_eq!(social, caption_look_style(CaptionLook::Social));
     }
 
     #[test]

@@ -512,6 +512,7 @@ impl PhotonicApp {
     /// First-entry hints (04 §1.2): the one-time shortcut overlay auto-opens
     /// the very first time a session enters video mode; `?` re-opens it any
     /// time after regardless of this having already fired once.
+    /// Proposal 213: coach marks start on first entry unless already dismissed.
     fn maybe_show_first_entry_hints(&mut self) {
         if !self.prefs.video_shortcuts_intro_shown {
             self.show_video_shortcut_sheet = true;
@@ -1257,22 +1258,33 @@ impl PhotonicApp {
                     egui::Rect::from_center_size(video_rect.center(), egui::vec2(28.0, 28.0));
                 ui.put(spinner_rect, egui::Spinner::new().size(26.0));
             } else if !drew_frame && !sequence_has_clips(doc) {
-                // Fresh/empty project — invite the first action instead of a
-                // blank monitor (first-impression affordance).
+                // Proposal 213: CapCut-class empty monitor — primary Import CTA.
                 painter.text(
-                    video_rect.center() + egui::vec2(0.0, -9.0),
+                    video_rect.center() + egui::vec2(0.0, -18.0),
                     egui::Align2::CENTER_CENTER,
                     format!("{}  Import media to begin", ph::FILM_STRIP),
                     egui::FontId::proportional(16.0),
                     egui::Color32::from_gray(150),
                 );
                 painter.text(
-                    video_rect.center() + egui::vec2(0.0, 15.0),
+                    video_rect.center() + egui::vec2(0.0, 6.0),
                     egui::Align2::CENTER_CENTER,
-                    "Use the Media panel or drop files, then drag clips onto the timeline below",
+                    "Drop files here · Media panel · or timeline Import button",
                     egui::FontId::proportional(12.0),
                     egui::Color32::from_gray(110),
                 );
+                let btn = egui::Rect::from_center_size(
+                    video_rect.center() + egui::vec2(0.0, 40.0),
+                    egui::vec2(148.0, 28.0),
+                );
+                if ui
+                    .put(btn, egui::Button::new(format!("{} Import…", ph::UPLOAD_SIMPLE)))
+                    .clicked()
+                {
+                    self.open_drawer = Some(crate::panels::DrawerGroup::MediaPool);
+                    self.prefs.open_drawer = Some(crate::panels::DrawerGroup::MediaPool);
+                    self.import_media_files(doc, history, None);
+                }
             }
             if let Some(err) = &status.last_error {
                 // 36: Diagnostic → badge mapping (code + severity colour).
@@ -1292,6 +1304,7 @@ impl PhotonicApp {
         self.draw_transport_bar(ui, transport_rect, doc, history);
         self.draw_format_bar(ui, format_rect, doc, history);
         self.draw_video_shortcut_sheet(ctx);
+        self.draw_video_coach_marks(ctx, doc);
     }
 
     /// Aspect/frame bar above the monitor (CAP-012): one-click preset chips to
@@ -1328,8 +1341,15 @@ impl PhotonicApp {
                 let mut clicked: Option<(&str, u32, u32)> = None;
                 for &(name, w, h) in super::timeline::ops_bridge::ASPECT_PRESETS {
                     let active = w == cur_w && h == cur_h;
+                    // Proposal 213: social-friendly labels for common deliverables.
+                    let label = match name {
+                        "9:16" => "Social 9:16",
+                        "16:9" => "Social 16:9",
+                        "1:1" => "1:1",
+                        other => other,
+                    };
                     if ui
-                        .selectable_label(active, name)
+                        .selectable_label(active, label)
                         .on_hover_text(format!("Switch sequence to {name} ({w}×{h})"))
                         .clicked()
                     {
@@ -1758,6 +1778,7 @@ impl PhotonicApp {
             "video.cut",
             "video.paste",
             "video.add_marker",
+            "video.add_bookmark",
             "video.insert_edit",
             "video.overwrite_edit",
             "video.lift_edit",
@@ -1908,9 +1929,88 @@ fn draw_safe_area_guides(painter: &egui::Painter, video_rect: egui::Rect) {
     );
 }
 
-// ── First-run hints (04 §1.2) ────────────────────────────────────────────────
+// ── First-run hints (04 §1.2) + social coach (proposal 213) ──────────────────
 
 impl PhotonicApp {
+    /// Three-step coach: Import → Split → Export (proposal 213 §4).
+    /// Dismissible; reset from Preferences → Behavior.
+    pub(crate) fn draw_video_coach_marks(&mut self, ctx: &egui::Context, doc: &Document) {
+        if self.prefs.video_coach_dismissed || self.mode != AppMode::Video {
+            return;
+        }
+        // Reduced motion: still show the card (static), just no tween elsewhere.
+        let step = self.prefs.video_coach_step.min(2);
+        let (title, body, next_label) = match step {
+            0 => (
+                "1 · Import",
+                "Import a clip (timeline Import, Media panel, or drop files). \
+                 Auto-place is on by default so it lands on the timeline.",
+                "Next",
+            ),
+            1 => (
+                "2 · Split & trim",
+                "Select a clip, press S to split at the playhead, or use Del / Shift+Del \
+                 to delete or ripple-delete. Drag edges to trim.",
+                "Next",
+            ),
+            _ => (
+                "3 · Export",
+                "Click Export on the timeline toolbar. Pick Social 9:16 or Social 16:9 \
+                 for a one-click social deliverable.",
+                "Done",
+            ),
+        };
+        let has_clips = sequence_has_clips(doc);
+        // Auto-advance Import → Split once media exists.
+        if step == 0 && has_clips {
+            self.prefs.video_coach_step = 1;
+            self.prefs.save();
+        }
+
+        egui::Area::new(egui::Id::new("video_coach_marks"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(12.0))
+                    .show(ui, |ui| {
+                        ui.set_max_width(280.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Social cut").strong().small());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{}/3", step + 1))
+                                            .weak()
+                                            .small(),
+                                    );
+                                },
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(title).strong());
+                        ui.label(body);
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(next_label).clicked() {
+                                if step >= 2 {
+                                    self.prefs.video_coach_dismissed = true;
+                                    self.prefs.save();
+                                } else {
+                                    self.prefs.video_coach_step = step + 1;
+                                    self.prefs.save();
+                                }
+                            }
+                            if ui.small_button("Skip").clicked() {
+                                self.prefs.video_coach_dismissed = true;
+                                self.prefs.save();
+                            }
+                        });
+                    });
+            });
+    }
+
     /// One-time toolbar callout pointing at the Video toggle, anchored below
     /// its rect. Persisted-dismissed via `prefs.video_hint_dismissed`.
     pub(crate) fn draw_video_hint_callout(&mut self, ctx: &egui::Context, anchor: egui::Rect) {
@@ -1967,7 +2067,9 @@ impl PhotonicApp {
                             ("Del / Backspace", "Delete selected clip (Shift = ripple)"),
                             ("Ctrl+C / X / V", "Copy / cut / paste clip"),
                             ("M", "Add marker at playhead"),
+                            ("B", "Add bookmark at playhead"),
                             ("N", "Toggle snapping"),
+                            ("C", "Razor (blade) tool"),
                             ("?", "Show this sheet again"),
                         ];
                         for (key, desc) in ROWS {

@@ -692,6 +692,93 @@ fn ui_as2_short_film_structural_arm() {
 // and places a partial-alpha clip for alpha export readiness — the same ops
 // the GUI keyframe editor and media pool use.
 
+/// Proposal 213 A2: structural AS-1 path — empty project → import asset →
+/// auto-place on timeline → split at playhead → Social export preset resolves.
+#[test]
+fn ui_as1_social_path_structural_arm() {
+    use photonic_gui::app::timeline::ops_bridge;
+    use photonic_video::export::presets;
+
+    let mut doc = Document::new("as1", 1920.0, 1080.0);
+    let mut history = CommandHistory::new(64);
+
+    // Ensure project + sequence like empty-state Import CTA.
+    let seq_id =
+        ops_bridge::ensure_project_and_sequence(&mut doc, &mut history, FrameRate::FPS_30)
+            .expect("project+sequence");
+    ops_bridge::add_track(&mut doc, &mut history, seq_id, TrackKind::Video);
+
+    // Social 9:16 format (same as empty-state quick chip / format bar).
+    ops_bridge::switch_to_aspect(&mut history, &mut doc, seq_id, "9:16", 1080, 1920);
+    {
+        let seq = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap();
+        let f = seq.format();
+        assert_eq!((f.width, f.height), (1080, 1920), "Social 9:16 active");
+    }
+
+    // Social presets always required (export dialog default catalog).
+    let names: Vec<_> = presets::built_in_presets()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "Social 9:16"));
+    assert!(names.iter().any(|n| n == "Social 16:9"));
+
+    // Import fixture and place via first-fit insert (auto-place path).
+    if !counter_mp4().is_file() {
+        eprintln!("skip AS-1 place/split: no counter.mp4 fixture");
+        return;
+    }
+    let asset = MediaAsset::from_file(AssetKind::Video, &counter_mp4());
+    let asset_id = asset.id;
+    history.execute_discrete(Command::Timeline(ops::add_asset(asset)), &mut doc);
+
+    assert!(
+        ops_bridge::insert_asset_at_first_fit(&mut doc, &mut history, asset_id, Tick::ZERO),
+        "auto-place import on timeline"
+    );
+
+    // Split mid-clip (AS-1 cut step).
+    let (track_id, clip_id, mid) = {
+        let seq = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap();
+        let t = &seq.video_tracks[0];
+        let c = &t.clips[0];
+        let mid = c.start + Tick(c.duration.0 / 2);
+        (t.id, c.id, mid)
+    };
+    assert!(ops_bridge::split(
+        &mut doc,
+        &mut history,
+        seq_id,
+        track_id,
+        clip_id,
+        mid
+    ));
+    let n_clips = doc
+        .timeline
+        .as_ref()
+        .unwrap()
+        .sequences
+        .get(&seq_id)
+        .unwrap()
+        .video_tracks[0]
+        .clips
+        .len();
+    assert!(n_clips >= 2, "split should yield ≥2 clips, got {n_clips}");
+}
+
 #[test]
 fn ui_as3_motion_graphics_structural_arm() {
     use photonic_core::timeline::{AnimTarget, Clip, Interp, Keyframe, PropPath, PropValue};

@@ -785,6 +785,7 @@ pub fn slide(
 }
 
 /// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+/// Split a clip at `at`. Returns `true` when a command was committed.
 pub fn split(
     doc: &mut Document,
     history: &mut CommandHistory,
@@ -792,12 +793,15 @@ pub fn split(
     track: TrackId,
     clip: photonic_core::timeline::ClipId,
     at: Tick,
-) {
+) -> bool {
     let Some(p) = doc.timeline.as_ref() else {
-        return;
+        return false;
     };
     if let Ok(cmd) = ops::split_clip(p, seq, track, clip, at) {
         commit(history, doc, cmd);
+        true
+    } else {
+        false
     }
 }
 
@@ -990,8 +994,8 @@ pub(crate) fn insert_asset_clip(
 }
 
 /// Insert `asset` at the playhead on the first compatible track that accepts
-/// it (double-click / context-menu path).
-pub(crate) fn insert_asset_at_first_fit(
+/// it (double-click / context-menu path / proposal 213 auto-place).
+pub fn insert_asset_at_first_fit(
     doc: &mut Document,
     history: &mut CommandHistory,
     asset_id: AssetId,

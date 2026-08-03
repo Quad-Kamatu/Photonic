@@ -112,6 +112,12 @@ D-01…D-12 in [SPEC.md](SPEC.md#decisions) — including **D-09** (working colo
 
 | 42-localization.md | Localization scope, Fluent string externalization, technical-vs-human formats, script-aware caption budgets, font fallback | 01, 06, 10, 13, 36, 37 |
 
+**External research harvests** (proposal-only until Accepted; not part of the 00–42 numbering):
+
+| Proposal | Contents |
+|---|---|
+| [207 OpenCut harvest index](../../proposals/207-opencut-harvest-index.md) | CapCut-class ideas from OpenCut (classic + rewrite survey): clean-room fence, inventory, delivery order → child proposals 208–214 |
+
 **Numbering note.** The former `14-qa-spec.md` collided with `14-nle-parity.md`; it was renumbered to **`29-qa-spec.md`** on 2026-07-20 and its two inbound code references (`photonic-core/Cargo.toml`, `history/revision_contract.rs`) were updated with it. Numbers 28–39 are now in use; see the map above before allocating a new one.
 
 ## 6. Phases

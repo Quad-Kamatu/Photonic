@@ -874,7 +874,7 @@ pub async fn add_marker_category(state: &AppState, args: AddMarkerCategoryArgs) 
     }
 }
 
-/// Seed the five default categories as ONE undo unit. Idempotent: a project
+/// Seed the default marker categories as ONE undo unit. Idempotent: a project
 /// that already has categories is left alone.
 pub async fn seed_marker_categories(
     state: &AppState,

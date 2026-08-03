@@ -149,6 +149,76 @@ pub struct AppPreferences {
     // the Keyboard Shortcuts settings page populate this and persist to disk.
     #[serde(default)]
     pub keymap: HashMap<String, KeyBinding>,
+    /// Schema version for [`Self::keymap`] migrations (proposal 212). Missing
+    /// field deserializes as 0 and is advanced through [`migrate_keymap`] on load.
+    #[serde(default)]
+    pub keymap_schema_version: u32,
+
+    /// First-run social/video coach marks dismissed (proposal 213).
+    #[serde(default)]
+    pub video_coach_dismissed: bool,
+    /// Current coach-mark step 0..2 while coaching is active (proposal 213).
+    /// Ignored when [`Self::video_coach_dismissed`] is true.
+    #[serde(default)]
+    pub video_coach_step: u8,
+    /// After media import, also place the asset on the first video/audio track
+    /// at the playhead (proposal 213 AS-1 step 1). Default **true** for social
+    /// velocity; power users can turn it off in Preferences → Behavior.
+    #[serde(default = "default_true")]
+    pub auto_place_import_on_timeline: bool,
+}
+
+/// Current keymap schema version. Bump in the same PR that ships a default
+/// binding change that must reach existing installs (proposal 212).
+pub const KEYMAP_SCHEMA_CURRENT: u32 = 1;
+
+/// Apply ordered keymap migrations up to [`KEYMAP_SCHEMA_CURRENT`].
+///
+/// Migrations **never** overwrite a binding the user customized (value differs
+/// from the pre-migration registry default). New command ids need no migration
+/// (absence ⇒ follow registry default).
+pub fn migrate_keymap(prefs: &mut AppPreferences) {
+    while prefs.keymap_schema_version < KEYMAP_SCHEMA_CURRENT {
+        match prefs.keymap_schema_version {
+            0 => {
+                // v0 → v1: ensure `video.add_bookmark` is available. New ids
+                // resolve via registry when absent — nothing to write. Reserved
+                // for documenting the first schema bump (proposal 210/212).
+                prefs.keymap_schema_version = 1;
+            }
+            v => {
+                // Unknown future version: clamp forward so we don't loop.
+                prefs.keymap_schema_version = KEYMAP_SCHEMA_CURRENT.max(v);
+            }
+        }
+    }
+}
+
+/// Insert `id → new_default` only when the user has not customized `id`.
+#[allow(dead_code)] // used by future migrations; v0→v1 is a no-op insert.
+fn migrate_set_default_if_uncustomized(
+    prefs: &mut AppPreferences,
+    id: &str,
+    old_default: Option<KeyBinding>,
+    new_default: Option<KeyBinding>,
+) {
+    let current = prefs.keymap.get(id).copied();
+    let customized = match (current, old_default) {
+        (Some(b), Some(old)) => b != old,
+        (Some(_), None) => true, // user set a binding where there was none
+        (None, _) => false,
+    };
+    if customized {
+        return;
+    }
+    match new_default {
+        Some(b) => {
+            prefs.keymap.insert(id.to_string(), b);
+        }
+        None => {
+            prefs.keymap.remove(id);
+        }
+    }
 }
 
 fn default_nudge_distance() -> f64 {
@@ -251,6 +321,10 @@ impl Default for AppPreferences {
             hotbar_mode: HotbarMode::default(),
             hotbar_usage: HashMap::new(),
             keymap: HashMap::new(),
+            keymap_schema_version: KEYMAP_SCHEMA_CURRENT,
+            video_coach_dismissed: false,
+            video_coach_step: 0,
+            auto_place_import_on_timeline: true,
         }
     }
 }
@@ -343,6 +417,7 @@ impl AppPreferences {
         if prefs.open_right_drawer == Some(RightDrawerGroup::Unknown) {
             prefs.open_right_drawer = default_open_right_drawer();
         }
+        migrate_keymap(&mut prefs);
         prefs
     }
 
@@ -371,6 +446,32 @@ mod tests {
     fn autosave_default_is_two_minutes() {
         assert_eq!(AppPreferences::default().autosave_interval_secs, 120.0);
         assert_eq!(default_autosave_interval_secs(), 120.0);
+    }
+
+    #[test]
+    fn keymap_migration_advances_schema_to_current() {
+        let mut prefs = AppPreferences::default();
+        prefs.keymap_schema_version = 0;
+        migrate_keymap(&mut prefs);
+        assert_eq!(prefs.keymap_schema_version, KEYMAP_SCHEMA_CURRENT);
+    }
+
+    #[test]
+    fn keymap_migration_does_not_clobber_custom_binding() {
+        let mut prefs = AppPreferences::default();
+        prefs.keymap_schema_version = 0;
+        let custom = KeyBinding::plain(egui::Key::X);
+        prefs.keymap.insert("video.add_bookmark".into(), custom);
+        migrate_keymap(&mut prefs);
+        assert_eq!(prefs.keymap.get("video.add_bookmark"), Some(&custom));
+    }
+
+    #[test]
+    fn social_as1_defaults_favour_velocity() {
+        let p = AppPreferences::default();
+        assert!(p.auto_place_import_on_timeline);
+        assert!(!p.video_coach_dismissed);
+        assert_eq!(p.video_coach_step, 0);
     }
 
     /// T15 (205 §4.5 / 206 §3.3): a `preferences.json` naming a drawer group

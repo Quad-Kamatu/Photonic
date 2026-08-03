@@ -2506,8 +2506,22 @@ impl PhotonicApp {
                     history,
                     photonic_core::timeline::FrameRate::FPS_30,
                 );
+                let auto_place = self.prefs.auto_place_import_on_timeline;
+                let at = self.playhead;
                 for asset in stubs {
+                    let id = asset.id;
                     history.execute_discrete(Command::Timeline(ops::add_asset(asset)), doc);
+                    // Proposal 213: CapCut-class default — land on the timeline.
+                    if auto_place {
+                        timeline::ops_bridge::insert_asset_at_first_fit(doc, history, id, at);
+                    }
+                }
+                if auto_place
+                    && !self.prefs.video_coach_dismissed
+                    && self.prefs.video_coach_step == 0
+                {
+                    self.prefs.video_coach_step = 1;
+                    self.prefs.save();
                 }
                 doc_modified = true;
             }

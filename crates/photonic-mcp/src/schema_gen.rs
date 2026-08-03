@@ -5140,7 +5140,7 @@ pub fn tool_list() -> Value {
             },
             {
                 "name": "seed_marker_categories",
-                "description": "Seed the five default marker categories (Marker/Cut/Note/Todo/Chapter) as ONE undo step. No-op if the project already has categories.",
+                "description": "Seed the default marker categories (Marker/Cut/Note/Todo/Chapter/Bookmarks) as ONE undo step. No-op if the project already has categories.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {

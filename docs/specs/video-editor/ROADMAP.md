@@ -126,6 +126,21 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | **K-G2** project notes | [205](../../proposals/205-k-g2-project-notes.md) | additive in v5 | none |
 | **K-G3** layout presets | [206](../../proposals/206-k-g3-layout-presets.md) | **none at all** — user preference, not a document property | none |
 
+**OpenCut harvest (CapCut-class ideas) — drafted 2026-08-03; wave-1 code 2026-08-03.** Research pass against OpenCut main (rewrite scaffold) + opencut-classic (archived web NLE). Photonic already leads on pro engine/MCP depth; the harvest is **selective algorithms + UX velocity**, not a port. Clean-room fence and non-goals live in the index.
+
+| Item | Proposal | Status | Notes |
+|---|---|---|---|
+| Index + fence | [207](../../proposals/207-opencut-harvest-index.md) | ✅ | Provenance, delivery order, explicit non-goals |
+| SDF / JFA mask feather | [208](../../proposals/208-sdf-jfa-mask-feather.md) | 🟡 partial | CPU `ops::feather_coverage` (JFA + smoothstep); IR/GPU wiring + `util.outline` residual |
+| Large-radius blur quality | [209](../../proposals/209-large-radius-blur-quality.md) | ✅ | `blur_plan` multi-iter (+ step on CPU); GPU multi-iter; tests green |
+| Timeline velocity pack | [210](../../proposals/210-timeline-interaction-velocity-pack.md) | 🟡 partial | Bookmarks category + `video.add_bookmark` (B); on-clip gain envelope paint; drag polish residual |
+| Keyframe graph editor | [211](../../proposals/211-keyframe-graph-editor.md) | ✅ (pre-existing) | Bezier graph editor already shipped; extended with clip-audio gain row |
+| Keymap schema migrations | [212](../../proposals/212-keymap-schema-migrations.md) | ✅ | `keymap_schema_version` + `migrate_keymap` on prefs load |
+| Social-first AS-1 velocity | [213](../../proposals/213-social-first-editing-velocity.md) | ✅ | Empty Import hero, coach marks, auto-place import, toolbar Captions/Export, Social format labels, AS-1 structural test |
+| Declarative frame job | [214](../../proposals/214-declarative-compositor-job-boundary.md) | deferred | IR already is the job |
+
+Wave-1 land order executed: **209 → 212 → 210 → 208 → 211 → 213**.
+
 ### Findings from the mini-spec rounds
 
 Drafting against real code surfaced defects and doc-vs-code contradictions. Recorded here so they are not lost in the proposals:

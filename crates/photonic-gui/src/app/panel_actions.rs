@@ -36,39 +36,8 @@ impl PhotonicApp {
                 }
                 // ── Media pool (video mode, 05 §2) ───────────────────────────
                 PanelAction::MediaImportDialog { bin } => {
-                    // Blocking OS picker — same precedent as the existing rfd
-                    // usage in `dialogs.rs`. Probing happens on a worker
-                    // thread; results land as undoable `AddAsset`s in `draw`.
-                    let files = rfd::FileDialog::new()
-                        .set_title("Import media")
-                        .add_filter(
-                            "Media",
-                            &[
-                                "mp4", "mov", "mkv", "avi", "webm", "m4v", "mts", "mxf", "mp3",
-                                "wav", "aac", "flac", "ogg", "m4a", "opus", "png", "jpg", "jpeg",
-                                "gif", "webp", "bmp", "tiff", "tif", "exr", "svg", "photon",
-                                "cube",
-                            ],
-                        )
-                        .pick_files();
-                    if let Some(paths) = files {
-                        let project_path = self.current_file.clone();
-                        let stubs = self.media_pool_ui.spawn_import(paths, bin, project_path);
-                        if !stubs.is_empty() {
-                            use photonic_core::timeline::ops;
-                            timeline::ops_bridge::ensure_project_and_sequence(
-                                doc,
-                                history,
-                                photonic_core::timeline::FrameRate::FPS_30,
-                            );
-                            for asset in stubs {
-                                history.execute_discrete(
-                                    Command::Timeline(ops::add_asset(asset)),
-                                    doc,
-                                );
-                            }
-                            doc_modified = true;
-                        }
+                    if self.import_media_files(doc, history, bin) {
+                        doc_modified = true;
                     }
                 }
                 PanelAction::MediaCreateBin { name, parent } => {
@@ -7260,5 +7229,57 @@ impl PhotonicApp {
             }
         }
         doc_modified
+    }
+
+    /// OS media picker → media pool L0 stubs → optional auto-place on timeline
+    /// (proposal 213). Shared by Media panel and the empty-timeline Import CTA.
+    /// Returns true when at least one asset was added.
+    pub(crate) fn import_media_files(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+        bin: Option<photonic_core::timeline::BinId>,
+    ) -> bool {
+        let files = rfd::FileDialog::new()
+            .set_title("Import media")
+            .add_filter(
+                "Media",
+                &[
+                    "mp4", "mov", "mkv", "avi", "webm", "m4v", "mts", "mxf", "mp3", "wav", "aac",
+                    "flac", "ogg", "m4a", "opus", "png", "jpg", "jpeg", "gif", "webp", "bmp",
+                    "tiff", "tif", "exr", "svg", "photon", "cube",
+                ],
+            )
+            .pick_files();
+        let Some(paths) = files else {
+            return false;
+        };
+        let project_path = self.current_file.clone();
+        let stubs = self.media_pool_ui.spawn_import(paths, bin, project_path);
+        if stubs.is_empty() {
+            return false;
+        }
+        use photonic_core::timeline::ops;
+        timeline::ops_bridge::ensure_project_and_sequence(
+            doc,
+            history,
+            photonic_core::timeline::FrameRate::FPS_30,
+        );
+        let auto_place = self.prefs.auto_place_import_on_timeline;
+        let at = self.playhead;
+        let mut placed_any = false;
+        for asset in stubs {
+            let id = asset.id;
+            history.execute_discrete(Command::Timeline(ops::add_asset(asset)), doc);
+            if auto_place {
+                placed_any |= timeline::ops_bridge::insert_asset_at_first_fit(doc, history, id, at);
+            }
+        }
+        if placed_any && !self.prefs.video_coach_dismissed && self.prefs.video_coach_step == 0 {
+            // Advance coach: Import done → Split.
+            self.prefs.video_coach_step = 1;
+            self.prefs.save();
+        }
+        true
     }
 }

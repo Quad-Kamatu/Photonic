@@ -483,6 +483,23 @@ pub static REGISTRY: &[CommandDef] = &[
         label: "Add Marker at Playhead",
         default: Some(KeyBinding::plain(Key::M)),
     },
+    // Proposal 210: CapCut-class bookmark = sequence marker in the Bookmarks
+    // category (not a parallel type). `B` is free in video mode (blade is `C`).
+    CommandDef {
+        id: "video.add_bookmark",
+        label: "Add Bookmark at Playhead",
+        default: Some(KeyBinding::plain(Key::B)),
+    },
+    CommandDef {
+        id: "video.prev_bookmark",
+        label: "Go to Previous Bookmark",
+        default: None,
+    },
+    CommandDef {
+        id: "video.next_bookmark",
+        label: "Go to Next Bookmark",
+        default: None,
+    },
     // K-A2 marker depth. `video.add_range_marker` is the keyboard route to a
     // RANGED marker — the unit "Export each ranged marker" (K-F2) fans out
     // over, and previously uncreatable from anywhere in the app.

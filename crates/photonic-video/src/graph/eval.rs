@@ -2990,10 +2990,10 @@ impl Passes {
         self.run(gpu, &self.blur_pipeline, &bind, target);
     }
 
-    /// `Effect{Blur}` — dual-pass separable Gaussian (H then V). `sigma < 0.5`
-    /// is a blit (matches `ops::blur` / the shader early-out). Each axis is a
-    /// separate submit; we `poll(Wait)` between them so the V pass samples a
-    /// finished H target (no cross-pass race on llvmpipe/soft adapters).
+    /// `Effect{Blur}` — multi-iteration dual-pass separable Gaussian (proposal
+    /// 209 / `ops::blur_plan`). `sigma < 0.5` is a blit (matches `ops::blur` /
+    /// the shader early-out). Each axis is a separate submit; we `poll(Wait)`
+    /// between them so the V pass samples a finished H target.
     fn gaussian_blur(
         &self,
         gpu: &GpuContext,
@@ -3003,19 +3003,57 @@ impl Passes {
         logical_w: u32,
         logical_h: u32,
     ) {
-        let sigma = if sigma.is_finite() {
-            sigma.max(0.0)
-        } else {
-            0.0
-        };
-        if sigma < 0.5 {
+        let plan = crate::graph::ops::blur_plan(sigma);
+        if plan.iterations == 0 {
             self.blit(gpu, src, target);
             return;
         }
-        let tmp = Self::temp_like(gpu, target);
-        self.blur_axis(gpu, src, &tmp, sigma, true, logical_w, logical_h);
-        gpu.device().poll(wgpu::Maintain::Wait);
-        self.blur_axis(gpu, &tmp, target, sigma, false, logical_w, logical_h);
+        // GPU path: multi-iter with unit-step kernels (shader has no step
+        // uniform). Large-σ quality comes from σ_pass = σ/√n stacking.
+        let h_tmp = Self::temp_like(gpu, target);
+        let ping = Self::temp_like(gpu, target);
+        let pong = Self::temp_like(gpu, target);
+        for i in 0..plan.iterations {
+            let is_first = i == 0;
+            let is_last = i + 1 == plan.iterations;
+            // Even iters write ping (or target on last); odd write pong (or target).
+            let from: &wgpu::Texture = if is_first {
+                src
+            } else if i % 2 == 1 {
+                &ping
+            } else {
+                &pong
+            };
+            let to: &wgpu::Texture = if is_last {
+                target
+            } else if i % 2 == 0 {
+                &ping
+            } else {
+                &pong
+            };
+            self.blur_axis(
+                gpu,
+                from,
+                &h_tmp,
+                plan.sigma_pass,
+                true,
+                logical_w,
+                logical_h,
+            );
+            gpu.device().poll(wgpu::Maintain::Wait);
+            self.blur_axis(
+                gpu,
+                &h_tmp,
+                to,
+                plan.sigma_pass,
+                false,
+                logical_w,
+                logical_h,
+            );
+            if !is_last {
+                gpu.device().poll(wgpu::Maintain::Wait);
+            }
+        }
     }
 
     /// `Effect{Sharpen}` — unsharp mask via blur intermediate + combine pass.

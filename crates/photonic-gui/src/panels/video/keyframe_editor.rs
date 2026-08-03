@@ -136,6 +136,20 @@ fn build_rows(clip: &Clip) -> Vec<PropRow> {
             });
         }
     }
+    // Proposal 210 / 211: clip gain is a first-class animatable lane for the
+    // graph editor and on-clip envelope.
+    if clip.audio.is_some() {
+        for e in prop_registry::entries(PropTargetKind::ClipAudioParams) {
+            rows.push(PropRow {
+                group: "Audio".to_string(),
+                label: pretty_label(e.path.strip_prefix("params.").unwrap_or(e.path)),
+                path: PropPath::new(e.path),
+                target: AnimTarget::ClipAudio { clip: clip.id },
+                kind: e.kind,
+                range: e.range,
+            });
+        }
+    }
     rows
 }
 
@@ -186,6 +200,7 @@ fn track_for<'a>(
         AnimTarget::ClipEffect { effect_index, .. } => {
             clip.effects.get(*effect_index)?.params.track(path)
         }
+        AnimTarget::ClipAudio { .. } => clip.audio.as_ref()?.params.track(path),
         _ => None,
     }
 }
@@ -216,6 +231,13 @@ fn base_value(clip: &Clip, target: &AnimTarget, path: &PropPath) -> Option<PropV
             .base
             .get(path.as_str())
             .copied(),
+        AnimTarget::ClipAudio { .. } => {
+            let g = clip.audio.as_ref()?.params.base.gain_db;
+            match path.as_str() {
+                "params.gain_db" | "gain_db" => Some(PropValue::Float(g)),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1527,8 +1549,8 @@ fn draw_float_curve(
 
 /// Paint a clip's keyframe positions as small diamonds along the top edge of its
 /// timeline body (04 §4.1 automation-lane integration). Read-only: a glanceable
-/// cue that a clip is animated; editing happens in [`draw_window`]. No-op for a
-/// static clip.
+/// cue that a clip is animated; editing happens in [`draw_window`]. Also paints
+/// the clip **gain envelope** (proposal 210) when the clip has audio.
 pub(crate) fn paint_clip_automation(
     painter: &egui::Painter,
     view: &TimelineView,
@@ -1537,7 +1559,9 @@ pub(crate) fn paint_clip_automation(
     clip_rect: Rect,
     accent: Color32,
 ) {
-    // Unique clip-relative keyframe ticks across transform + effect lanes.
+    paint_gain_envelope(painter, view, lane_left, clip, clip_rect, accent);
+
+    // Unique clip-relative keyframe ticks across transform + effect + audio lanes.
     let mut ats: Vec<i64> = Vec::new();
     for tr in &clip.transform.tracks {
         for k in &tr.keyframes {
@@ -1546,6 +1570,13 @@ pub(crate) fn paint_clip_automation(
     }
     for fx in &clip.effects {
         for tr in &fx.params.tracks {
+            for k in &tr.keyframes {
+                ats.push(k.at.0);
+            }
+        }
+    }
+    if let Some(audio) = &clip.audio {
+        for tr in &audio.params.tracks {
             for k in &tr.keyframes {
                 ats.push(k.at.0);
             }
@@ -1577,6 +1608,55 @@ pub(crate) fn paint_clip_automation(
         ));
     }
     painter.extend(shapes);
+}
+
+/// Draw the clip gain polyline over the clip body (proposal 210).
+/// Maps `gain_db ∈ [-96, +12]` to the clip rect vertically; samples ~1 point
+/// per 6 screen px. No-op without `clip.audio`.
+fn paint_gain_envelope(
+    painter: &egui::Painter,
+    view: &TimelineView,
+    lane_left: f32,
+    clip: &Clip,
+    clip_rect: Rect,
+    accent: Color32,
+) {
+    let Some(audio) = &clip.audio else {
+        return;
+    };
+    const GAIN_FLOOR: f64 = -96.0;
+    const GAIN_CEIL: f64 = 12.0;
+    let path = PropPath::new("params.gain_db");
+    let target = AnimTarget::ClipAudio { clip: clip.id };
+    let w = clip_rect.width().max(1.0);
+    let samples = ((w / 6.0).ceil() as usize).clamp(2, 256);
+    let mut points: Vec<Pos2> = Vec::with_capacity(samples);
+    let pad = 3.0;
+    let y_top = clip_rect.top() + pad;
+    let y_bot = clip_rect.bottom() - pad;
+    let y_span = (y_bot - y_top).max(1.0);
+    for i in 0..samples {
+        let frac = i as f32 / (samples - 1) as f32;
+        let dt = Tick(((clip.duration.0 as f64) * frac as f64).round() as i64);
+        let gain = match value_at(clip, &target, &path, dt) {
+            Some(PropValue::Float(g)) => g,
+            _ => audio.params.base.gain_db,
+        };
+        let t = ((gain - GAIN_FLOOR) / (GAIN_CEIL - GAIN_FLOOR)).clamp(0.0, 1.0) as f32;
+        // Higher gain → higher on screen.
+        let y = y_bot - t * y_span;
+        let x = view.tick_to_x(clip.start + dt, lane_left).clamp(
+            clip_rect.left() + 1.0,
+            clip_rect.right() - 1.0,
+        );
+        points.push(Pos2::new(x, y));
+    }
+    if points.len() >= 2 {
+        painter.add(Shape::line(
+            points,
+            Stroke::new(1.5, accent.gamma_multiply(0.85)),
+        ));
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

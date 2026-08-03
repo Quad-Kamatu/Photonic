@@ -340,6 +340,56 @@ pub(crate) fn draw_color_controls(
 
     ui.separator();
 
+    // ── Quick grade strip (proposal 213 AS-1) — Exposure / Contrast / Sat ────
+    // Ensures the three ops exist and edits them in place; one SetGrade at
+    // end-of-frame still covers the whole strip. Full correctors remain below.
+    section_header(ui, "QUICK GRADE");
+    {
+        for kind in [
+            GradeOpKind::Exposure,
+            GradeOpKind::Contrast,
+            GradeOpKind::Cdl,
+        ] {
+            if g.ops.iter().all(|o| o.kind != kind) {
+                g.ops.push(default_op(kind, &luts));
+            }
+        }
+        // Edit first matching op of each kind (identity-seeded if we just added it).
+        if let Some(op) = g.ops.iter_mut().find(|o| o.kind == GradeOpKind::Exposure) {
+            if let GradeOpParams::Exposure { stops } = &mut op.params.base {
+                labelled(ui, "Exposure", |ui| {
+                    ui.add(
+                        egui::Slider::new(stops, -3.0..=3.0)
+                            .step_by(0.01)
+                            .suffix(" st"),
+                    );
+                });
+            }
+        }
+        if let Some(op) = g.ops.iter_mut().find(|o| o.kind == GradeOpKind::Contrast) {
+            if let GradeOpParams::Contrast { amount, .. } = &mut op.params.base {
+                labelled(ui, "Contrast", |ui| {
+                    ui.add(egui::Slider::new(amount, -1.0..=1.0).step_by(0.01));
+                });
+            }
+        }
+        if let Some(op) = g.ops.iter_mut().find(|o| o.kind == GradeOpKind::Cdl) {
+            if let GradeOpParams::Cdl { sat, .. } = &mut op.params.base {
+                labelled(ui, "Saturation", |ui| {
+                    ui.add(egui::Slider::new(sat, 0.0..=2.0).step_by(0.01));
+                });
+            }
+        }
+        ui.label(
+            RichText::new("Full wheels / curves / LUT below")
+                .small()
+                .color(muted(ui)),
+        );
+    }
+
+    ui.add_space(4.0);
+    ui.separator();
+
     // ── Primary-corrector quick tabs (07 §4.4) — select existing or create ────
     section_header(ui, "PRIMARIES");
     ui.horizontal_wrapped(|ui| {

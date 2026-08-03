@@ -336,6 +336,30 @@ impl PhotonicApp {
                                         ui.checkbox(&mut self.prefs.reduced_motion, "Reduced motion")
                                             .on_hover_text("Make drawer open/close transitions instant instead of animating the width.");
                                         ui.add_space(4.0);
+                                        // Proposal 213 — social-first AS-1 velocity.
+                                        ui.checkbox(
+                                            &mut self.prefs.auto_place_import_on_timeline,
+                                            "Auto-place imports on timeline",
+                                        )
+                                        .on_hover_text(
+                                            "When on, importing media also inserts it on the first \
+                                             compatible track at the playhead (CapCut-class default).",
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .button("Reset video coach marks")
+                                                .on_hover_text(
+                                                    "Show the Import → Split → Export coach again \
+                                                     next time you enter video mode.",
+                                                )
+                                                .clicked()
+                                            {
+                                                self.prefs.video_coach_dismissed = false;
+                                                self.prefs.video_coach_step = 0;
+                                            }
+                                        });
+                                        ui.add_space(4.0);
 
                                         // ── Hotbar mode ───────────────────────────────
                                         ui.horizontal(|ui| {

@@ -523,7 +523,10 @@ fn marker_category_crud_roundtrips() {
         .iter()
         .map(|c| c.name.as_str())
         .collect();
-    assert_eq!(names, ["Marker", "Cut", "Note", "Todo", "Chapter"]);
+    assert_eq!(
+        names,
+        ["Marker", "Cut", "Note", "Todo", "Chapter", "Bookmarks"]
+    );
 
     // Seeding twice is a no-op, not a duplicate set.
     assert!(

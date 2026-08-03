@@ -823,6 +823,10 @@ impl MarkerCategory {
         }
     }
 
+    /// Canonical name for the bookmarks category (proposal 210). Not a second
+    /// storage type — bookmarks *are* sequence markers in this category.
+    pub const BOOKMARKS_CATEGORY_NAME: &'static str = "Bookmarks";
+
     /// A small ordered seed set of categories for a project's first use. Called
     /// lazily by the command layer, never by [`TimelineProject::new`] — §1.3
     /// categories are optional. Each entry has a fresh, distinct id and a
@@ -858,6 +862,14 @@ impl MarkerCategory {
                 name: "Chapter".to_string(),
                 color: Color::rgb(0.35, 0.75, 0.35),
                 glyph: MarkerGlyph::Triangle,
+            },
+            // Proposal 210: CapCut-class "bookmark" verb = markers in this
+            // category (not a parallel type — 35 §1).
+            MarkerCategory {
+                id: MarkerCategoryId::new(),
+                name: Self::BOOKMARKS_CATEGORY_NAME.to_string(),
+                color: Color::rgb(0.70, 0.45, 0.95),
+                glyph: MarkerGlyph::Flag,
             },
         ]
     }

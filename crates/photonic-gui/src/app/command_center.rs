@@ -238,6 +238,9 @@ impl PhotonicApp {
                     self.timeline_paste_attributes(doc, history, ops::AttrSelector::EFFECTS_ONLY);
             }
             "video.add_marker" => self.timeline_add_marker_at_playhead(doc, history),
+            "video.add_bookmark" => self.timeline_add_bookmark_at_playhead(doc, history),
+            "video.prev_bookmark" => self.timeline_step_bookmark(doc, false),
+            "video.next_bookmark" => self.timeline_step_bookmark(doc, true),
             "video.add_range_marker" => self.timeline_add_range_marker(doc, history),
             "video.prev_marker" => self.timeline_step_marker(doc, false),
             "video.next_marker" => self.timeline_step_marker(doc, true),
@@ -1189,6 +1192,91 @@ impl PhotonicApp {
             return;
         };
         ops_bridge::add_marker(doc, history, seq_id, self.playhead, "Marker");
+    }
+
+    /// Proposal 210: drop a bookmark (marker in the Bookmarks category) at the
+    /// playhead. Seeds the category registry when empty.
+    pub(crate) fn timeline_add_bookmark_at_playhead(
+        &mut self,
+        doc: &mut Document,
+        history: &mut CommandHistory,
+    ) {
+        let Some(project) = doc.timeline.as_ref() else {
+            return;
+        };
+        let Some(seq_id) = project.active_sequence else {
+            return;
+        };
+        let cat_id = project
+            .marker_categories
+            .iter()
+            .find(|c| c.name == photonic_core::timeline::MarkerCategory::BOOKMARKS_CATEGORY_NAME)
+            .map(|c| c.id);
+        let n = project
+            .sequences
+            .get(&seq_id)
+            .map(|s| {
+                s.markers
+                    .iter()
+                    .filter(|m| m.category == cat_id)
+                    .count()
+            })
+            .unwrap_or(0);
+        let name = format!("Bookmark {}", n + 1);
+        let Ok(cmds) =
+            photonic_core::timeline::ops::add_bookmark(project, seq_id, self.playhead, name)
+        else {
+            return;
+        };
+        if cmds.is_empty() {
+            return;
+        }
+        let batch = cmds
+            .into_iter()
+            .map(photonic_core::history::Command::Timeline)
+            .collect();
+        history.execute_discrete(photonic_core::history::Command::Batch(batch), doc);
+    }
+
+    /// Seek to the previous/next bookmark (markers in the Bookmarks category).
+    pub(crate) fn timeline_step_bookmark(&mut self, doc: &Document, forward: bool) {
+        let Some(project) = doc.timeline.as_ref() else {
+            return;
+        };
+        let Some(seq_id) = project.active_sequence else {
+            return;
+        };
+        let Some(cat_id) = project
+            .marker_categories
+            .iter()
+            .find(|c| c.name == photonic_core::timeline::MarkerCategory::BOOKMARKS_CATEGORY_NAME)
+            .map(|c| c.id)
+        else {
+            return;
+        };
+        let Some(seq) = project.sequences.get(&seq_id) else {
+            return;
+        };
+        let mut ticks: Vec<_> = seq
+            .markers
+            .iter()
+            .filter(|m| m.category == Some(cat_id))
+            .map(|m| m.at)
+            .collect();
+        ticks.sort();
+        ticks.dedup();
+        if ticks.is_empty() {
+            return;
+        }
+        let ph = self.playhead;
+        let next = if forward {
+            ticks.iter().find(|&&t| t > ph).copied()
+        } else {
+            ticks.iter().rev().find(|&&t| t < ph).copied()
+        };
+        if let Some(t) = next {
+            self.playhead = t;
+        }
     }
 
     /// K-A2: add a RANGED marker spanning the sequence's in/out work range.

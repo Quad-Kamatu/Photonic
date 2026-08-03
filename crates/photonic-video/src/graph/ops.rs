@@ -340,16 +340,89 @@ fn deinterlace_yadif_spatial(input: &Image, field_order: FieldOrder) -> Image {
     out
 }
 
-// ── Shared blur primitive (K-0.2) ────────────────────────────────────────────
+// ── Shared blur primitive (K-0.2 + proposal 209 large-radius quality) ────────
 
-/// Cap on the 1-D Gaussian half-width, matching the WGSL blur in
-/// `photonic_render::pipeline::BLUR_SHADER` (`min(ceil(sigma*3), 128)`).
+/// Cap on the 1-D Gaussian half-width in *sample taps* (not texels when step>1).
+/// Matches the WGSL blur historical cap (`min(ceil(sigma*3), 128)`).
 const BLUR_RADIUS_CAP: i32 = 128;
 
-/// Build a normalized 1-D Gaussian kernel for `sigma`, identical in shape to the
-/// WGSL twin: radius = `min(ceil(sigma*3), 128)`, weight `exp(-i²/(2σ²))`,
-/// renormalized. Empty / identity when `sigma < 0.5` (the shader early-outs).
+/// Prefer multi-iteration over a single pass once σ would need more than this
+/// many samples at step=1 (proposal 209: keep kernels well-shaped).
+const BLUR_MAX_PASS_SIGMA: f32 = 12.0;
+
+/// Hard cap on step size (proposal 209: >4 causes banding).
+const BLUR_STEP_MAX: f32 = 4.0;
+
+/// Max H+V iteration pairs for one logical blur.
+const BLUR_MAX_ITERS: u32 = 16;
+
+/// Plan for one logical Gaussian blur (proposal 209).
+///
+/// Multi-pass: `σ_eff² ≈ iters · σ_pass²` ⇒ `σ_pass = σ_eff / √iters`.
+/// Step: when a single pass still needs a wide kernel, space taps by `step`
+/// (bilinear/nearest clamp still smooths) with `step ≤ BLUR_STEP_MAX`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlurPlan {
+    /// Sigma applied on each H+V pair.
+    pub sigma_pass: f32,
+    /// Number of full H+V pairs (≥1 when not identity).
+    pub iterations: u32,
+    /// Texel spacing between kernel taps (1.0 = contiguous).
+    pub step: f32,
+}
+
+impl BlurPlan {
+    /// Identity / early-out plan.
+    pub const IDENTITY: Self = Self {
+        sigma_pass: 0.0,
+        iterations: 0,
+        step: 1.0,
+    };
+}
+
+/// Choose step + iterations so large σ stays Gaussian-like (proposal 209).
+pub fn blur_plan(sigma: f32) -> BlurPlan {
+    let sigma = if sigma.is_finite() {
+        sigma.max(0.0)
+    } else {
+        0.0
+    };
+    if sigma < 0.5 {
+        return BlurPlan::IDENTITY;
+    }
+    // Stack iterations until each pass's σ is ≤ MAX_PASS_SIGMA.
+    let iters = if sigma <= BLUR_MAX_PASS_SIGMA {
+        1u32
+    } else {
+        let n = (sigma / BLUR_MAX_PASS_SIGMA).powi(2).ceil() as u32;
+        n.clamp(2, BLUR_MAX_ITERS)
+    };
+    let sigma_pass = sigma / (iters as f32).sqrt();
+    // Within one pass, if radius (at step 1) exceeds TAP budget, raise step.
+    let radius_at_1 = (sigma_pass * 3.0).ceil().max(1.0);
+    let step = if radius_at_1 > BLUR_RADIUS_CAP as f32 {
+        (radius_at_1 / BLUR_RADIUS_CAP as f32)
+            .ceil()
+            .clamp(1.0, BLUR_STEP_MAX)
+    } else {
+        1.0
+    };
+    BlurPlan {
+        sigma_pass,
+        iterations: iters,
+        step,
+    }
+}
+
+/// Build a normalized 1-D Gaussian kernel for `sigma` with optional `step`.
+/// Sample positions are at `i * step` texels; weights use the true distance so
+/// the discrete kernel still approximates N(0,σ²). Empty when `sigma < 0.5`.
 pub fn gaussian_kernel_1d(sigma: f32) -> Vec<f32> {
+    gaussian_kernel_1d_stepped(sigma, 1.0)
+}
+
+/// Like [`gaussian_kernel_1d`] but with texels-per-tap spacing `step` (≥1).
+pub fn gaussian_kernel_1d_stepped(sigma: f32, step: f32) -> Vec<f32> {
     let sigma = if sigma.is_finite() {
         sigma.max(0.0)
     } else {
@@ -358,13 +431,20 @@ pub fn gaussian_kernel_1d(sigma: f32) -> Vec<f32> {
     if sigma < 0.5 {
         return Vec::new();
     }
-    let radius = ((sigma * 3.0).ceil() as i32).clamp(1, BLUR_RADIUS_CAP);
+    let step = if step.is_finite() {
+        step.max(1.0)
+    } else {
+        1.0
+    };
+    // Cover ~3σ in texels; number of taps is coverage/step, capped.
+    let radius_texels = (sigma * 3.0).ceil().max(1.0);
+    let radius_taps = ((radius_texels / step).ceil() as i32).clamp(1, BLUR_RADIUS_CAP);
     let two_s2 = 2.0 * sigma * sigma;
-    let mut k = Vec::with_capacity((2 * radius + 1) as usize);
+    let mut k = Vec::with_capacity((2 * radius_taps + 1) as usize);
     let mut sum = 0.0f32;
-    for i in -radius..=radius {
-        let fi = i as f32;
-        let w = (-(fi * fi) / two_s2).exp();
+    for i in -radius_taps..=radius_taps {
+        let dist = i as f32 * step;
+        let w = (-(dist * dist) / two_s2).exp();
         k.push(w);
         sum += w;
     }
@@ -376,17 +456,17 @@ pub fn gaussian_kernel_1d(sigma: f32) -> Vec<f32> {
     k
 }
 
-/// One axis of a separable Gaussian over premultiplied linear RGBA. `horizontal`
-/// true → row convolution; false → column. Clamp-to-edge borders.
-fn separable_blur_axis(input: &Image, kernel: &[f32], horizontal: bool) -> Image {
+/// One axis of a separable Gaussian. `step` spaces taps in texels.
+fn separable_blur_axis(input: &Image, kernel: &[f32], horizontal: bool, step: f32) -> Image {
     let (w, h) = (input.width as i32, input.height as i32);
     let radius = (kernel.len() as i32) / 2;
+    let step_i = step.max(1.0);
     let mut out = Image::new(input.width, input.height);
     for y in 0..h {
         for x in 0..w {
             let mut acc = [0.0f32; 4];
             for (ki, &kw) in kernel.iter().enumerate() {
-                let off = ki as i32 - radius;
+                let off = ((ki as i32 - radius) as f32 * step_i).round() as i32;
                 let (sx, sy) = if horizontal {
                     ((x + off).clamp(0, w - 1), y)
                 } else {
@@ -403,18 +483,205 @@ fn separable_blur_axis(input: &Image, kernel: &[f32], horizontal: bool) -> Image
     out
 }
 
-/// `Effect{Blur}` (08 §3 / K-0.2): separable Gaussian over premultiplied linear
-/// RGBA. `radius` is the sigma in pixels (registry `params.radius`). `sigma < 0.5`
-/// is a bit-exact identity (matches the GPU early-out). Operates in premultiplied
-/// space so transparent edges do not darken (same as the raster filter path).
-/// WGSL twin: two-pass `eval::Passes::gaussian_blur`.
-pub fn blur(input: &Image, radius: f32) -> Image {
-    let kernel = gaussian_kernel_1d(radius);
+/// Single H+V pair at the given plan parameters (no multi-iter).
+fn blur_one_pass(input: &Image, sigma: f32, step: f32) -> Image {
+    let kernel = gaussian_kernel_1d_stepped(sigma, step);
     if kernel.is_empty() {
         return input.clone();
     }
-    let tmp = separable_blur_axis(input, &kernel, true);
-    separable_blur_axis(&tmp, &kernel, false)
+    let tmp = separable_blur_axis(input, &kernel, true, step);
+    separable_blur_axis(&tmp, &kernel, false, step)
+}
+
+/// `Effect{Blur}` (08 §3 / K-0.2 / proposal 209): separable Gaussian over
+/// premultiplied linear RGBA. `radius` is the sigma in pixels (registry
+/// `params.radius`). Large σ uses multi-iteration + step (see [`blur_plan`]).
+/// `sigma < 0.5` is a bit-exact identity (matches the GPU early-out).
+/// WGSL twin: multi-pass `eval::Passes::gaussian_blur`.
+pub fn blur(input: &Image, radius: f32) -> Image {
+    let plan = blur_plan(radius);
+    if plan.iterations == 0 {
+        return input.clone();
+    }
+    let mut img = input.clone();
+    for _ in 0..plan.iterations {
+        img = blur_one_pass(&img, plan.sigma_pass, plan.step);
+    }
+    img
+}
+
+// ── Coverage feather via approximate SDF (proposal 208) ─────────────────────
+
+/// Soften a hard coverage matte (stored in **alpha**) with a soft band of width
+/// `feather_px` (logical pixels). Uses a CPU Jump-Flood-style distance field
+/// and a smoothstep around the zero isosurface (proposal 208). RGB is
+/// re-premultiplied by the new alpha so the result stays valid premult.
+///
+/// `feather_px < 0.5` is a bit-exact identity. Far exterior stays 0; deep
+/// interior stays at the original interior alpha.
+pub fn feather_coverage(input: &Image, feather_px: f32) -> Image {
+    let feather = if feather_px.is_finite() {
+        feather_px.max(0.0)
+    } else {
+        0.0
+    };
+    if feather < 0.5 {
+        return input.clone();
+    }
+    let dist = coverage_signed_distance(input);
+    let w = input.width;
+    let h = input.height;
+    let mut out = Image::new(w, h);
+    let half = feather;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let d = dist[i];
+            // d < 0 inside; smoothstep from -half..+half
+            let t = ((d + half) / (2.0 * half)).clamp(0.0, 1.0);
+            // Hermite smoothstep
+            let a = t * t * (3.0 - 2.0 * t);
+            // Outside → 0, inside → 1, soft band between.
+            let cover = 1.0 - a;
+            let src = input.pixel(x, y);
+            // Unpremultiply RGB if original alpha > 0, re-premultiply by cover.
+            let rgb = if src[3] > 1e-6 {
+                [src[0] / src[3], src[1] / src[3], src[2] / src[3]]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+            out.set(
+                x,
+                y,
+                [rgb[0] * cover, rgb[1] * cover, rgb[2] * cover, cover],
+            );
+        }
+    }
+    out
+}
+
+/// Approximate signed distance (negative inside coverage) via Jump Flooding.
+/// Coverage threshold is alpha ≥ 0.5. Units: pixels.
+fn coverage_signed_distance(input: &Image) -> Vec<f32> {
+    let w = input.width as i32;
+    let h = input.height as i32;
+    let n = (w * h) as usize;
+    // Seed: store nearest boundary site as (sx, sy); invalid = (-1,-1).
+    let mut seed_in: Vec<(i32, i32)> = vec![(-1, -1); n];
+    let mut seed_out: Vec<(i32, i32)> = vec![(-1, -1); n];
+    let idx = |x: i32, y: i32| -> usize { (y * w + x) as usize };
+    let inside = |x: i32, y: i32| -> bool {
+        input.pixel(x as u32, y as u32)[3] >= 0.5
+    };
+    // Init: boundary pixels (inside next to outside, or vice versa) seed themselves.
+    for y in 0..h {
+        for x in 0..w {
+            let inn = inside(x, y);
+            let mut boundary = false;
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let nx = x + dx;
+                let ny = y + dy;
+                if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                    if inn {
+                        boundary = true;
+                    }
+                    continue;
+                }
+                if inside(nx, ny) != inn {
+                    boundary = true;
+                }
+            }
+            if boundary {
+                if inn {
+                    seed_in[idx(x, y)] = (x, y);
+                } else {
+                    seed_out[idx(x, y)] = (x, y);
+                }
+            }
+        }
+    }
+    // Also seed pure-interior/exterior from nearest boundary via JFA.
+    jfa_propagate(&mut seed_in, w, h);
+    jfa_propagate(&mut seed_out, w, h);
+    // For interior pixels that never got a seed, run JFA on inverted seeds too:
+    // combine: for each pixel, if inside use dist to outside seed, else to inside.
+    // Re-seed non-boundary from the other field's boundary by swapping.
+    // Simpler approach: after propagate, any empty cell inherits from neighbours
+    // was done by JFA. Fill remaining empties with far distance.
+    let mut dist = vec![0.0f32; n];
+    let far = (w.max(h) as f32) * 2.0;
+    for y in 0..h {
+        for x in 0..w {
+            let i = idx(x, y);
+            let inn = inside(x, y);
+            if inn {
+                let (sx, sy) = seed_out[i];
+                let d = if sx < 0 {
+                    // Deep interior with no outside seed found — large negative.
+                    -far
+                } else {
+                    -(((x - sx) as f32).hypot((y - sy) as f32))
+                };
+                dist[i] = d;
+            } else {
+                let (sx, sy) = seed_in[i];
+                let d = if sx < 0 {
+                    far
+                } else {
+                    ((x - sx) as f32).hypot((y - sy) as f32)
+                };
+                dist[i] = d;
+            }
+        }
+    }
+    dist
+}
+
+/// Jump Flooding propagation of nearest-seed coordinates (Rong & Tan).
+fn jfa_propagate(seeds: &mut [(i32, i32)], w: i32, h: i32) {
+    let mut step = 1;
+    while step < w.max(h) {
+        step *= 2;
+    }
+    step /= 2;
+    let idx = |x: i32, y: i32| -> usize { (y * w + x) as usize };
+    while step >= 1 {
+        let prev = seeds.to_vec();
+        for y in 0..h {
+            for x in 0..w {
+                let i = idx(x, y);
+                let mut best = prev[i];
+                let mut best_d = if best.0 < 0 {
+                    f32::INFINITY
+                } else {
+                    ((x - best.0) as f32).hypot((y - best.1) as f32)
+                };
+                for dy in [-step, 0, step] {
+                    for dx in [-step, 0, step] {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let nx = x + dx;
+                        let ny = y + dy;
+                        if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                            continue;
+                        }
+                        let cand = prev[idx(nx, ny)];
+                        if cand.0 < 0 {
+                            continue;
+                        }
+                        let d = ((x - cand.0) as f32).hypot((y - cand.1) as f32);
+                        if d < best_d {
+                            best_d = d;
+                            best = cand;
+                        }
+                    }
+                }
+                seeds[i] = best;
+            }
+        }
+        step /= 2;
+    }
 }
 
 /// `Effect{Sharpen}` (08 §3 / K-0.2): unsharp mask
@@ -1254,6 +1521,29 @@ mod tests {
     }
 
     #[test]
+    fn blur_plan_small_is_single_pass() {
+        let p = blur_plan(2.0);
+        assert_eq!(p.iterations, 1);
+        assert!((p.sigma_pass - 2.0).abs() < 1e-5);
+        assert!((p.step - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn blur_plan_large_uses_multi_iter_and_capped_step() {
+        let p = blur_plan(48.0);
+        assert!(p.iterations >= 2, "iters={}", p.iterations);
+        assert!(p.iterations <= 16);
+        assert!(p.sigma_pass <= BLUR_MAX_PASS_SIGMA + 1e-3);
+        assert!(p.step >= 1.0 && p.step <= BLUR_STEP_MAX + 1e-5);
+        // Effective variance: n * σ_pass² ≈ σ²
+        let eff = (p.iterations as f32).sqrt() * p.sigma_pass;
+        assert!(
+            (eff - 48.0).abs() < 0.5,
+            "effective sigma {eff} should ≈ 48"
+        );
+    }
+
+    #[test]
     fn blur_flattens_a_checker_edge() {
         // 2×1: left white, right black → blur mixes them.
         let mut img = Image::new(2, 1);
@@ -1267,6 +1557,61 @@ mod tests {
         // Alpha stays ~1 (both inputs opaque).
         assert!((left[3] - 1.0).abs() < 1e-4);
         assert!((right[3] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn blur_large_sigma_mixes_far_pixels() {
+        // 16×1: left white, right black. Large σ must pull the left edge down.
+        let mut img = Image::new(16, 1);
+        for x in 0..8 {
+            img.set(x, 0, [1.0, 1.0, 1.0, 1.0]);
+        }
+        for x in 8..16 {
+            img.set(x, 0, [0.0, 0.0, 0.0, 1.0]);
+        }
+        let out = blur(&img, 24.0);
+        let left = out.pixel(0, 0);
+        assert!(
+            left[0] < 0.95,
+            "large blur should soften far-left, got r={}",
+            left[0]
+        );
+    }
+
+    #[test]
+    fn feather_coverage_identity_below_half() {
+        let mut img = Image::new(8, 8);
+        for y in 2..6 {
+            for x in 2..6 {
+                img.set(x, y, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+        let out = feather_coverage(&img, 0.4);
+        assert_eq!(out.pixels, img.pixels);
+    }
+
+    #[test]
+    fn feather_coverage_softens_edge() {
+        let mut img = Image::new(16, 16);
+        for y in 4..12 {
+            for x in 4..12 {
+                img.set(x, y, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+        let out = feather_coverage(&img, 4.0);
+        // Deep interior still solid.
+        let c = out.pixel(8, 8);
+        assert!(c[3] > 0.9, "interior alpha={}", c[3]);
+        // Far exterior still empty.
+        let e = out.pixel(0, 0);
+        assert!(e[3] < 0.1, "exterior alpha={}", e[3]);
+        // Edge band is soft (not binary).
+        let edge = out.pixel(4, 8);
+        assert!(
+            edge[3] > 0.05 && edge[3] < 0.95,
+            "edge should be soft, alpha={}",
+            edge[3]
+        );
     }
 
     #[test]

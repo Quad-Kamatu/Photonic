@@ -26,8 +26,8 @@ use super::graph::{GraphOp, NodeGraph};
 use super::ids::*;
 use super::media::MediaBin;
 use super::sequence::{
-    Marker, MarkerCategory, MarkerRef, MarkerRetarget, Sequence, SequenceFormat, TimelineProject,
-    Track, TrackKind,
+    Marker, MarkerCategory, MarkerGlyph, MarkerRef, MarkerRetarget, Sequence, SequenceFormat,
+    TimelineProject, Track, TrackKind,
 };
 use super::time::{FrameRate, Tick};
 use std::path::PathBuf;
@@ -3149,7 +3149,7 @@ pub fn add_marker_category(
     })
 }
 
-/// Seed the five default categories ([`MarkerCategory::default_seed`]) as ONE
+/// Seed the default categories ([`MarkerCategory::default_seed`]) as ONE
 /// batch of commands — the caller commits them as a single undo unit.
 ///
 /// Returns an empty vec when the project already has categories, so "seed
@@ -3167,6 +3167,66 @@ pub fn seed_marker_categories(p: &TimelineProject) -> Vec<TimelineCmd> {
             retarget: Vec::new(),
         })
         .collect()
+}
+
+/// Ensure a "Bookmarks" category exists (proposal 210). If the registry is
+/// empty, seeds the full default set. If categories already exist but none is
+/// named Bookmarks, appends one. Returns the commands to commit (may be empty
+/// when Bookmarks is already present) and the category id to use.
+pub fn ensure_bookmarks_category(
+    p: &TimelineProject,
+) -> Result<(Vec<TimelineCmd>, MarkerCategoryId), EditError> {
+    if let Some(c) = p
+        .marker_categories
+        .iter()
+        .find(|c| c.name == MarkerCategory::BOOKMARKS_CATEGORY_NAME)
+    {
+        return Ok((Vec::new(), c.id));
+    }
+    if p.marker_categories.is_empty() {
+        let cmds = seed_marker_categories(p);
+        // After seed, the Bookmarks entry is the last of default_seed — but
+        // ids are only known from the commands themselves.
+        let id = cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                TimelineCmd::AddMarkerCategory { category, .. }
+                    if category.name == MarkerCategory::BOOKMARKS_CATEGORY_NAME =>
+                {
+                    Some(category.id)
+                }
+                _ => None,
+            })
+            .ok_or(EditError::IndexOutOfRange)?;
+        return Ok((cmds, id));
+    }
+    let cat = MarkerCategory {
+        id: MarkerCategoryId::new(),
+        name: MarkerCategory::BOOKMARKS_CATEGORY_NAME.to_string(),
+        color: crate::Color::rgb(0.70, 0.45, 0.95),
+        glyph: MarkerGlyph::Flag,
+    };
+    let id = cat.id;
+    let cmd = add_marker_category(p, cat)?;
+    Ok((vec![cmd], id))
+}
+
+/// Drop a bookmark (sequence marker in the Bookmarks category) at `at`.
+/// One logical user verb; caller should batch seed+add as one undo unit.
+pub fn add_bookmark(
+    p: &TimelineProject,
+    seq_id: SequenceId,
+    at: Tick,
+    name: impl Into<String>,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    let (mut cmds, cat_id) = ensure_bookmarks_category(p)?;
+    // If we just seeded categories, the project snapshot `p` still has an
+    // empty registry — `add_marker` only checks the sequence exists, so that
+    // is fine. Category id is carried on the marker itself.
+    let mut marker = Marker::new(at, name);
+    marker.category = Some(cat_id);
+    cmds.push(add_marker(p, seq_id, marker)?);
+    Ok(cmds)
 }
 
 /// Rename / recolour / re-glyph a category. `new.id` identifies it; the id is
