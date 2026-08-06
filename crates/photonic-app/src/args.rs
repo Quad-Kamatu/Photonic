@@ -21,6 +21,10 @@ pub struct Args {
     #[arg(long)]
     pub mcp_secret: Option<String>,
 
+    /// MCP protocol negotiation: `dual` (default) or `strict` (2026-07-28 only)
+    #[arg(long, default_value = "dual", value_parser = parse_mcp_protocol)]
+    pub mcp_protocol: photonic_mcp::protocol::ProtocolMode,
+
     /// Address of a running Photonic instance (for CLI commands)
     #[arg(long, global = true, default_value = "127.0.0.1:7842")]
     pub server: String,
@@ -238,4 +242,9 @@ mod tests {
         let x11_args = Args::try_parse_from(["photonic", "--x11"]).expect("--x11 parses");
         assert!(x11_args.x11);
     }
+}
+
+fn parse_mcp_protocol(s: &str) -> Result<photonic_mcp::protocol::ProtocolMode, String> {
+    photonic_mcp::protocol::ProtocolMode::parse(s)
+        .ok_or_else(|| format!("invalid --mcp-protocol {s:?}; expected dual|strict"))
 }

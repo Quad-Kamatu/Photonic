@@ -33,6 +33,7 @@ fn test_state(secret: Option<&str>) -> AppState {
         config: McpServerConfig {
             port: 0,
             secret: secret.map(|s| s.to_string()),
+            protocol_mode: Default::default(),
         },
         audit_log: Arc::new(StdMutex::new(AuditLog::new())),
         clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
