@@ -13,7 +13,7 @@ use axum::{
 use crate::protocol::envelope::{
     self, Dialect, ProtocolMode, RpcError, DEFAULT_BODY_LIMIT,
 };
-use photonic_core::{document::Document, history::CommandHistory, AuditLog};
+use photonic_core::{document::Document, history::CommandHistory, AuditLog, PathPolicy};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,6 +74,8 @@ pub struct AppState {
     /// Uses std::sync::mpsc so the render thread can poll synchronously.
     pub capture_tx: Arc<StdMutex<std::sync::mpsc::Sender<oneshot::Sender<Vec<u8>>>>>,
     pub config: McpServerConfig,
+    /// Path containment for MCP filesystem args (28 §3).
+    pub path_policy: PathPolicy,
     /// In-memory audit log of every MCP tool call. Shared with the GUI Audit panel
     /// via a std::sync::Mutex so the sync GUI thread can read it without async.
     pub audit_log: Arc<StdMutex<AuditLog>>,
@@ -113,6 +115,7 @@ impl AppState {
             document_path: Arc::new(StdMutex::new(None)),
             capture_tx: Arc::new(StdMutex::new(capture_tx)),
             config: McpServerConfig::default(),
+            path_policy: PathPolicy::desktop_default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
             video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
@@ -144,6 +147,7 @@ impl McpServer {
                 document_path: Arc::new(StdMutex::new(None)),
                 capture_tx: Arc::new(StdMutex::new(capture_tx)),
                 config,
+                path_policy: PathPolicy::desktop_default(),
                 audit_log,
                 clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
                 video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
@@ -376,9 +380,21 @@ async fn dispatch_method(
         "server/discover" => Ok(envelope::discover_result(state.config.protocol_mode)),
 
         "tools/list" => {
-            let tools = serde_json::to_value(tool_list()).unwrap_or_else(|_| json!([]));
-            // Always wrap with resultType — extra fields are fine for dual/legacy clients.
             let _ = dialect;
+            // Compact listing (Pattern B): promoted + search/execute. Full list via
+            // params.full=true or PHOTONIC_MCP_FULL_TOOLS=1.
+            let want_full = params
+                .get("full")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || std::env::var("PHOTONIC_MCP_FULL_TOOLS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+            let tools = if want_full {
+                tool_list()
+            } else {
+                crate::catalog::compact_tool_list()
+            };
             Ok(envelope::tools_list_result(tools))
         }
 

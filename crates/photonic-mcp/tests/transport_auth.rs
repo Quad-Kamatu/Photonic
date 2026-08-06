@@ -35,6 +35,7 @@ fn test_state(secret: Option<&str>) -> AppState {
             secret: secret.map(|s| s.to_string()),
             protocol_mode: Default::default(),
         },
+        path_policy: photonic_core::PathPolicy::desktop_default(),
         audit_log: Arc::new(StdMutex::new(AuditLog::new())),
         clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
         video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),

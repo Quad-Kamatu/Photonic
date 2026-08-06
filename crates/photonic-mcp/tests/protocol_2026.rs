@@ -28,6 +28,7 @@ fn test_state(mode: ProtocolMode) -> AppState {
             secret: None,
             protocol_mode: mode,
         },
+        path_policy: photonic_core::PathPolicy::desktop_default(),
         audit_log: Arc::new(StdMutex::new(AuditLog::new())),
         clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
         video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
@@ -108,9 +109,38 @@ async fn tools_list_has_result_type() {
     let r = &v["result"];
     assert_eq!(r["resultType"], "complete");
     let tools = r["tools"].as_array().unwrap();
+    // Compact default (Pattern B): promoted + search/execute only.
+    assert!(
+        tools.len() < 40,
+        "compact tools/list should be small, got {}",
+        tools.len()
+    );
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(names.contains(&"search_actions"), "{names:?}");
+    assert!(names.contains(&"execute_action"), "{names:?}");
+}
+
+#[tokio::test]
+async fn tools_list_full_returns_large_catalog() {
+    let (st, v) = call(
+        ProtocolMode::Dual,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/list",
+            "params": { "full": true }
+        }),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let tools = v["result"]["tools"].as_array().unwrap();
     assert!(
         tools.len() > 50,
-        "video tip should expose a large catalog, got {}",
+        "full tools/list should be large, got {}",
         tools.len()
     );
 }

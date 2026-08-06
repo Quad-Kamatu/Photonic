@@ -4004,6 +4004,14 @@ pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult
     let mut pending = Vec::new();
     for p in &args.paths {
         let path = std::path::PathBuf::from(p);
+        let path = match crate::path_guard::check_path(
+            state,
+            &path,
+            photonic_core::PathAccess::Read,
+        ) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
         let Some(kind) = guess_asset_kind(&path) else {
             return ToolResult::error(format!(
                 "cannot infer media kind for {p:?} — unrecognized extension"
@@ -5853,6 +5861,15 @@ fn find_export_preset(name: &str) -> Option<export_presets::ExportPreset> {
 
 pub async fn export_sequence(state: &AppState, args: ExportSequenceArgs) -> ToolResult {
     tracing::debug!("tool: export_sequence {}", args.sequence_id);
+    let _checked_out = match crate::path_guard::check_path(
+        state,
+        &args.out_path,
+        photonic_core::PathAccess::Write,
+    ) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
     let bridge = match engine_bridge(state) {
         Ok(b) => b,
         Err(e) => return e,
@@ -8677,6 +8694,7 @@ mod tests {
             history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
             capture_tx: Arc::new(StdMutex::new(tx)),
             config: McpServerConfig::default(),
+            path_policy: photonic_core::PathPolicy::desktop_default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
             video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),

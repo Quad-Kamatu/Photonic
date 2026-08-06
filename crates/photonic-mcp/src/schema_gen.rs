@@ -17,6 +17,31 @@ pub fn tool_list() -> Value {
         .collect();
     json!([
             {
+                "name": "search_actions",
+                "description": "Search the MCP tool catalog by keywords (name/description). Returns ranked action summaries with slim schemas. Prefer this over tools/list when discovering uncommon operations. Use execute_action to run a hit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Keywords, e.g. \"split clip\" or \"export\"." },
+                        "limit": { "type": "integer", "description": "Max hits (default 15, max 50)." }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "execute_action",
+                "description": "Run a tool by name with a params object. Same effect as tools/call. Use after search_actions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Exact tool name from search_actions or tools/list." },
+                        "arguments": { "type": "object", "description": "Tool arguments object." }
+                    },
+                    "required": ["name"]
+                }
+            },
+
+            {
                 "name": "create_shape",
                 "description": "Create a primitive shape (rectangle, rounded_rect, ellipse, arc, polygon, star, line). For arc: x,y,width,height define the bounding box; arc_start_angle and arc_end_angle set the sweep in degrees (0=3 o'clock); arc_open=true for open arc, false for closed pie sector.",
                 "inputSchema": {

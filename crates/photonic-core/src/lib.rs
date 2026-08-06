@@ -14,6 +14,7 @@ pub mod migration;
 pub mod node;
 pub mod ops;
 pub mod path;
+pub mod path_policy;
 pub mod photon_file;
 pub mod raster;
 pub mod selection;
@@ -44,6 +45,7 @@ pub use node::{
     PrimitiveKind, RasterNode, SceneNode, SceneNodeKind,
 };
 pub use path::PathData;
+pub use path_policy::{DenyReason, PathAccess, PathPolicy, PathPolicyError, PathVerdict};
 pub use photon_file::{load_photon, save_photon, PHOTON_FORMAT_VERSION};
 pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;

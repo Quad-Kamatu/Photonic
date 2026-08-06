@@ -26,6 +26,7 @@ fn test_state() -> AppState {
         document_path: Arc::new(StdMutex::new(None)),
         capture_tx: Arc::new(StdMutex::new(tx)),
         config: McpServerConfig::default(),
+        path_policy: photonic_core::PathPolicy::desktop_default(),
         audit_log: Arc::new(StdMutex::new(AuditLog::new())),
         clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
         video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
