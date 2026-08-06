@@ -1083,8 +1083,8 @@ pub fn insert_asset_at_first_fit(
 // ── Markers & work range ─────────────────────────────────────────────────────
 
 /// Add a marker to a sequence at `at` (double-click on the ruler, 04 §2.6/13
-/// §1.1).
-pub(crate) fn add_marker(
+/// §1.1). `pub` for UI-path integration tests (command `video.add_marker`).
+pub fn add_marker(
     doc: &mut Document,
     history: &mut CommandHistory,
     seq: SequenceId,
@@ -1097,6 +1097,27 @@ pub(crate) fn add_marker(
     if let Ok(cmd) = ops::add_marker(p, seq, Marker::new(at, name)) {
         commit(history, doc, cmd);
     }
+}
+
+/// Proposal 210 / `video.add_bookmark`: marker in the Bookmarks category.
+/// Seeds the category registry when empty. One undo batch.
+pub fn add_bookmark(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    at: Tick,
+    name: impl Into<String>,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let Ok(cmds) = ops::add_bookmark(p, seq, at, name) else {
+        return;
+    };
+    if cmds.is_empty() {
+        return;
+    }
+    commit_group(history, doc, cmds);
 }
 
 pub(crate) fn remove_marker(

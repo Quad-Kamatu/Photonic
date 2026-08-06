@@ -1,20 +1,44 @@
-//! Gesture & first-run chrome UI paths (spec 43).
+//! Gesture & first-run chrome UI paths (spec 43) + daily transport/edit paths.
 //!
-//! Locks the pure decision/mutation entry points that paint and pointer code
-//! depend on — the residual gaps a live MCP audit cannot mouse-drive:
-//! Esc drag cancel, 12px trim hit, snap capture, K-A10 fixed playhead / edge
-//! pan, K-B5 compare toggle, social coach step machine, command registry.
+//! Locks pure decision/mutation entry points that paint and pointer code depend
+//! on, plus high-ROI ops_bridge/command surfaces: Esc cancel, trim hit, snap,
+//! K-A10, K-B5 compare, coach, transport registry, split, markers/bookmarks,
+//! freeze, alpha view.
 
-use photonic_core::timeline::Tick;
+use photonic_core::history::CommandHistory;
+use photonic_core::timeline::{
+    Clip, ClipId, ClipSource, FrameRate, Sequence, SequenceId, Tick, TimelineProject, Track,
+    TrackId, TrackKind, TICKS_PER_SECOND,
+};
+use photonic_core::Document;
 use photonic_gui::app::engine::EngineBridge;
 use photonic_gui::app::timeline::interact::{hit_zone, nearest_snap, should_cancel_drag, ClipZone};
 use photonic_gui::app::timeline::layout::{
     TimelineView, EDGE_AUTO_PAN_ZONE_PX, EDGE_HIT_PX, EDGE_ZONE_PX,
 };
+use photonic_gui::app::timeline::ops_bridge;
 use photonic_gui::commands;
 use photonic_gui::preferences::{
     coach_advance_button, coach_auto_advance_on_clips, coach_skip_dismisses, AppPreferences,
 };
+
+/// Minimal timeline: one video track + one solid adjustment clip (2s).
+fn doc_with_clip() -> (Document, CommandHistory, SequenceId, TrackId, ClipId) {
+    let mut project = TimelineProject::new();
+    let mut seq = Sequence::new("S", FrameRate::FPS_30, 1920, 1080);
+    let seq_id = seq.id;
+    let mut track = Track::new(TrackKind::Video, "V1");
+    let track_id = track.id;
+    let clip = Clip::new(ClipSource::Adjustment, Tick(0), Tick::from_seconds(2));
+    let clip_id = clip.id;
+    track.clips.push(clip);
+    seq.video_tracks.push(track);
+    project.insert_sequence(seq);
+    project.active_sequence = Some(seq_id);
+    let mut doc = Document::new("g", 1920.0, 1080.0);
+    doc.timeline = Some(project);
+    (doc, CommandHistory::new(64), seq_id, track_id, clip_id)
+}
 
 // ── 2.1 Esc drag cancel ─────────────────────────────────────────────────────
 
@@ -162,4 +186,179 @@ fn coach_step_machine_import_split_export() {
     assert_eq!(coach_advance_button(1), (2, false));
     assert_eq!(coach_advance_button(2), (2, true));
     assert!(coach_skip_dismisses());
+}
+
+// ── Transport / split / razor / snap (command registry + ops paths) ─────────
+
+#[test]
+fn transport_split_razor_snap_commands_are_registered() {
+    let ids: Vec<&str> = commands::REGISTRY.iter().map(|c| c.id).collect();
+    for id in [
+        "video.play_pause",
+        "video.play_reverse",
+        "video.pause",
+        "video.play_forward",
+        "video.step_back",
+        "video.step_forward",
+        "video.playhead_home",
+        "video.playhead_end",
+        "video.set_in",
+        "video.set_out",
+        "video.split_at_playhead",
+        "video.toggle_razor",
+        "video.toggle_snap",
+        "video.freeze_frame",
+        "video.alpha_view",
+        "video.add_marker",
+        "video.add_bookmark",
+    ] {
+        assert!(ids.contains(&id), "missing command {id}");
+    }
+}
+
+#[test]
+fn split_at_mid_clip_via_ops_bridge_one_undo() {
+    let (mut doc, mut history, seq, track, clip) = doc_with_clip();
+    let at = Tick::from_seconds(1);
+    assert!(
+        ops_bridge::split(&mut doc, &mut history, seq, track, clip, at),
+        "split at mid-clip must commit"
+    );
+    let n = doc
+        .timeline
+        .as_ref()
+        .unwrap()
+        .sequences
+        .get(&seq)
+        .unwrap()
+        .track(track)
+        .unwrap()
+        .clips
+        .len();
+    assert_eq!(n, 2, "split produces two halves");
+    history.undo(&mut doc);
+    let n = doc
+        .timeline
+        .as_ref()
+        .unwrap()
+        .sequences
+        .get(&seq)
+        .unwrap()
+        .track(track)
+        .unwrap()
+        .clips
+        .len();
+    assert_eq!(n, 1, "one undo restores single clip");
+}
+
+// ── Markers / bookmarks (210) ───────────────────────────────────────────────
+
+#[test]
+fn add_marker_and_bookmark_via_ops_bridge() {
+    let (mut doc, mut history, seq, _track, _clip) = doc_with_clip();
+    ops_bridge::add_marker(
+        &mut doc,
+        &mut history,
+        seq,
+        Tick(TICKS_PER_SECOND / 2),
+        "Mark",
+    );
+    {
+        let s = &doc.timeline.as_ref().unwrap().sequences[&seq];
+        assert_eq!(s.markers.len(), 1);
+        assert_eq!(s.markers[0].name, "Mark");
+    }
+    history.undo(&mut doc);
+    assert!(
+        doc.timeline.as_ref().unwrap().sequences[&seq]
+            .markers
+            .is_empty()
+    );
+
+    ops_bridge::add_bookmark(
+        &mut doc,
+        &mut history,
+        seq,
+        Tick::from_seconds(1),
+        "Bookmark 1",
+    );
+    let project = doc.timeline.as_ref().unwrap();
+    let cat = project
+        .marker_categories
+        .iter()
+        .find(|c| c.name == photonic_core::timeline::MarkerCategory::BOOKMARKS_CATEGORY_NAME)
+        .map(|c| c.id);
+    assert!(cat.is_some(), "Bookmarks category must be seeded");
+    let s = &project.sequences[&seq];
+    assert_eq!(s.markers.len(), 1);
+    assert_eq!(s.markers[0].category, cat);
+    assert_eq!(s.markers[0].name, "Bookmark 1");
+}
+
+// ── Freeze + alpha view ─────────────────────────────────────────────────────
+
+#[test]
+fn freeze_frame_via_ops_bridge_one_undo() {
+    let (mut doc, mut history, seq, track, clip) = doc_with_clip();
+    ops_bridge::freeze_frame(
+        &mut doc,
+        &mut history,
+        seq,
+        track,
+        clip,
+        Tick(TICKS_PER_SECOND / 2),
+    );
+    let c = doc
+        .timeline
+        .as_ref()
+        .unwrap()
+        .sequences
+        .get(&seq)
+        .unwrap()
+        .track(track)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.id == clip)
+        .unwrap();
+    // Freeze holds via zero-rate speed map (K-B14).
+    use photonic_core::timeline::clip::{Ratio, SpeedMap};
+    assert_eq!(
+        c.speed,
+        SpeedMap::Constant(Ratio::new(0, 1)),
+        "frozen clip is zero rate"
+    );
+    history.undo(&mut doc);
+    let c = doc
+        .timeline
+        .as_ref()
+        .unwrap()
+        .sequences
+        .get(&seq)
+        .unwrap()
+        .track(track)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.id == clip)
+        .unwrap();
+    assert_eq!(
+        c.speed,
+        SpeedMap::Constant(Ratio::ONE),
+        "undo restores default 1× speed"
+    );
+}
+
+#[test]
+fn alpha_view_toggle_on_engine_bridge() {
+    let Some(engine) = photonic_video::VideoEngine::headless() else {
+        eprintln!("no GPU adapter — skipping alpha_view toggle");
+        return;
+    };
+    let mut bridge = EngineBridge::new(engine);
+    assert!(!bridge.alpha_view());
+    bridge.toggle_alpha_view();
+    assert!(bridge.alpha_view());
+    bridge.toggle_alpha_view();
+    assert!(!bridge.alpha_view());
 }

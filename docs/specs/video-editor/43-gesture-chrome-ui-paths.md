@@ -21,6 +21,10 @@ flagged gaps that need **structural path tests** on the real GUI entry points:
 | Social coach Import→Split→Export (213) | prefs + auto-advance on import | step machine pure helpers |
 | Multi-clip vertical (210 residual) | `ops_bridge::move_clips` | already covered; keep regression |
 | Gain envelope paint (210) | `keyframe_editor::paint_gain_envelope` | paint is egui-only; samples via AnimProps unit elsewhere |
+| Transport J/K/L + step + home (04 §3.2) | `monitor::video_play_*` | lib `transport_tests` |
+| Split / razor / snap / freeze cmds | `commands::REGISTRY` + `ops_bridge::split` / `freeze_frame` | registry + one-undo path |
+| Markers + bookmarks (210) | `ops_bridge::add_marker` / `add_bookmark` | marker name + Bookmarks category seed |
+| Alpha view (K-B) | `EngineBridge::toggle_alpha_view` | flag flip (GPU headless skip ok) |
 
 Paint-only chrome (snap accent stroke, coach card layout, compare wipe divider
 drag) remains visual; this document **does not** require pixel-diff of those.
@@ -96,4 +100,6 @@ Pure helpers live next to the coach drawer so the path cannot drift.
       (`gesture_chrome_paths.rs` + existing interact/layout lib tests).
 - [x] Tests fail if `EDGE_HIT_PX` regresses to paint width, if snap returns a
       miss as a hit, if compare toggle is a no-op, if coach auto-advance breaks.
+- [x] Transport / split / marker / freeze / alpha daily paths locked
+      (`gesture_chrome_paths` + `monitor::transport_tests`).
 - [x] Live GUI re-smoke after landing (vector + AS-1 / residual MCP audit).

@@ -2135,6 +2135,68 @@ mod scrubber_tests {
     }
 }
 
+/// Transport intent (04 §3.2 / §5.1) — pure GUI flags the engine reconciler reads.
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn play_pause_j_k_l_toggle_intent() {
+        let mut app = PhotonicApp::default();
+        assert!(!app.monitor_playing);
+
+        app.video_play_pause();
+        assert!(app.monitor_playing);
+        assert!(!app.monitor_play_reverse);
+        assert_eq!(app.monitor_play_speed, 1.0);
+
+        app.video_play_reverse();
+        assert!(app.monitor_playing);
+        assert!(app.monitor_play_reverse);
+
+        app.video_play_forward();
+        assert!(app.monitor_playing);
+        assert!(!app.monitor_play_reverse);
+
+        app.video_pause();
+        assert!(!app.monitor_playing);
+
+        // Repeated L ramps speed while already playing forward.
+        app.video_play_forward();
+        app.video_play_forward();
+        assert_eq!(app.monitor_play_speed, 2.0);
+    }
+
+    #[test]
+    fn step_pauses_and_moves_playhead_by_one_frame() {
+        let mut app = PhotonicApp::default();
+        let doc = Document::new("t", 1920.0, 1080.0);
+        app.monitor_playing = true;
+        app.playhead = Tick::from_seconds(1);
+        let before = app.playhead;
+
+        app.video_step_forward(&doc);
+        assert!(!app.monitor_playing);
+        assert!(app.playhead.0 > before.0);
+
+        let mid = app.playhead;
+        app.video_step_back(&doc);
+        assert!(!app.monitor_playing);
+        assert!(app.playhead.0 < mid.0);
+        assert!(app.playhead.0 >= 0);
+    }
+
+    #[test]
+    fn playhead_home_seeks_to_zero_and_pauses() {
+        let mut app = PhotonicApp::default();
+        app.playhead = Tick::from_seconds(5);
+        app.monitor_playing = true;
+        app.video_playhead_home();
+        assert_eq!(app.playhead, Tick::ZERO);
+        assert!(!app.monitor_playing);
+    }
+}
+
 #[cfg(test)]
 mod master_meter_tests {
     use super::*;
