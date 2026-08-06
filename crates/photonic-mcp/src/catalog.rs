@@ -2,6 +2,7 @@
 
 use crate::schema_gen::tool_list;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 
 /// Promote high-frequency tools so compact listings stay useful.
 pub fn promoted_tool_names() -> &'static [&'static str] {
@@ -24,12 +25,15 @@ pub fn promoted_tool_names() -> &'static [&'static str] {
     ]
 }
 
-/// All tools from the registry as JSON values.
+/// All tools from the registry as JSON values (cached for the process).
 pub fn all_tools() -> Vec<Value> {
-    match tool_list() {
-        Value::Array(a) => a,
-        other => vec![other],
-    }
+    static CACHE: OnceLock<Vec<Value>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| match tool_list() {
+            Value::Array(a) => a,
+            other => vec![other],
+        })
+        .clone()
 }
 
 fn tool_name(t: &Value) -> Option<&str> {
