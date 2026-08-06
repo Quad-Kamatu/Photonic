@@ -9,6 +9,11 @@ pub struct Args {
     #[arg(long)]
     pub headless: bool,
 
+    /// Speak MCP on stdin/stdout (Content-Length framing). Implies headless.
+    /// Prefer attach via `mcp-proxy` when a GUI is already listening.
+    #[arg(long)]
+    pub mcp_stdio: bool,
+
     /// Force the X11/XWayland backend on Linux (enables winit file drag-and-drop)
     #[arg(long)]
     pub x11: bool,

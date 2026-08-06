@@ -169,6 +169,25 @@ fn main() -> Result<()> {
         protocol_mode: args.mcp_protocol,
     };
 
+    // ── Stdio MCP (MCPB / Inspector) ──────────────────────────────────────────
+    if args.mcp_stdio {
+        info!("Running MCP on stdio (Content-Length framing)");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let mcp_server = McpServer::new(
+            Arc::clone(&document_arc),
+            Arc::clone(&history_arc),
+            capture_tx,
+            mcp_config,
+            Arc::new(AtomicBool::new(true)),
+            audit_log,
+        )
+        .with_document_path(Arc::clone(&mcp_document_path));
+        rt.block_on(photonic_mcp::stdio::run_stdio(mcp_server.state))?;
+        return Ok(());
+    }
+
     // ── Headless mode ─────────────────────────────────────────────────────────
     if args.headless {
         // Video engine: no wiring needed here — `McpServer`'s `AppState` owns
