@@ -442,6 +442,11 @@ impl EngineBridge {
         self.present_channel == PresentChannel::Alpha
     }
 
+    /// K-B5: current compare-effects view flag (43 UI-path tests).
+    pub fn compare_effects(&self) -> bool {
+        self.compare_effects
+    }
+
     /// K-B5: toggle effect-compare split; sends view-state to the engine.
     pub fn toggle_compare_effects(&mut self) {
         self.compare_effects = !self.compare_effects;

@@ -1649,17 +1649,18 @@ fn self_interact(
         }
     }
 
-    // ── Drag cancel: Esc abandons the gesture (210 §5) ──────────────────────
+    // ── Drag cancel: Esc abandons the gesture (210 §5 / 43 §2.1) ────────────
     // Dropping the transient state is the whole cancel: the document is never
     // touched mid-drag (only the ghost is painted), and `drag_stopped` below
-    // commits nothing when it finds no `DragState`. Mirrors the K-A7 keyboard
-    // grab, where Esc likewise discards the session instead of committing.
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // commits nothing when it finds no `DragState`. Decision is pure
+    // [`interact::should_cancel_drag`] so UI-path tests can lock it without egui.
+    {
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
         let had_gesture = ui.data(|d| {
             d.get_temp::<DragState>(drag_id).is_some()
                 || d.get_temp::<Marquee>(marquee_id).is_some()
         });
-        if had_gesture {
+        if interact::should_cancel_drag(escape, had_gesture) {
             ui.data_mut(|d| {
                 d.remove::<DragState>(drag_id);
                 d.remove::<Marquee>(marquee_id);

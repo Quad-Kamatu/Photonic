@@ -1932,7 +1932,7 @@ fn draw_safe_area_guides(painter: &egui::Painter, video_rect: egui::Rect) {
     );
 }
 
-// ── First-run hints (04 §1.2) + social coach (proposal 213) ──────────────────
+// ── First-run hints (04 §1.2) + social coach (proposal 213 / 43 §2.6) ───────
 
 impl PhotonicApp {
     /// Three-step coach: Import → Split → Export (proposal 213 §4).
@@ -1942,7 +1942,7 @@ impl PhotonicApp {
             return;
         }
         // Reduced motion: still show the card (static), just no tween elsewhere.
-        let step = self.prefs.video_coach_step.min(2);
+        let mut step = self.prefs.video_coach_step.min(2);
         let (title, body, next_label) = match step {
             0 => (
                 "1 · Import",
@@ -1964,9 +1964,10 @@ impl PhotonicApp {
             ),
         };
         let has_clips = sequence_has_clips(doc);
-        // Auto-advance Import → Split once media exists.
-        if step == 0 && has_clips {
-            self.prefs.video_coach_step = 1;
+        let advanced = crate::preferences::coach_auto_advance_on_clips(step, has_clips);
+        if advanced != step {
+            step = advanced;
+            self.prefs.video_coach_step = step;
             self.prefs.save();
         }
 
@@ -1997,15 +1998,18 @@ impl PhotonicApp {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if ui.button(next_label).clicked() {
-                                if step >= 2 {
+                                let (new_step, dismissed) =
+                                    crate::preferences::coach_advance_button(step);
+                                if dismissed {
                                     self.prefs.video_coach_dismissed = true;
-                                    self.prefs.save();
                                 } else {
-                                    self.prefs.video_coach_step = step + 1;
-                                    self.prefs.save();
+                                    self.prefs.video_coach_step = new_step;
                                 }
+                                self.prefs.save();
                             }
-                            if ui.small_button("Skip").clicked() {
+                            if ui.small_button("Skip").clicked()
+                                && crate::preferences::coach_skip_dismisses()
+                            {
                                 self.prefs.video_coach_dismissed = true;
                                 self.prefs.save();
                             }

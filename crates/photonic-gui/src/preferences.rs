@@ -187,6 +187,31 @@ pub struct AppPreferences {
 /// binding change that must reach existing installs (proposal 212).
 pub const KEYMAP_SCHEMA_CURRENT: u32 = 1;
 
+// ── Social coach step machine (proposal 213 / 43-gesture-chrome-ui-paths §2.6) ─
+
+/// Auto-advance Import → Split once the sequence has clips.
+pub fn coach_auto_advance_on_clips(step: u8, has_clips: bool) -> u8 {
+    if step == 0 && has_clips {
+        1
+    } else {
+        step
+    }
+}
+
+/// Next/Done button: returns `(new_step, dismissed)`.
+pub fn coach_advance_button(step: u8) -> (u8, bool) {
+    if step >= 2 {
+        (step, true)
+    } else {
+        (step.saturating_add(1).min(2), false)
+    }
+}
+
+/// Skip always dismisses the coach.
+pub fn coach_skip_dismisses() -> bool {
+    true
+}
+
 /// Apply ordered keymap migrations up to [`KEYMAP_SCHEMA_CURRENT`].
 ///
 /// Migrations **never** overwrite a binding the user customized (value differs

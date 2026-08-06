@@ -22,8 +22,11 @@ use photonic_core::timeline::{
 
 /// Which part of a clip rect the pointer is over (04 §2.3: 6px edge zones = trim,
 /// interior = body/move).
+///
+/// `pub` so UI-path integration tests (43-gesture-chrome-ui-paths) can lock the
+/// zone classification against `EDGE_HIT_PX` without re-implementing hit math.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClipZone {
+pub enum ClipZone {
     LeftEdge,
     Body,
     RightEdge,
@@ -229,7 +232,7 @@ pub(crate) fn hit_at(
 ///   wide enough to have had a body zone at 6px still has one at 12px. Without
 ///   this, widening the handle would make any clip under 24px un-draggable —
 ///   trading a trim-target win for a move-target regression.
-pub(crate) fn hit_zone(x0: f32, x1: f32, px: f32, edge: f32) -> Option<ClipZone> {
+pub fn hit_zone(x0: f32, x1: f32, px: f32, edge: f32) -> Option<ClipZone> {
     if px < x0 || px > x1 {
         return None;
     }
@@ -255,12 +258,21 @@ pub(crate) fn hit_zone(x0: f32, x1: f32, px: f32, edge: f32) -> Option<ClipZone>
 /// Choose a snap target for `value` from `candidates` (priority-ordered). Returns
 /// the first candidate within `threshold` ticks, so a higher-priority candidate
 /// wins even when a lower-priority one is marginally closer (04 §2.5).
-pub(crate) fn nearest_snap(value: Tick, candidates: &[Tick], threshold: Tick) -> Option<Tick> {
+pub fn nearest_snap(value: Tick, candidates: &[Tick], threshold: Tick) -> Option<Tick> {
     let thr = threshold.0.abs();
     candidates
         .iter()
         .copied()
         .find(|c| (c.0 - value.0).abs() <= thr)
+}
+
+/// Esc drag-cancel decision (210 §5 / 43 §2.1).
+///
+/// When true, the timeline frame must **drop** transient `DragState` / marquee
+/// and must **not** call `commit_drag`. The document is never mutated mid-drag
+/// (only a ghost is painted), so clearing state is the whole cancel.
+pub fn should_cancel_drag(escape_pressed: bool, drag_active: bool) -> bool {
+    escape_pressed && drag_active
 }
 
 /// Apply snapping (when enabled) then frame-quantize. `value` is a raw lane tick;
@@ -1000,6 +1012,14 @@ mod tests {
             hit_at(egui::pos2(50.0, 15.0), 6.0, &candidates),
             Some((unlocked_track, unlocked_clip, rect, ClipZone::Body))
         );
+    }
+
+    #[test]
+    fn should_cancel_drag_only_when_escape_and_active() {
+        assert!(!should_cancel_drag(false, false));
+        assert!(!should_cancel_drag(false, true));
+        assert!(!should_cancel_drag(true, false));
+        assert!(should_cancel_drag(true, true));
     }
 
     #[test]
