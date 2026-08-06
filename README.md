@@ -33,11 +33,26 @@ cargo run --release
 cargo run --release -- path/to/file.photonic
 ```
 
-### Running the MCP server (headless)
+### Running the MCP server
 
-```sh
-cargo run --release -- mcp --port 7842
+Photonic embeds an MCP server for AI-assisted editing. Protocol details, PathPolicy,
+Pattern B (`search_actions` / compact `tools/list`), and MCPB packaging:
+
+→ **[docs/specs/mcp-2026-07-28.md](docs/specs/mcp-2026-07-28.md)** · full tool reference **[docs/mcp-api.md](docs/mcp-api.md)**
+
+```bash
+# HTTP (loopback). Token auto-written unless --mcp-secret is set.
+cargo run -p photonic-app -- --headless --mcp-port 7842
+
+# Stdio (Content-Length; MCPB / Inspector)
+cargo run -p photonic-app -- --mcp-stdio
+
+# Pack a local .mcpb (debug structural smoke)
+./packaging/mcpb/scripts/pack-debug.sh
 ```
+
+Default `tools/list` is **compact** (search + promoted tools). Full catalog: `params.full: true`.
+
 
 The MCP server listens on `http://localhost:7842` and accepts JSON-RPC 2.0 requests.
 

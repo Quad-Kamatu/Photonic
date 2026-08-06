@@ -1,3 +1,8 @@
+//! Photonic MCP server: JSON-RPC tools for AI-assisted editing.
+//!
+//! Protocol versioning, stdio, PathPolicy integration, and Pattern B catalog
+//! helpers are documented in **`docs/specs/mcp-2026-07-28.md`**.
+//!
 #![recursion_limit = "2048"]
 pub mod auth;
 pub mod dispatch;
