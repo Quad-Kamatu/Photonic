@@ -8737,7 +8737,7 @@ mod tests {
             history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
             capture_tx: Arc::new(StdMutex::new(tx)),
             config: McpServerConfig::default(),
-            path_policy: photonic_core::PathPolicy::desktop_default(),
+            path_policy: photonic_core::PathPolicy::test_default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
             video_engine: Arc::new(crate::handlers::video_jobs::VideoEngineHandle::new()),

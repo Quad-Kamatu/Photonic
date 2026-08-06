@@ -98,6 +98,16 @@ impl PathPolicy {
         Self::new(roots, true)
     }
 
+    /// Desktop defaults plus the system temp directory.
+    ///
+    /// Unit/integration tests typically write under `std::env::temp_dir()`; production
+    /// MCP servers should keep using [`Self::desktop_default`] (or a narrower root list).
+    pub fn test_default() -> Self {
+        let mut roots = Self::desktop_default().roots;
+        roots.push(std::env::temp_dir());
+        Self::new(roots, true)
+    }
+
     /// Check `path` for `access`. Returns the canonical absolute path if allowed.
     pub fn check(&self, path: impl AsRef<Path>, access: PathAccess) -> PathVerdict {
         let path = path.as_ref();
