@@ -21,7 +21,7 @@
 
 use crate::{
     canvas::CanvasView,
-    tessellator::{tessellate_fill, tessellate_stroke, Mesh},
+    tessellator::{adaptive_tolerance, tessellate_fill, tessellate_stroke, Mesh},
 };
 use photonic_core::{
     node::{NodeId, SceneNode, SceneNodeKind},
@@ -283,7 +283,11 @@ fn render_color_overlay(
     if a <= 0.0 {
         return;
     }
-    let mesh = tessellate_fill(&pn.path_data, false);
+    let mesh = tessellate_fill(
+        &pn.path_data,
+        false,
+        adaptive_tolerance(view.zoom, &transform.matrix),
+    );
     if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
         let rgb = [overlay.color.r, overlay.color.g, overlay.color.b];
         composite_coverage(base, w, view, cov, bbox, overlay.blend_mode, |_, _| {
@@ -355,7 +359,11 @@ fn render_gradient_overlay(
     if alpha <= 0.0 || overlay.gradient.stops.is_empty() {
         return;
     }
-    let mesh = tessellate_fill(&pn.path_data, false);
+    let mesh = tessellate_fill(
+        &pn.path_data,
+        false,
+        adaptive_tolerance(view.zoom, &transform.matrix),
+    );
     // Document-space bbox of the shape (post-transform), like the fill path.
     let m = &transform.matrix;
     let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -421,6 +429,7 @@ fn render_stroke_effect(
         LineCap::Butt,
         LineJoin::Miter,
         4.0,
+        adaptive_tolerance(view.zoom, &transform.matrix),
     );
     if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
         let rgb = [c.r, c.g, c.b];
@@ -447,7 +456,11 @@ fn render_path_node(
     if pn.fill.enabled && !matches!(pn.fill.kind, FillKind::None) {
         let opacity = pn.fill.opacity * node_opacity * gop;
         if opacity > 0.0 {
-            let mesh = tessellate_fill(&pn.path_data, false);
+            let mesh = tessellate_fill(
+                &pn.path_data,
+                false,
+                adaptive_tolerance(view.zoom, &transform.matrix),
+            );
             if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
                 // Object-space gradients resolve against the fill's bbox; the
                 // rotation-following variant resolves + samples in local space
@@ -508,6 +521,7 @@ fn render_path_node(
                 sc.line_cap,
                 sc.line_join,
                 sc.miter_limit as f32,
+                adaptive_tolerance(view.zoom, &transform.matrix),
             );
             if let Some(bbox) = rasterize_mesh(cov, w, h, &mesh, transform, view) {
                 match &sc.paint {

@@ -67,9 +67,10 @@ ignore = [
     "RUSTSEC-2024-0436", # paste — unmaintained (pulled in transitively)
     "RUSTSEC-2025-0119", # number_prefix — unmaintained (transitive via indicatif/hf-hub)
     "RUSTSEC-2026-0192", # ttf-parser — unmaintained (text shaping via glyphon/text-on-path)
-    # rustybuzz unmaintained: no safe upgrade; pulled via cosmic-text → glyphon.
-    # Alternative is harfrust once cosmic-text/glyphon migrate. Revisit then.
-    "RUSTSEC-2026-0206", # rustybuzz — unmaintained (text shaping via glyphon)
+    # rustybuzz is pulled transitively by glyphon/cosmic-text. No maintained
+    # drop-in exists at the currently pinned glyphon version; revisit when the
+    # text stack migrates to harfrust.
+    "RUSTSEC-2026-0206",
     # quick-xml DoS advisories: fix needs quick-xml >=0.41, but our only users are
     # transitive and pin older majors — wayland-scanner (winit, a build-time
     # proc-macro, no runtime XML) and self_update (parses our own GitHub release

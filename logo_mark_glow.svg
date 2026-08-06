@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="473.28" height="473.28" viewBox="19.36 19.36 473.28 473.28">
+  <defs>
+    <radialGradient id="grad-0" cx="256" cy="256" r="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3E86D6" stop-opacity="0.6902"/>
+      <stop offset="0.5" stop-color="#1E4F94" stop-opacity="0.2510"/>
+      <stop offset="1" stop-color="#0A1830" stop-opacity="0.0000"/>
+    </radialGradient>
+    <radialGradient id="grad-1" cx="256" cy="256" r="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.333" stop-color="#B8DCFF"/>
+      <stop offset="0.667" stop-color="#3A8AD4"/>
+      <stop offset="1" stop-color="#0E2A50"/>
+    </radialGradient>
+    <radialGradient id="grad-2" cx="256" cy="256" r="212" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.25" stop-color="#D0ECFF"/>
+      <stop offset="0.5" stop-color="#5CB4F5"/>
+      <stop offset="0.75" stop-color="#1E5FA8"/>
+      <stop offset="1" stop-color="#0C2A56"/>
+    </radialGradient>
+    <radialGradient id="grad-3" cx="256" cy="256" r="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E8F5FF"/>
+    </radialGradient>
+  </defs>
+  <path id="halo-glow" fill="url(#grad-0)" stroke="none" d="M446 256C446 360.934 360.934 446 256 446C151.066 446 66 360.934 66 256C66 151.066 151.066 66 256 66C360.934 66 446 151.066 446 256"/>
+  <path id="twinkle-star" opacity="0.5500" fill="url(#grad-1)" stroke="none" d="M151 151L256 248L361 151L264 256L361 361L256 264L151 361L248 256Z"/>
+  <path id="photonic-star" fill="url(#grad-2)" stroke="none" d="M256 52L270 242L460 256L270 270L256 460L242 270L52 256L242 242Z"/>
+  <path id="core" fill="url(#grad-3)" stroke="none" d="M256 238L274 256L256 274L238 256Z"/>
+</svg>

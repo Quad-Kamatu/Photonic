@@ -37,6 +37,9 @@ use photonic_core::style::{LineCap, LineJoin};
 
 use crate::tessellator::{tessellate_fill, tessellate_stroke, tessellate_stroke_variable, Mesh};
 
+/// Flatness used when the live zoom scale is not threaded into the cache key.
+const DEFAULT_TOLERANCE: f32 = 0.25;
+
 /// Content-addressed memo over the three `tessellate_*` functions, plus
 /// per-frame instrumentation used by the render-perf statement / tests.
 #[derive(Default)]
@@ -126,7 +129,7 @@ impl TessCache {
         even_odd: bool,
     ) -> Arc<Mesh> {
         let key = mix(&[svg_hash, 0, even_odd as u64]);
-        self.get_or(node, key, || tessellate_fill(path, even_odd))
+        self.get_or(node, key, || tessellate_fill(path, even_odd, DEFAULT_TOLERANCE))
     }
 
     /// Memoized [`tessellate_stroke`].
@@ -150,7 +153,7 @@ impl TessCache {
             miter.to_bits() as u64,
         ]);
         self.get_or(node, key, || {
-            tessellate_stroke(path, width, cap, join, miter)
+            tessellate_stroke(path, width, cap, join, miter, DEFAULT_TOLERANCE)
         })
     }
 
@@ -167,7 +170,7 @@ impl TessCache {
             w.to_bits().hash(&mut wh);
         }
         let key = mix(&[svg_hash, 2, wh.finish()]);
-        self.get_or(node, key, || tessellate_stroke_variable(path, widths))
+        self.get_or(node, key, || tessellate_stroke_variable(path, widths, DEFAULT_TOLERANCE as f64))
     }
 }
 
@@ -188,7 +191,7 @@ mod tests {
         let sh = hash_svg(path.as_svg());
 
         let cached = cache.fill(node, &path, sh, false);
-        let direct = tessellate_fill(&path, false);
+        let direct = tessellate_fill(&path, false, DEFAULT_TOLERANCE);
         // Byte-identical to a fresh tessellation — the correctness backbone of
         // the whole refactor (memo of a pure function is transparent).
         assert_eq!(cached.vertices, direct.vertices);

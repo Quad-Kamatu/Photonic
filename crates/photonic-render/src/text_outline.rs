@@ -98,6 +98,22 @@ fn is_generic_family(name: &str) -> bool {
     )
 }
 
+/// Convert document/CSS family names into cosmic-text's generic-family
+/// variants. Passing `"sans-serif"` through as `Family::Name` happens to work
+/// on some font backends (for example via a Fontconfig alias) but resolves to
+/// no glyphs on others, including the macOS CI runner. Keep concrete family
+/// names as names while making generic defaults genuinely platform-portable.
+pub(crate) fn cosmic_family(name: &str) -> Family<'_> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "serif" | "ui-serif" => Family::Serif,
+        "sans-serif" | "system-ui" | "ui-sans-serif" | "sans" => Family::SansSerif,
+        "monospace" | "ui-monospace" | "mono" => Family::Monospace,
+        "cursive" => Family::Cursive,
+        "fantasy" => Family::Fantasy,
+        _ => Family::Name(name),
+    }
+}
+
 /// Look up the family name, weight, and style of a resolved font id in the DB.
 fn face_info(font_system: &FontSystem, id: fontdb::ID) -> Option<ResolvedFace> {
     let info = font_system.db().face(id)?;
@@ -175,7 +191,7 @@ pub fn resolve_document_font(
         FontStyle::Normal => GlyphonStyle::Normal,
     };
     let attrs = Attrs::new()
-        .family(Family::Name(&node.font_family))
+        .family(cosmic_family(&node.font_family))
         .weight(Weight(node.font_weight))
         .style(glyph_style);
     buf.set_text(font_system, probe, attrs, Shaping::Advanced);
@@ -222,7 +238,7 @@ pub fn layout_text_flat(font_system: &mut FontSystem, node: &TextNode) -> PathDa
         FontStyle::Normal => GlyphonStyle::Normal,
     };
     let attrs = Attrs::new()
-        .family(Family::Name(&node.font_family))
+        .family(cosmic_family(&node.font_family))
         .weight(Weight(node.font_weight))
         .style(glyph_style);
 

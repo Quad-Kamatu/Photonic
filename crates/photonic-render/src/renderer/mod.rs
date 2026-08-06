@@ -9,11 +9,11 @@ use crate::{
         separable_blend_state, BlurBlend, BlurParams, CameraUniform, CompositeParams, DrawSegment,
         Vertex, SEPARABLE_BLEND_MODES,
     },
-    tessellator::tessellate_fill,
+    tessellator::{adaptive_tolerance, tessellate_fill},
 };
 use anyhow::{anyhow, Result};
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
+    Attrs, Buffer, Cache, Color as GlyphonColor, FontSystem, Metrics, Resolution, Shaping,
     Style as GlyphonStyle, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
     Weight,
 };
@@ -888,7 +888,7 @@ impl PhotonicRenderer {
         let line_height = fs * 1.2;
         let mut buf = Buffer::new(&mut self.font_system, Metrics::new(fs, line_height));
         buf.set_size(&mut self.font_system, None, None);
-        let attrs = Attrs::new().family(Family::Name(font_family));
+        let attrs = Attrs::new().family(crate::text_outline::cosmic_family(font_family));
         buf.set_text(&mut self.font_system, content, attrs, Shaping::Advanced);
         buf.shape_until_scroll(&mut self.font_system, false);
         let width = buf.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
@@ -1559,7 +1559,7 @@ impl PhotonicRenderer {
                     photonic_core::style::LineCap::Round,
                     join,
                     4.0,
-                );
+                                    );
                 if mesh.is_empty() {
                     continue;
                 }
@@ -2034,7 +2034,7 @@ impl PhotonicRenderer {
                     photonic_core::style::LineCap::Butt,
                     photonic_core::style::LineJoin::Miter,
                     4.0,
-                );
+                                    );
                 if mesh.is_empty() {
                     continue;
                 }
@@ -2152,7 +2152,11 @@ impl PhotonicRenderer {
         let text_seg_start = idxs.len() as u32;
         for (glyphs, rgba) in &self.pending_path_text {
             for glyph in glyphs {
-                let mesh = tessellate_fill(glyph, false);
+                let mesh = tessellate_fill(
+                    glyph,
+                    false,
+                    adaptive_tolerance(self.view.zoom, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                );
                 if mesh.is_empty() {
                     continue;
                 }

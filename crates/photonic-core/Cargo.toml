@@ -30,7 +30,14 @@ unicode-segmentation = "1.13"
 # (42 §6.3). Already resolved at 0.2.2; cargo-deny clean (deny.toml allows
 # Unicode-3.0).
 unicode-width = "0.2"
+# Parallel CPU raster (epic #228): filters, blends, adjustments.
+rayon = "1"
 
 [dev-dependencies]
 # Property-based testing for timeline edit-op invariants (11 §3.1).
 proptest = { workspace = true }
+criterion = "0.5"
+
+[[bench]]
+name = "convolution"
+harness = false
