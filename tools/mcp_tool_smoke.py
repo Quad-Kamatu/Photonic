@@ -32,18 +32,24 @@ def rpc(
     req_id: int = 1,
     mcp_name: str | None = None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "method": method,
-        "params": params if params is not None else {},
-        "_meta": {
+    params_obj: dict[str, Any] = dict(params) if params else {}
+    # Protocol 2026-07-28: _meta lives under params (not top-level JSON-RPC).
+    params_obj.setdefault(
+        "_meta",
+        {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
             "io.modelcontextprotocol/clientInfo": {
                 "name": "mcp_tool_smoke",
                 "version": "1.0.0",
             },
         },
+    )
+    body: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": method,
+        "params": params_obj,
     }
     data = json.dumps(body).encode("utf-8")
     headers = {
