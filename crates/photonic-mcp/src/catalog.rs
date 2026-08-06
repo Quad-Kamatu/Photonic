@@ -14,7 +14,7 @@ pub fn promoted_tool_names() -> &'static [&'static str] {
         "get_document_state",
         "list_artboards",
         "create_shape",
-        "set_fill",
+        "set_paint",
         "save_document",
         "create_sequence",
         "list_sequences",
