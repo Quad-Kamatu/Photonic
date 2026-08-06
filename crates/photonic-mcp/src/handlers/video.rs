@@ -4093,7 +4093,14 @@ pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult
 ///   hash recorded, stale `probe` dropped — it described the old bytes).
 pub async fn relink_media(state: &AppState, args: RelinkMediaArgs) -> ToolResult {
     tracing::debug!("tool: relink_media {}", args.asset_id);
-    let new_path = std::path::PathBuf::from(&args.new_path);
+    let new_path = match crate::path_guard::check_path(
+        state,
+        &args.new_path,
+        photonic_core::PathAccess::Read,
+    ) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     if !new_path.exists() {
         return err_code("AssetOffline", format!("file not found: {}", args.new_path));
     }
@@ -5741,8 +5748,21 @@ pub async fn transcode_media(state: &AppState, args: TranscodeMediaArgs) -> Tool
     };
     let (enc_args, ext, preset_name) = args.preset.ffmpeg_spec();
     let out_path = match &args.out_path {
-        Some(p) => std::path::PathBuf::from(p),
-        None => input.with_extension(format!("{preset_name}.{ext}")),
+        Some(p) => match crate::path_guard::check_path(
+            state,
+            p,
+            photonic_core::PathAccess::Write,
+        ) {
+            Ok(path) => path,
+            Err(e) => return e,
+        },
+        None => {
+            let p = input.with_extension(format!("{preset_name}.{ext}"));
+            match crate::path_guard::check_path(state, &p, photonic_core::PathAccess::Write) {
+                Ok(path) => path,
+                Err(e) => return e,
+            }
+        }
     };
     if out_path == input {
         return ToolResult::error("out_path must differ from the source file");
@@ -7098,7 +7118,15 @@ fn caption_format_from(path: &str, explicit: Option<&str>) -> Option<String> {
 
 pub async fn import_captions(state: &AppState, args: ImportCaptionsArgs) -> ToolResult {
     tracing::debug!("tool: import_captions {}", args.track_id);
-    let content = match std::fs::read_to_string(&args.path) {
+    let cap_path = match crate::path_guard::check_path(
+        state,
+        &args.path,
+        photonic_core::PathAccess::Read,
+    ) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let content = match std::fs::read_to_string(&cap_path) {
         Ok(c) => c,
         Err(e) => return ToolResult::error(format!("could not read {}: {e}", args.path)),
     };
@@ -7170,15 +7198,23 @@ pub async fn export_captions(state: &AppState, args: ExportCaptionsArgs) -> Tool
             ))
         }
     };
-    if let Err(e) = std::fs::write(&args.path, text) {
-        return ToolResult::error(format!("could not write {}: {e}", args.path));
+    let out_path = match crate::path_guard::check_path(
+        state,
+        &args.path,
+        photonic_core::PathAccess::Write,
+    ) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Err(e) = std::fs::write(&out_path, text) {
+        return ToolResult::error(format!("could not write {}: {e}", out_path.display()));
     }
     ToolResult::text(format!(
         "Exported {} cue(s) to {}",
         ct.cues.len(),
-        args.path
+        out_path.display()
     ))
-    .with_data(json!({ "path": args.path, "notes": notes }))
+    .with_data(json!({ "path": out_path, "notes": notes }))
 }
 
 // ─── TTS (10 §3.9) ───────────────────────────────────────────────────────────
@@ -7469,7 +7505,14 @@ pub async fn apply_lut(state: &AppState, args: ApplyLutArgs) -> ToolResult {
     let lut_asset: Option<(AssetId, TimelineCmd)> = match &args.lut_path {
         None => None,
         Some(path) => {
-            let pb = std::path::PathBuf::from(path);
+            let pb = match crate::path_guard::check_path(
+                state,
+                path,
+                photonic_core::PathAccess::Read,
+            ) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             if !pb.exists() {
                 return err_code("AssetOffline", format!("LUT file not found: {path}"));
             }
