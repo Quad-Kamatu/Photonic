@@ -164,7 +164,7 @@ fn main() -> Result<()> {
     let mcp_config = McpServerConfig {
         port: args.mcp_port,
         secret,
-        protocol_mode: photonic_mcp::protocol::ProtocolMode::Dual,
+        protocol_mode: args.mcp_protocol,
     };
 
     // ── Headless mode ─────────────────────────────────────────────────────────
