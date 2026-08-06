@@ -10,6 +10,11 @@ the "one script, one job" convention started by `gen-mcp-docs.py`.
   list (`cargo run -p photonic-mcp --bin dump_tools | python3
   tools/gen-mcp-docs.py > docs/mcp-api.md`). No server needed — reads the
   tool manifest straight from `photonic_mcp::server::tool_list()`.
+  Protocol / PathPolicy / Pattern B / MCPB: see
+  `docs/specs/mcp-2026-07-28.md`.
+- **`mcp_tool_smoke.py`** — live full-catalog **registration** smoke against a
+  running headless MCP server (`tools/list` full, then `tools/call` each name
+  with `{}`). Pass when no `Unknown tool` responses. See spec §8.
 - **`gen-test-fixtures.py`** — regenerates the video-editor test-media
   corpus under `crates/photonic-video/tests/fixtures/`. ffmpeg-dependent,
   run locally when a fixture needs to change; CI consumes the committed

@@ -33,13 +33,30 @@ cargo run --release
 cargo run --release -- path/to/file.photonic
 ```
 
-### Running the MCP server (headless)
+### Running the MCP server
 
-```sh
-cargo run --release -- mcp --port 7842
+Photonic embeds an MCP server for AI-assisted editing. Protocol details, PathPolicy,
+Pattern B (`search_actions` / compact `tools/list`), and MCPB packaging:
+
+→ **[docs/specs/mcp-2026-07-28.md](docs/specs/mcp-2026-07-28.md)** · full tool reference **[docs/mcp-api.md](docs/mcp-api.md)**
+
+```bash
+# HTTP (loopback). Token auto-written unless --mcp-secret is set.
+cargo run -p photonic-app -- --headless --mcp-port 7842
+
+# Stdio (Content-Length; MCPB / Inspector)
+cargo run -p photonic-app -- --mcp-stdio
+
+# Attach to a running GUI instance
+PHOTONIC_MCP_TOKEN=$(cat ~/.config/Photonic/mcp_token) \
+  cargo run -p photonic-app -- mcp-proxy --server 127.0.0.1:7842
+
+# Pack a local .mcpb (debug structural smoke)
+./packaging/mcpb/scripts/pack-debug.sh
 ```
 
-The MCP server listens on `http://localhost:7842` and accepts JSON-RPC 2.0 requests.
+Default `tools/list` is **compact** (search + promoted tools). Full catalog: `params.full: true`.
+
 
 ### Lua REPL
 
@@ -57,9 +74,11 @@ photonic/
 │   ├── photonic-gui/      # egui GUI
 │   ├── photonic-mcp/      # MCP server & JSON-RPC handlers
 │   └── photonic-app/      # Binary entry point
+├── packaging/mcpb/        # MCP Bundle (.mcpb) pack scripts + manifest
 ├── docs/
 │   ├── architecture.md    # Crate design and internals
 │   ├── mcp-api.md         # MCP tool reference
+│   ├── specs/mcp-2026-07-28.md  # Protocol, PathPolicy, Pattern B, MCPB
 │   └── file-format.md     # .photonic file format
 └── ROADMAP.md             # Planned features
 ```
@@ -71,6 +90,7 @@ photonic/
 | [docs/architecture.md](docs/architecture.md) | Crate breakdown, data model, concurrency model |
 | [docs/raster-editing.md](docs/raster-editing.md) | Raster (pixel) editing subsystem — model, ops, MCP surface, phasing |
 | [docs/mcp-api.md](docs/mcp-api.md) | Every MCP tool with parameters and examples |
+| [docs/specs/mcp-2026-07-28.md](docs/specs/mcp-2026-07-28.md) | MCP protocol 2026-07-28, auth, PathPolicy, Pattern B, MCPB packaging |
 | [docs/file-format.md](docs/file-format.md) | `.photonic` JSON schema reference |
 
 ## Crates at a Glance

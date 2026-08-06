@@ -1,3 +1,8 @@
+//! Photonic MCP server: JSON-RPC tools for AI-assisted editing.
+//!
+//! Protocol versioning, stdio, PathPolicy integration, and Pattern B catalog
+//! helpers are documented in **`docs/specs/mcp-2026-07-28.md`**.
+//!
 #![recursion_limit = "2048"]
 // `pub` (29 §3 / CAP-019): the acceptance-story harness in
 // `crates/photonic-app/tests/` must drive the real tool-call path — the

@@ -1,5 +1,7 @@
 //! Path containment for MCP and other untrusted path inputs (28-security-model §3).
 //!
+//! See also `docs/specs/mcp-2026-07-28.md` §5 and `photonic_mcp::path_guard`.
+//!
 //! Component-wise root checks (never string-prefix), canonicalize with
 //! deepest-existing-ancestor for write targets that do not exist yet.
 
