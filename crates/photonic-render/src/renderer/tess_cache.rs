@@ -129,7 +129,9 @@ impl TessCache {
         even_odd: bool,
     ) -> Arc<Mesh> {
         let key = mix(&[svg_hash, 0, even_odd as u64]);
-        self.get_or(node, key, || tessellate_fill(path, even_odd, DEFAULT_TOLERANCE))
+        self.get_or(node, key, || {
+            tessellate_fill(path, even_odd, DEFAULT_TOLERANCE)
+        })
     }
 
     /// Memoized [`tessellate_stroke`].
@@ -170,7 +172,9 @@ impl TessCache {
             w.to_bits().hash(&mut wh);
         }
         let key = mix(&[svg_hash, 2, wh.finish()]);
-        self.get_or(node, key, || tessellate_stroke_variable(path, widths, DEFAULT_TOLERANCE as f64))
+        self.get_or(node, key, || {
+            tessellate_stroke_variable(path, widths, DEFAULT_TOLERANCE as f64)
+        })
     }
 }
 

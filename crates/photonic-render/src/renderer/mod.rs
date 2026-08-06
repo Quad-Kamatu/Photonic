@@ -1559,7 +1559,7 @@ impl PhotonicRenderer {
                     photonic_core::style::LineCap::Round,
                     join,
                     4.0,
-                                    );
+                );
                 if mesh.is_empty() {
                     continue;
                 }
@@ -2034,7 +2034,7 @@ impl PhotonicRenderer {
                     photonic_core::style::LineCap::Butt,
                     photonic_core::style::LineJoin::Miter,
                     4.0,
-                                    );
+                );
                 if mesh.is_empty() {
                     continue;
                 }

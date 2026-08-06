@@ -814,8 +814,7 @@ impl HeadlessRenderer {
         // over the video graph, so its alpha must be meaningful.
         let mut view = CanvasView::new(w, h);
         view.fit_to_rect(0.0, 0.0, document.width, document.height);
-        let (verts, idxs, segments, blur_jobs) =
-            build_geometry(document, false, false, view.zoom);
+        let (verts, idxs, segments, blur_jobs) = build_geometry(document, false, false, view.zoom);
         let cam = CameraUniform::from_viewport(view.pan_x, view.pan_y, view.zoom, w, h);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cam));
