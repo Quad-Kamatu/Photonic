@@ -32,12 +32,12 @@ use photonic_core::timeline::grade::{
     CdlParams, Grade, GradeMask, GradeOp, GradeOpKind, GradeOpParams, LutInterp, WindowShape,
 };
 use photonic_core::timeline::{
-    Clip, ClipSource, FrameRate, Sequence, TimelineProject, Track, TrackKind, Transition,
-    TransitionKind, TransitionParams,
+    Clip, ClipSource, EffectKind, FrameRate, PropPath, PropValue, Sequence, TimelineProject, Track,
+    TrackKind, Transition, TransitionKind, TransitionParams, UnknownTag,
 };
 use photonic_core::Color;
 
-use photonic_video::contract::{AssetId, Tick, VectorRef, VectorStateKey};
+use photonic_video::contract::{AssetId, ResolvedParams, Tick, VectorRef, VectorStateKey};
 use photonic_video::graph::compile::{compile, CompiledFrame, Quality};
 use photonic_video::graph::eval::{
     read_texture_rgba16f, Evaluator, GpuContext, GpuFrame, GpuFrameSource, NullFrameSource,
@@ -656,6 +656,101 @@ fn masked_grade_cpu_gpu_parity_at_an_awkward_canvas() {
             AWKWARD_CANVAS,
         );
     }
+}
+
+/// Opaque white square inset in a transparent canvas — silhouette for outline.
+fn square_matte_image(w: u32, h: u32, inset: u32) -> Image {
+    let mut img = Image::new(w, h);
+    for y in inset..h.saturating_sub(inset) {
+        for x in inset..w.saturating_sub(inset) {
+            img.pixels[(y * w + x) as usize] = [1.0, 1.0, 1.0, 1.0];
+        }
+    }
+    img
+}
+
+/// CPU↔GPU parity for `util.outline` (30 §5 / proposal 208): the GPU path must
+/// be a real SDF-band twin of the CPU oracle, not a no-op blit or the old
+/// linear-ramp box search. A solid exterior band + Hermite AA at thickness.
+#[test]
+fn util_outline_sdf_cpu_gpu_parity() {
+    let Some(gpu) = gpu_or_skip("util.outline SDF parity") else {
+        return;
+    };
+    // Large enough that thickness-4 has room; not a 64-multiple so logical dims
+    // exercise the same path production uses.
+    const W: u32 = 48;
+    const H: u32 = 40;
+    const THICK: f32 = 4.0;
+    let image = square_matte_image(W, H, 12);
+
+    let mut params = ResolvedParams::default();
+    params.entries.push((
+        PropPath::new("params.thickness"),
+        PropValue::Float(THICK as f64),
+    ));
+    params
+        .entries
+        .push((PropPath::new("params.r"), PropValue::Float(1.0)));
+    params
+        .entries
+        .push((PropPath::new("params.g"), PropValue::Float(0.0)));
+    params
+        .entries
+        .push((PropPath::new("params.b"), PropValue::Float(0.0)));
+    params
+        .entries
+        .push((PropPath::new("params.opacity"), PropValue::Float(1.0)));
+
+    let graph = FrameGraph {
+        nodes: vec![
+            IrNode {
+                op: IrOp::DecodeStill {
+                    asset: AssetId::new(),
+                },
+                inputs: vec![],
+                content_hash: ContentHash(2081),
+            },
+            IrNode {
+                op: IrOp::Effect {
+                    kind: EffectKind::Unknown(UnknownTag::intern("util.outline")),
+                    params,
+                },
+                inputs: vec![(IrNodeId(0), OutPort::default())],
+                content_hash: ContentHash(2082),
+            },
+        ],
+        output: Some(IrNodeId(1)),
+    };
+
+    let cpu = eval_cpu::evaluate(
+        &graph,
+        (W, H),
+        &mut PatternCpuSource {
+            image: image.clone(),
+        },
+    );
+    // Guard: the outline must actually paint exterior pixels (not a no-op blit).
+    let mut exterior_alpha = 0.0f32;
+    for y in 0..H {
+        for x in 0..W {
+            if image.pixel(x, y)[3] < 0.5 {
+                exterior_alpha = exterior_alpha.max(cpu.pixel(x, y)[3]);
+            }
+        }
+    }
+    assert!(
+        exterior_alpha > 0.5,
+        "outline must paint exterior coverage (got max exterior alpha {exterior_alpha}); \
+         otherwise the parity sweep is vacuous"
+    );
+
+    let mut src = PatternGpuSource {
+        frame: GpuFrame::new(upload_pattern(&gpu, &image), W, H),
+    };
+    let g = eval_gpu_at(&gpu, &graph, &mut src, (W, H));
+    // Algebraic SDF band: tight channel tolerance (same as grade/merge rows).
+    assert_pixels_within("util.outline/sdf", &cpu, &g, 2e-2);
 }
 
 const ALL_LUT_INTERP: [LutInterp; 2] = [LutInterp::Trilinear, LutInterp::Tetrahedral];

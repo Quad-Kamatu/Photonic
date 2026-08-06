@@ -1737,12 +1737,68 @@ impl Passes {
 
         // Outline: util2_bgl = tex + 32-byte uniform (info + color).
         // info = [thickness, opacity, logical_w, logical_h], col = [r, g, b, pad]
+        //
+        // WGSL twin of `raster_bridge::util_outline` / proposal 208 §4.1:
+        // exterior Euclidean distance to alpha≥0.5 coverage (same isosurface as
+        // the CPU Jump-Flood field for exterior points), solid stroke band out
+        // to `thickness`, Hermite smoothstep AA of half-width 1.0 at the outer
+        // rim, source-over-outline composite. Replaces the old linear-ramp box
+        // search that diverged from the CPU oracle on corners and band profile.
         let util2_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("util2_bgl"),
             entries: &[tex_entry(0), uniform_entry(1)],
         });
         let outline_src = format!(
-            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct P {{ info: vec4<f32>, col: vec4<f32> }}\n@group(0) @binding(1) var<uniform> p: P;\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  let lw = p.info.z; let lh = p.info.w;\n  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}\n  let x = i32(pos.x); let y = i32(pos.y);\n  let hi = vec2<i32>(i32(lw), i32(lh)) - vec2<i32>(1);\n  let center = textureLoad(t, clamp(vec2<i32>(x, y), vec2<i32>(0), hi), 0);\n  let thick = max(p.info.x, 0.0);\n  let tpx = i32(ceil(thick));\n  var min_d = 1e9;\n  let inside = center.a > 0.5;\n  if (!inside && tpx > 0) {{\n    for (var j = -tpx; j <= tpx; j++) {{\n      for (var i = -tpx; i <= tpx; i++) {{\n        let a = textureLoad(t, clamp(vec2<i32>(x + i, y + j), vec2<i32>(0), hi), 0).a;\n        if (a > 0.5) {{ min_d = min(min_d, sqrt(f32(i * i + j * j))); }}\n      }}\n    }}\n  }}\n  var edge = 0.0;\n  if (!inside && min_d <= thick) {{ edge = clamp(1.0 - min_d / max(thick, 1e-4), 0.0, 1.0); }}\n  let ea = edge * clamp(p.info.y, 0.0, 1.0);\n  let outline = p.col.xyz * ea;\n  return vec4<f32>(center.rgb + outline * (1.0 - center.a), center.a + ea * (1.0 - center.a));\n}}\n"
+            r#"{QUAD_VS}
+@group(0) @binding(0) var t: texture_2d<f32>;
+struct P {{ info: vec4<f32>, col: vec4<f32> }}
+@group(0) @binding(1) var<uniform> p: P;
+fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
+  return textureLoad(t, clamp(vec2<i32>(x, y), vec2<i32>(0), hi), 0).a;
+}}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{
+  let lw = p.info.z; let lh = p.info.w;
+  if (pos.x >= lw || pos.y >= lh) {{ return vec4<f32>(0.0); }}
+  let x = i32(pos.x); let y = i32(pos.y);
+  let hi = vec2<i32>(i32(lw), i32(lh)) - vec2<i32>(1);
+  let center = textureLoad(t, clamp(vec2<i32>(x, y), vec2<i32>(0), hi), 0);
+  let thick = max(p.info.x, 0.0);
+  let opac = clamp(p.info.y, 0.0, 1.0);
+  // AA half-width matches OUTLINE_AA_PX on the CPU path (1.0 px).
+  let aa = 1.0;
+  // Search radius covers solid band + AA rim (CPU JFA is unbounded; for the
+  // outline band only distances ≤ thickness+aa matter).
+  let tpx = i32(ceil(thick + aa));
+  var min_d = 1e9;
+  let inside = center.a >= 0.5;
+  if (!inside && tpx > 0) {{
+    for (var j = -tpx; j <= tpx; j++) {{
+      for (var i = -tpx; i <= tpx; i++) {{
+        if (alpha_at(x + i, y + j, hi) >= 0.5) {{
+          min_d = min(min_d, sqrt(f32(i * i + j * j)));
+        }}
+      }}
+    }}
+  }}
+  // Exterior signed distance ≈ +min_d; deep exterior with no seed → far.
+  var dist = min_d;
+  if (inside) {{
+    // Interior contributes full band under the source; source composites over.
+    dist = -1.0;
+  }}
+  // Solid from isosurface out to thickness, Hermite AA at outer rim:
+  // t = ((dist - (thickness - aa)) / (2*aa)).clamp(0,1); band = 1 - smoothstep(t)
+  let t = clamp((dist - (thick - aa)) / (2.0 * aa), 0.0, 1.0);
+  let band = 1.0 - t * t * (3.0 - 2.0 * t);
+  let ea = band * opac;
+  let outline = p.col.xyz * ea;
+  // Premultiplied over: source over outline (outline behind content).
+  return vec4<f32>(
+    center.rgb + outline * (1.0 - center.a),
+    center.a + ea * (1.0 - center.a)
+  );
+}}
+"#
         );
         let outline_pipeline = make_pipeline(device, &util2_bgl, &outline_src, "fs");
 

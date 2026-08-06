@@ -203,10 +203,10 @@ A blocked or before-zero move is refused **whole** — a half-applied selection 
 not a state the user asked for. Link partners fold into the same moving set
 rather than expanding per clip, so a partner that is also selected moves once.
 
-**Residual: vertical (cross-track) multi-move**, which needs a track-offset
-model, and group move via [194 K-A5](194-k-a5-general-and-nested-clip-groups.md).
-A cross-track drag of a multi-selection falls through to the single-clip path
-rather than collapsing every member onto one row.
+**Vertical multi-move landed** via `track_delta` on `ops::move_clips` (same-kind
+lane-index offset for every member; higher-lane-first apply order; GUI
+`same_kind_track_delta` + MCP `track_delta`). **Residual:** group move via
+[194 K-A5](194-k-a5-general-and-nested-clip-groups.md).
 
 ---
 

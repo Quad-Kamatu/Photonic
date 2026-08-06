@@ -858,3 +858,108 @@ fn ui_as3_motion_graphics_structural_arm() {
     assert_eq!(x_track.keyframes.len(), 2);
     assert_eq!(x_track.keyframes[1].value, PropValue::Float(200.0));
 }
+
+// ── 9. Multi-clip vertical move (210) via the real timeline ops_bridge ──────
+
+/// Drag-commit path for multi-select body move with track_delta: same
+/// `ops_bridge::move_clips` the timeline panel calls on pointer release
+/// (`commit_drag` → multi-select branch). Linked audio rides time-only.
+#[test]
+fn ui_multi_clip_vertical_move_via_ops_bridge() {
+    use photonic_core::timeline::Clip;
+    use photonic_gui::app::timeline::ops_bridge;
+
+    let mut doc = Document::new("mv", 1920.0, 1080.0);
+    let mut history = CommandHistory::new(64);
+    let mut project = TimelineProject::new();
+    let mut seq = Sequence::new("Seq", FrameRate::FPS_30, 1920, 1080);
+    let seq_id = seq.id;
+
+    let group = photonic_core::timeline::clip::LinkGroupId::new();
+
+    let mut v1 = Track::new(TrackKind::Video, "V1");
+    let v1_id = v1.id;
+    let mut c1 = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100));
+    let c1_id = c1.id;
+    c1.link_group = Some(group);
+    v1.clips.push(c1);
+
+    let mut v2 = Track::new(TrackKind::Video, "V2");
+    let v2_id = v2.id;
+    let c2 = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100));
+    let c2_id = c2.id;
+    v2.clips.push(c2);
+
+    let v3 = Track::new(TrackKind::Video, "V3");
+    let v3_id = v3.id;
+
+    let mut a1 = Track::new(TrackKind::Audio, "A1");
+    let a1_id = a1.id;
+    let mut ac = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100));
+    let ac_id = ac.id;
+    ac.link_group = Some(group);
+    a1.clips.push(ac);
+
+    seq.video_tracks.extend([v1, v2, v3]);
+    seq.audio_tracks.push(a1);
+    project.sequences.insert(seq_id, seq);
+    project.active_sequence = Some(seq_id);
+    doc.timeline = Some(project);
+
+    // Same call site as multi-select drag commit: selection is video clips;
+    // ops_bridge folds the linked audio partner.
+    ops_bridge::move_clips(
+        &mut doc,
+        &mut history,
+        seq_id,
+        &[(v1_id, c1_id), (v2_id, c2_id)],
+        Tick(40),
+        1,
+    );
+
+    let s = &doc.timeline.as_ref().unwrap().sequences[&seq_id];
+    assert!(
+        s.track(v1_id).unwrap().clips.iter().all(|c| c.id != c1_id),
+        "V1 vacated"
+    );
+    assert!(
+        s.track(v2_id)
+            .unwrap()
+            .clips
+            .iter()
+            .any(|c| c.id == c1_id && c.start == Tick(40)),
+        "c1 on V2 @ +40"
+    );
+    assert!(
+        s.track(v3_id)
+            .unwrap()
+            .clips
+            .iter()
+            .any(|c| c.id == c2_id && c.start == Tick(40)),
+        "c2 on V3 @ +40"
+    );
+    let audio = s
+        .track(a1_id)
+        .unwrap()
+        .clips
+        .iter()
+        .find(|c| c.id == ac_id)
+        .expect("audio stays on A1");
+    assert_eq!(audio.start, Tick(40), "linked audio time-only");
+
+    // One undo restores the multi-clip gesture.
+    history.undo(&mut doc);
+    let s = &doc.timeline.as_ref().unwrap().sequences[&seq_id];
+    assert!(s.track(v1_id).unwrap().clips.iter().any(|c| c.id == c1_id));
+    assert!(s.track(v2_id).unwrap().clips.iter().any(|c| c.id == c2_id));
+    assert_eq!(
+        s.track(a1_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == ac_id)
+            .unwrap()
+            .start,
+        Tick(0)
+    );
+}

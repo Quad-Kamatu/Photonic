@@ -1312,7 +1312,13 @@ pub async fn move_clips(state: &AppState, args: MoveClipsArgs) -> ToolResult {
     }
     let seq_id = seq_id.expect("clip_ids is non-empty and every id resolved");
 
-    match ops::move_clips(project, seq_id, &moving, Tick(args.delta_ticks)) {
+    match ops::move_clips(
+        project,
+        seq_id,
+        &moving,
+        Tick(args.delta_ticks),
+        args.track_delta,
+    ) {
         Ok(cmds) if cmds.is_empty() => ToolResult::text("No clips moved (zero delta)"),
         Ok(cmds) => {
             let n = cmds.len();

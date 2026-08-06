@@ -1104,8 +1104,9 @@ pub fn remove_clip(
     })
 }
 
-/// Shift several clips along the timeline by one shared `delta`, each staying
-/// on its own track (04 §2.6 multi-select, 210 §5).
+/// Shift several clips by one shared time `delta` and optional vertical
+/// `track_delta` (same relative lane offset for every member of matching kind)
+/// (04 §2.6 multi-select, 210 §5).
 ///
 /// # Why this is a plural op and not a loop over [`move_clip`]
 ///
@@ -1122,25 +1123,46 @@ pub fn remove_clip(
 ///    hazard 194 K-A5 records). Commands are emitted rightmost-first when
 ///    moving later and leftmost-first when moving earlier, so each clip lands
 ///    in space its neighbour has already left and no intermediate state is
-///    ever invalid.
+///    ever invalid. Vertical moves use the same rule on lane index: higher
+///    source lanes first when `track_delta > 0`, lower first when negative.
 ///
-/// Returns commands in that safe application order. Empty when `delta == 0` or
-/// nothing is addressed. Rejects the whole move rather than applying part of
-/// it: a partial multi-clip move is not a state the user asked for.
+/// `track_delta` is an index offset within the sequence's same-kind track list
+/// (`Sequence::tracks_for`). It is applied **per kind independently**: a kind
+/// whose members all have a valid destination takes the offset; a kind that
+/// cannot (e.g. a single audio track when link partners ride along with a
+/// video vertical drag) keeps every member of that kind on its own track and
+/// applies **time only** — the same contract as single-clip
+/// [`move_clip_cross_track`] / `expand_link_group_move` (partners never change
+/// track). Relative lane spacing within a kind is never half-applied.
+///
+/// Returns commands in that safe application order. Empty when nothing would
+/// change (zero time delta and no successful track reassignment). Rejects the
+/// whole move on overlap / before-zero rather than applying part of it.
 pub fn move_clips(
     p: &TimelineProject,
     id: SequenceId,
     moving: &[(TrackId, ClipId)],
     delta: Tick,
+    track_delta: i32,
 ) -> Result<Vec<TimelineCmd>, EditError> {
-    if delta.0 == 0 || moving.is_empty() {
+    if moving.is_empty() || (delta.0 == 0 && track_delta == 0) {
         return Ok(Vec::new());
     }
     let s = seq(p, id)?;
 
-    // Resolve every addressed clip up front so an unknown id fails before any
-    // command is built.
-    let mut resolved = Vec::with_capacity(moving.len());
+    // Resolve geometry first (kind + lane index), then decide per-kind whether
+    // track_delta is applicable so a linked A/V set does not fail the video
+    // half when the audio lane list has no room for a vertical step.
+    struct ResolvedClip {
+        track_id: TrackId,
+        clip_id: ClipId,
+        old_start: Tick,
+        duration: Tick,
+        new_start: Tick,
+        kind: TrackKind,
+        src_idx: usize,
+    }
+    let mut resolved: Vec<ResolvedClip> = Vec::with_capacity(moving.len());
     for (track_id, clip_id) in moving {
         let t = track(s, *track_id)?;
         let c = clip(t, *clip_id)?;
@@ -1148,12 +1170,90 @@ pub fn move_clips(
         if new_start.0 < 0 {
             return Err(EditError::Overlap);
         }
-        resolved.push((*track_id, *clip_id, c.start, c.duration, new_start));
+        let lanes = s.tracks_for(t.kind);
+        let src_idx = lanes
+            .iter()
+            .position(|lane| lane.id == *track_id)
+            .ok_or(EditError::NoTrack(*track_id))?;
+        resolved.push(ResolvedClip {
+            track_id: *track_id,
+            clip_id: *clip_id,
+            old_start: c.start,
+            duration: c.duration,
+            new_start,
+            kind: t.kind,
+            src_idx,
+        });
+    }
+
+    // Per kind: apply track_delta only when every member of that kind has a
+    // valid same-kind destination. Otherwise that kind is time-only.
+    let mut kind_takes_vertical: std::collections::HashMap<TrackKind, bool> =
+        std::collections::HashMap::new();
+    if track_delta != 0 {
+        for r in &resolved {
+            let lanes = s.tracks_for(r.kind);
+            let dest_idx = r.src_idx as i32 + track_delta;
+            let ok = dest_idx >= 0
+                && (dest_idx as usize) < lanes.len()
+                && lanes[dest_idx as usize].kind == r.kind;
+            kind_takes_vertical
+                .entry(r.kind)
+                .and_modify(|v| *v = *v && ok)
+                .or_insert(ok);
+        }
+    }
+
+    // (src_track, clip, old_start, duration, new_start, src_lane_idx, new_track, applies_vertical)
+    let mut planned: Vec<(
+        TrackId,
+        ClipId,
+        Tick,
+        Tick,
+        Tick,
+        usize,
+        Option<TrackId>,
+        bool,
+    )> = Vec::with_capacity(resolved.len());
+    for r in &resolved {
+        let apply_v =
+            track_delta != 0 && kind_takes_vertical.get(&r.kind).copied().unwrap_or(false);
+        let new_track = if apply_v {
+            let lanes = s.tracks_for(r.kind);
+            let dest = &lanes[(r.src_idx as i32 + track_delta) as usize];
+            if dest.id == r.track_id {
+                None
+            } else {
+                Some(dest.id)
+            }
+        } else {
+            None
+        };
+        // Skip no-ops (zero time and same track) so a pure-vertical OOR kind
+        // does not emit empty MoveClips.
+        if delta.0 == 0 && new_track.is_none() {
+            continue;
+        }
+        planned.push((
+            r.track_id,
+            r.clip_id,
+            r.old_start,
+            r.duration,
+            r.new_start,
+            r.src_idx,
+            new_track,
+            apply_v,
+        ));
+    }
+
+    if planned.is_empty() {
+        return Ok(Vec::new());
     }
 
     // Destination must be clear of every clip that is NOT part of the move.
-    for (track_id, _, _, duration, new_start) in &resolved {
-        let t = track(s, *track_id)?;
+    for (track_id, _, _, duration, new_start, _, new_track, _) in &planned {
+        let dest_id = new_track.unwrap_or(*track_id);
+        let t = track(s, dest_id)?;
         let end = *new_start + *duration;
         let hits_stationary = t
             .clips
@@ -1165,24 +1265,40 @@ pub fn move_clips(
         }
     }
 
-    // Trailing edge first when moving later, leading edge first when moving
-    // earlier — see the ordering note above.
-    if delta.0 > 0 {
-        resolved.sort_by_key(|(_, _, start, _, _)| std::cmp::Reverse(*start));
-    } else {
-        resolved.sort_by_key(|(_, _, start, _, _)| *start);
-    }
+    // Safe application order: vacate lanes/times before peers land there.
+    // Primary key is lane when any member moves vertically, else time.
+    let any_vertical = planned.iter().any(|p| p.7);
+    planned.sort_by(|a, b| {
+        use std::cmp::Ordering;
+        let track_ord = if any_vertical && track_delta > 0 {
+            b.5.cmp(&a.5) // higher source lane first
+        } else if any_vertical && track_delta < 0 {
+            a.5.cmp(&b.5) // lower source lane first
+        } else {
+            Ordering::Equal
+        };
+        if track_ord != Ordering::Equal {
+            return track_ord;
+        }
+        if delta.0 > 0 {
+            b.2.cmp(&a.2) // trailing edge first
+        } else if delta.0 < 0 {
+            a.2.cmp(&b.2) // leading edge first
+        } else {
+            Ordering::Equal
+        }
+    });
 
-    Ok(resolved
+    Ok(planned
         .into_iter()
         .map(
-            |(track_id, clip_id, old_start, _, new_start)| TimelineCmd::MoveClip {
+            |(track_id, clip_id, old_start, _, new_start, _, new_track, _)| TimelineCmd::MoveClip {
                 seq: id,
                 track: track_id,
                 clip: clip_id,
                 old_start,
                 new_start,
-                new_track: None,
+                new_track,
             },
         )
         .collect())
@@ -4065,7 +4181,7 @@ mod tests {
         let (mut doc, seq_id, vtrack, ids) = run_of_three();
         let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
         let project = doc.timeline.as_ref().unwrap();
-        let cmds = move_clips(project, seq_id, &moving, Tick(50)).unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(50), 0).unwrap();
         assert_eq!(cmds.len(), 3);
         for c in &cmds {
             c.apply(&mut doc);
@@ -4079,7 +4195,7 @@ mod tests {
         let (mut doc, seq_id, vtrack, ids) = run_of_three();
         let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
         let project = doc.timeline.as_ref().unwrap();
-        let cmds = move_clips(project, seq_id, &moving, Tick(-100)).unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(-100), 0).unwrap();
         for c in &cmds {
             c.apply(&mut doc);
         }
@@ -4094,7 +4210,7 @@ mod tests {
         let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
         let project = doc.timeline.as_ref().unwrap();
 
-        let later = move_clips(project, seq_id, &moving, Tick(50)).unwrap();
+        let later = move_clips(project, seq_id, &moving, Tick(50), 0).unwrap();
         let order: Vec<i64> = later
             .iter()
             .map(|c| match c {
@@ -4104,7 +4220,7 @@ mod tests {
             .collect();
         assert_eq!(order, vec![300, 200, 100], "trailing edge first");
 
-        let earlier = move_clips(project, seq_id, &moving, Tick(-50)).unwrap();
+        let earlier = move_clips(project, seq_id, &moving, Tick(-50), 0).unwrap();
         let order: Vec<i64> = earlier
             .iter()
             .map(|c| match c {
@@ -4125,11 +4241,11 @@ mod tests {
         // collide; move all three and it is fine.
         let all: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
         let project = doc.timeline.as_ref().unwrap();
-        assert!(move_clips(project, seq_id, &all, Tick(100)).is_ok());
+        assert!(move_clips(project, seq_id, &all, Tick(100), 0).is_ok());
 
         let leading: Vec<_> = ids[..2].iter().map(|c| (vtrack, *c)).collect();
         assert_eq!(
-            move_clips(project, seq_id, &leading, Tick(100)),
+            move_clips(project, seq_id, &leading, Tick(100), 0),
             Err(EditError::Overlap),
             "the third clip stays put, so the second has nowhere to land"
         );
@@ -4153,7 +4269,7 @@ mod tests {
         let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
         let project = doc.timeline.as_ref().unwrap();
         assert_eq!(
-            move_clips(project, seq_id, &moving, Tick(50)),
+            move_clips(project, seq_id, &moving, Tick(50), 0),
             Err(EditError::Overlap),
             "the trailing clip would land on the stationary one at 420"
         );
@@ -4168,11 +4284,11 @@ mod tests {
         let project = doc.timeline.as_ref().unwrap();
         // The run starts at 100, so -101 takes its leading clip to -1.
         assert_eq!(
-            move_clips(project, seq_id, &moving, Tick(-101)),
+            move_clips(project, seq_id, &moving, Tick(-101), 0),
             Err(EditError::Overlap)
         );
         // ...and the whole set is refused, not just the offending clip.
-        assert!(move_clips(project, seq_id, &moving, Tick(-100)).is_ok());
+        assert!(move_clips(project, seq_id, &moving, Tick(-100), 0).is_ok());
     }
 
     /// Clips on different tracks each keep their own track and shift together.
@@ -4182,7 +4298,7 @@ mod tests {
         let (atrack, aclip) = add_audio_clip(&mut doc, seq_id);
         let moving = vec![(vtrack, vclip), (atrack, aclip)];
         let project = doc.timeline.as_ref().unwrap();
-        let cmds = move_clips(project, seq_id, &moving, Tick(75)).unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(75), 0).unwrap();
         for c in &cmds {
             c.apply(&mut doc);
         }
@@ -4196,12 +4312,252 @@ mod tests {
         let (doc, seq_id, vtrack, ids) = run_of_three();
         let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
         let project = doc.timeline.as_ref().unwrap();
-        assert!(move_clips(project, seq_id, &moving, Tick(0))
+        assert!(move_clips(project, seq_id, &moving, Tick(0), 0)
             .unwrap()
             .is_empty());
-        assert!(move_clips(project, seq_id, &[], Tick(50))
+        assert!(move_clips(project, seq_id, &[], Tick(50), 0)
             .unwrap()
             .is_empty());
+    }
+
+    /// Two clips on adjacent video lanes share one vertical track_delta and
+    /// land on the next lanes without a transient validate panic (210 residual).
+    #[test]
+    fn move_clips_vertical_track_offset_shifts_each_lane() {
+        let (mut doc, seq_id, v1, c1) = fixture();
+        let v2 = {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let mut t = Track::new(TrackKind::Video, "V2");
+            let id = t.id;
+            let c = Clip::new(ClipSource::Adjustment, Tick(0), Tick(100));
+            t.clips.push(c);
+            seq.video_tracks.push(t);
+            id
+        };
+        let c2 = {
+            let project = doc.timeline.as_ref().unwrap();
+            project.sequences[&seq_id].track(v2).unwrap().clips[0].id
+        };
+        let v3 = {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = Track::new(TrackKind::Video, "V3");
+            let id = t.id;
+            seq.video_tracks.push(t);
+            id
+        };
+        let moving = vec![(v1, c1), (v2, c2)];
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(0), 1).unwrap();
+        assert_eq!(cmds.len(), 2);
+        // Higher source lane first so V2→V3 vacates before V1→V2 lands.
+        match &cmds[0] {
+            TimelineCmd::MoveClip {
+                clip,
+                new_track,
+                track,
+                ..
+            } => {
+                assert_eq!(*clip, c2);
+                assert_eq!(*track, v2);
+                assert_eq!(*new_track, Some(v3));
+            }
+            other => panic!("expected MoveClip, got {other:?}"),
+        }
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let seq = &project.sequences[&seq_id];
+        assert!(seq.track(v1).unwrap().clips.is_empty(), "V1 vacated");
+        assert_eq!(
+            seq.track(v2)
+                .unwrap()
+                .clips
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![c1]
+        );
+        assert_eq!(
+            seq.track(v3)
+                .unwrap()
+                .clips
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![c2]
+        );
+    }
+
+    /// Vertical + horizontal in one batch keeps relative spacing and track
+    /// offsets; applying in emission order never trips Sequence::validate.
+    #[test]
+    fn move_clips_vertical_and_horizontal_together() {
+        let (mut doc, seq_id, v1, c1) = fixture();
+        // c1 starts at 0; move later by 50 and up one lane.
+        let v2 = {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = Track::new(TrackKind::Video, "V2");
+            let id = t.id;
+            seq.video_tracks.push(t);
+            id
+        };
+        let moving = vec![(v1, c1)];
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(50), 1).unwrap();
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let clip = project.sequences[&seq_id]
+            .track(v2)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == c1)
+            .expect("clip landed on V2");
+        assert_eq!(clip.start, Tick(50));
+    }
+
+    /// An out-of-range track_delta for a kind is time-only for that kind (no
+    /// half-applied vertical). With zero time delta the move is a no-op.
+    #[test]
+    fn move_clips_out_of_range_track_delta_is_time_only_noop() {
+        let (doc, seq_id, vtrack, ids) = run_of_three();
+        let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+        assert!(
+            move_clips(project, seq_id, &moving, Tick(0), 1)
+                .unwrap()
+                .is_empty(),
+            "pure-vertical OOR must not emit commands"
+        );
+        assert!(move_clips(project, seq_id, &moving, Tick(0), -1)
+            .unwrap()
+            .is_empty());
+        // Time still applies when the vertical half is dropped.
+        let cmds = move_clips(project, seq_id, &moving, Tick(50), 1).unwrap();
+        assert_eq!(cmds.len(), 3);
+        for c in &cmds {
+            match c {
+                TimelineCmd::MoveClip { new_track, .. } => {
+                    assert!(new_track.is_none(), "OOR vertical must not reassign")
+                }
+                other => panic!("expected MoveClip, got {other:?}"),
+            }
+        }
+    }
+
+    /// Linked A/V pair: videos take track_delta; the audio partner stays on its
+    /// own track (time-only) — same contract as single-clip cross-track.
+    #[test]
+    fn move_clips_vertical_keeps_linked_audio_on_its_track() {
+        let (mut doc, seq_id, v1, c1) = fixture();
+        let v2 = {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let t = Track::new(TrackKind::Video, "V2");
+            let id = t.id;
+            seq.video_tracks.push(t);
+            id
+        };
+        let (atrack, aclip) = add_audio_clip(&mut doc, seq_id);
+        // Link V1 clip to the audio partner (same shape as GUI partner fold-in).
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let group = LinkGroupId::new();
+            seq.track_mut(v1)
+                .unwrap()
+                .clips
+                .iter_mut()
+                .find(|c| c.id == c1)
+                .unwrap()
+                .link_group = Some(group);
+            seq.track_mut(atrack)
+                .unwrap()
+                .clips
+                .iter_mut()
+                .find(|c| c.id == aclip)
+                .unwrap()
+                .link_group = Some(group);
+        }
+        // Moving set as ops_bridge builds it: video + folded audio partner.
+        let moving = vec![(v1, c1), (atrack, aclip)];
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(25), 1).unwrap();
+        assert_eq!(cmds.len(), 2, "both members emit (time and/or track)");
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        let project = doc.timeline.as_ref().unwrap();
+        let seq = &project.sequences[&seq_id];
+        // Video reassigned V1 → V2 with +25 ticks.
+        assert!(seq.track(v1).unwrap().clips.iter().all(|c| c.id != c1));
+        let v = seq
+            .track(v2)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == c1)
+            .expect("video on V2");
+        assert_eq!(v.start, Tick(25));
+        // Audio stayed on A1, time-only.
+        let a = seq
+            .track(atrack)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == aclip)
+            .expect("audio stays on its track");
+        assert_eq!(a.start, Tick(25));
+    }
+
+    /// One undo unit restores a vertical multi-move (via Batch invert).
+    #[test]
+    fn move_clips_vertical_undo_restores() {
+        let (mut doc, seq_id, v1, c1) = fixture();
+        let (v2, c2) = {
+            let project = doc.timeline.as_mut().unwrap();
+            let seq = project.sequences.get_mut(&seq_id).unwrap();
+            let mut t = Track::new(TrackKind::Video, "V2");
+            let tid = t.id;
+            let c = Clip::new(ClipSource::Adjustment, Tick(10), Tick(80));
+            let cid = c.id;
+            t.clips.push(c);
+            seq.video_tracks.push(t);
+            // spare landing lane
+            seq.video_tracks.push(Track::new(TrackKind::Video, "V3"));
+            (tid, cid)
+        };
+        let before = doc.timeline.clone();
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = move_clips(project, seq_id, &[(v1, c1), (v2, c2)], Tick(0), 1).unwrap();
+        let batch = if cmds.len() == 1 {
+            cmds.into_iter().next().unwrap()
+        } else {
+            // Apply as the GUI does: each cmd, then invert via history style.
+            for c in &cmds {
+                c.apply(&mut doc);
+            }
+            // Rebuild inverse by applying inverses in reverse order.
+            let mut invs = Vec::new();
+            for c in cmds.iter().rev() {
+                invs.push(c.inverse(&doc).expect("invert"));
+            }
+            for inv in invs {
+                inv.apply(&mut doc);
+            }
+            assert_eq!(doc.timeline, before, "vertical multi-move must fully undo");
+            return;
+        };
+        batch.apply(&mut doc);
+        let inv = batch.inverse(&doc).unwrap();
+        inv.apply(&mut doc);
+        assert_eq!(doc.timeline, before);
     }
 
     #[test]

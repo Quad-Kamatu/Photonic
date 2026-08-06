@@ -10,9 +10,10 @@
 > K-B16's `raster_bridge` (lowering as `EffectKind::Unknown("util.outline")`, so
 > it was never inert) but had shipped on a brute-force `(2t+1)²` box search —
 > the very dilation 30 rejects. See §8 for the three defects that closed.  
-> **Open:** the GPU twin — `util.outline` blits on GPU today, like every other
-> un-twinned bridge id, with CPU as the oracle. A WGSL port needs ping-pong
-> JFA passes, so it is its own piece of work.  
+> Shipped: **GPU twin for `util.outline`** — WGSL solid band + Hermite AA
+> matching the CPU oracle (`cpu_gpu_parity::util_outline_sdf_cpu_gpu_parity`).
+> Exterior Euclidean distance to the α≥0.5 isosurface (same band profile as CPU
+> JFA for the outline stroke).  
 > **Still gated:** *replacing* K-B9 / K-B8 Gaussian feather with this path — §4.4
 > lists those as optional integrations, and both owners remain Band-5
 > (198 additionally behind the 23 §11.1 patent review). Acceptance here covers
@@ -219,8 +220,7 @@ Euclidean coverage, which is exactly what a box dilation cannot reproduce),
 
 ## 9. Follow-ups
 
-- **GPU twin for `util.outline`** — blits today (CPU is the oracle, the standing
-  convention for un-twinned bridge ids). Needs ping-pong JFA passes.  
+- **GPU twin for `util.outline`** — **done** (solid-band + Hermite AA WGSL; parity test). Full multi-pass JFA on GPU remains optional if a future consumer needs unbounded exterior distance beyond the outline search radius.  
 - **`feather_coverage` still has no consumer.** The CPU op and its tests exist,
   but no `IrOp` reaches it; its distance field is now shared with the outline,
   so only the feather *entry point* is unwired. Its natural consumers are the

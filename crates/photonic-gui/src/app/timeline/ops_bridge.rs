@@ -468,15 +468,19 @@ pub fn move_clip(
 }
 
 /// Shift every clip in `clips`, plus their link-group partners, by one shared
-/// `delta` as a single undo step (04 §2.6 multi-select, 210 §5).
+/// time `delta` and vertical `track_delta` as a single undo step (04 §2.6
+/// multi-select, 210 §5).
 ///
 /// Partners are folded into one moving set rather than expanded per clip the
 /// way [`move_clip`] does it. Two reasons: a partner that is *also* selected
 /// must not be moved twice, and `ops::move_clips` needs the complete set to
 /// tell an internal collision (a clip the move is vacating) from a real one.
 ///
-/// Horizontal only — each clip keeps its own track. Vertical reassignment of a
-/// whole selection needs a track-offset model and is left to K-A5 groups.
+/// `track_delta` is a same-kind lane-index offset applied **per kind**: kinds
+/// that cannot take the step (typical: a single audio track when an A/V link
+/// partner rides along with a video vertical drag) stay on their own track and
+/// receive time only — matching [`expand_link_group_move`] / single-clip
+/// cross-track. Group move remains behind K-A5.
 /// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
 pub fn move_clips(
     doc: &mut Document,
@@ -484,6 +488,7 @@ pub fn move_clips(
     seq: SequenceId,
     clips: &[(TrackId, photonic_core::timeline::ClipId)],
     delta: Tick,
+    track_delta: i32,
 ) {
     let Some(p) = doc.timeline.as_ref() else {
         return;
@@ -499,7 +504,7 @@ pub fn move_clips(
             }
         }
     }
-    let Ok(cmds) = ops::move_clips(p, seq, &moving, delta) else {
+    let Ok(cmds) = ops::move_clips(p, seq, &moving, delta, track_delta) else {
         return;
     };
     commit_group(history, doc, cmds);
@@ -1933,6 +1938,7 @@ mod link_group_tests {
             seq,
             &[(v_track, a), (v_track, b), (v_track, c)],
             Tick(50),
+            0,
         );
         assert_eq!(start_of(&doc, seq, v_track, a), Tick(150));
         assert_eq!(start_of(&doc, seq, v_track, b), Tick(250));
@@ -1955,7 +1961,14 @@ mod link_group_tests {
         link(&mut doc, &mut history, seq, v_track, vclip, a_track, aclip);
 
         // Only the video clip is "selected"; the audio partner rides along.
-        move_clips(&mut doc, &mut history, seq, &[(v_track, vclip)], Tick(40));
+        move_clips(
+            &mut doc,
+            &mut history,
+            seq,
+            &[(v_track, vclip)],
+            Tick(40),
+            0,
+        );
         assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(140));
         assert_eq!(
             start_of(&doc, seq, a_track, aclip),
@@ -1970,6 +1983,7 @@ mod link_group_tests {
             seq,
             &[(v_track, vclip), (a_track, aclip)],
             Tick(40),
+            0,
         );
         assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(180));
         assert_eq!(
@@ -1995,10 +2009,85 @@ mod link_group_tests {
             seq,
             &[(v_track, a), (v_track, b)],
             Tick(50),
+            0,
         );
         assert_eq!(start_of(&doc, seq, v_track, a), Tick(100), "nothing moved");
         assert_eq!(start_of(&doc, seq, v_track, b), Tick(200), "nothing moved");
         assert_eq!(start_of(&doc, seq, v_track, blocker), Tick(320));
+    }
+
+    /// Vertical multi-drop: same track_delta for every selected clip, one undo.
+    #[test]
+    fn move_clips_vertical_track_offset_one_undo() {
+        let (mut doc, mut history, seq, v1, _) = doc_with_two_tracks();
+        // doc_with_two_tracks gives V1 + A1; add V2 and V3 for vertical room.
+        let v2 = {
+            let p = doc.timeline.as_mut().unwrap();
+            let s = p.sequences.get_mut(&seq).unwrap();
+            let t = Track::new(TrackKind::Video, "V2");
+            let id = t.id;
+            s.video_tracks.push(t);
+            s.video_tracks.push(Track::new(TrackKind::Video, "V3"));
+            id
+        };
+        let a = insert(&mut doc, &mut history, seq, v1, Tick(0), Tick(100));
+        let b = insert(&mut doc, &mut history, seq, v2, Tick(0), Tick(100));
+        move_clips(&mut doc, &mut history, seq, &[(v1, a), (v2, b)], Tick(0), 1);
+        // a on former v2 lane, b on V3
+        let p = doc.timeline.as_ref().unwrap();
+        let s = &p.sequences[&seq];
+        assert!(s.track(v1).unwrap().clips.iter().all(|c| c.id != a));
+        assert!(s.track(v2).unwrap().clips.iter().any(|c| c.id == a));
+        history.undo(&mut doc);
+        let p = doc.timeline.as_ref().unwrap();
+        let s = &p.sequences[&seq];
+        assert!(s.track(v1).unwrap().clips.iter().any(|c| c.id == a));
+        assert!(s.track(v2).unwrap().clips.iter().any(|c| c.id == b));
+    }
+
+    /// Linked A/V: vertical multi on the video must not fail because the audio
+    /// partner has only one lane — partner rides time-only on its own track.
+    #[test]
+    fn move_clips_vertical_with_linked_audio_partner_keeps_audio_track() {
+        let (mut doc, mut history, seq, v1, a_track) = doc_with_two_tracks();
+        let v2 = {
+            let p = doc.timeline.as_mut().unwrap();
+            let s = p.sequences.get_mut(&seq).unwrap();
+            let t = Track::new(TrackKind::Video, "V2");
+            let id = t.id;
+            s.video_tracks.push(t);
+            id
+        };
+        let vclip = insert(&mut doc, &mut history, seq, v1, Tick(0), Tick(100));
+        let aclip = insert(&mut doc, &mut history, seq, a_track, Tick(0), Tick(100));
+        link(&mut doc, &mut history, seq, v1, vclip, a_track, aclip);
+
+        // Selection is only the video clip; ops_bridge folds the audio partner.
+        // track_delta=1 would OOR the single audio track if applied to partners.
+        move_clips(&mut doc, &mut history, seq, &[(v1, vclip)], Tick(30), 1);
+
+        let p = doc.timeline.as_ref().unwrap();
+        let s = &p.sequences[&seq];
+        assert!(
+            s.track(v1).unwrap().clips.iter().all(|c| c.id != vclip),
+            "video must leave V1"
+        );
+        let v = s
+            .track(v2)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == vclip)
+            .expect("video lands on V2");
+        assert_eq!(v.start, Tick(30));
+        let a = s
+            .track(a_track)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == aclip)
+            .expect("audio partner stays on A1");
+        assert_eq!(a.start, Tick(30), "audio rides time-only");
     }
 }
 

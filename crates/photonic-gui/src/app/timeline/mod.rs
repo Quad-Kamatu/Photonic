@@ -1791,6 +1791,29 @@ fn apply_selection(selection: &mut Vec<ClipId>, clip: ClipId, mods: egui::Modifi
     }
 }
 
+/// Same-kind lane-index offset from `from` to `to` (210 vertical multi-move).
+/// `None` when either track is missing or the kinds differ (video vs audio).
+fn same_kind_track_delta(
+    doc: &Document,
+    seq_id: SequenceId,
+    from: TrackId,
+    to: TrackId,
+) -> Option<i32> {
+    if from == to {
+        return Some(0);
+    }
+    let seq = doc.timeline.as_ref()?.sequences.get(&seq_id)?;
+    let src = seq.track(from)?;
+    let dst = seq.track(to)?;
+    if src.kind != dst.kind {
+        return None;
+    }
+    let lanes = seq.tracks_for(src.kind);
+    let i = lanes.iter().position(|t| t.id == from)? as i32;
+    let j = lanes.iter().position(|t| t.id == to)? as i32;
+    Some(j - i)
+}
+
 /// Which track row contains screen-y `y` (for cross-track moves).
 fn track_at_y(
     rows: &[tracks::TrackRow],
@@ -2065,26 +2088,25 @@ fn commit_drag(
                 resolved_tick(state.orig.start + delta_raw, state, snap, frame_rate, view);
 
             // Multi-select body move (04 §2.6, 210 §5): the grabbed clip drags
-            // the rest of the selection with it by the same delta, in one undo
-            // step. Horizontal only — `ops_bridge::move_clips` keeps each clip
-            // on its own track, so a cross-track drag of a multi-selection
-            // falls through to the single-clip path below rather than
-            // reassigning every member to one row.
-            if selection.len() > 1
-                && selection.contains(&state.clip)
-                && state.dest_track == state.track
-            {
+            // the rest of the selection with it by the same time delta and
+            // same-kind track_delta, in one undo step. Relative lane spacing
+            // is preserved (every member shifts by the primary's lane offset).
+            if selection.len() > 1 && selection.contains(&state.clip) {
                 if let Some(moving) = resolve_selection_tracks(doc, seq_id, selection) {
+                    let track_delta =
+                        same_kind_track_delta(doc, seq_id, state.track, state.dest_track)
+                            .unwrap_or(0);
                     // Deliberately unclamped: clamping the primary to zero
                     // would shrink the delta and squash the spacing the
                     // selection had. `ops::move_clips` refuses the whole move
-                    // if any member would land before zero.
+                    // if any member would land before zero or off the lane list.
                     ops_bridge::move_clips(
                         doc,
                         history,
                         seq_id,
                         &moving,
                         new_start - state.orig.start,
+                        track_delta,
                     );
                     return;
                 }

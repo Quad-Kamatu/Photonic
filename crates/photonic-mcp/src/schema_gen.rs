@@ -5257,12 +5257,13 @@ pub fn tool_list() -> Value {
             },
             {
                 "name": "move_clips",
-                "description": "Shift several clips along the timeline by one shared delta, preserving their relative spacing, in a single undo step. Each clip keeps its own track (there is no plural cross-track move — use move_clip for that). Linked partners ride along automatically and are never moved twice. The move is refused as a whole if any clip would land on a clip outside the set or before zero; collisions *within* the set are fine, since the set is displaced as a body.",
+                "description": "Shift several clips along the timeline by one shared time delta and optional same-kind track_delta (lane index offset), preserving relative spacing, in a single undo step. Linked partners ride along automatically and are never moved twice. The move is refused as a whole if any clip would land on a clip outside the set, before zero, or off the lane list; collisions *within* the set are fine, since the set is displaced as a body.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "clip_ids": { "type": "array", "items": { "type": "string" }, "description": "All must be in the same sequence." },
-                        "delta_ticks": { "type": "integer", "description": "Signed offset applied to every clip. Negative moves earlier." }
+                        "delta_ticks": { "type": "integer", "description": "Signed time offset applied to every clip. Negative moves earlier." },
+                        "track_delta": { "type": "integer", "description": "Same-kind lane-index offset (0 = stay on track). Video and audio lists are separate." }
                     },
                     "required": ["clip_ids","delta_ticks"]
                 }

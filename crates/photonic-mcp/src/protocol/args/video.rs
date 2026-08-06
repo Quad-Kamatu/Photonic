@@ -401,14 +401,17 @@ pub struct MoveClipArgs {
 /// gap (`ops::ripple_trim`). `edge` uses the same in/out vocabulary as
 /// `trim_clip` (in = clip's in-point/`ClipEdge::Start`, out = clip's
 /// out-point/`ClipEdge::End`).
-/// Args for `move_clips` — shift several clips by one shared delta in a single
-/// undo step (04 §2.6 multi-select, 210 §5). Each clip keeps its own track;
-/// there is no plural cross-track move. `delta_ticks` rather than an absolute
-/// start, because the operation's whole point is preserving relative spacing.
+/// Args for `move_clips` — shift several clips by one shared time delta and
+/// optional same-kind track offset in a single undo step (04 §2.6 multi-select,
+/// 210 §5). `delta_ticks` preserves relative spacing; `track_delta` is a lane
+/// index offset within the sequence's video or audio list (default 0).
 #[derive(Debug, Deserialize)]
 pub struct MoveClipsArgs {
     pub clip_ids: Vec<ClipId>,
     pub delta_ticks: i64,
+    /// Same-kind lane-index offset applied to every clip (0 = stay on track).
+    #[serde(default)]
+    pub track_delta: i32,
 }
 
 #[derive(Debug, Deserialize)]
