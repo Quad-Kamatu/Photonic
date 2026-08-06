@@ -153,9 +153,18 @@ fn main() -> Result<()> {
     let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::new()));
     let mcp_document_path = Arc::new(std::sync::Mutex::new(args.file.clone()));
 
+    let secret = args.mcp_secret.clone().or_else(|| {
+        let tok = photonic_mcp::auth::generate_token();
+        match photonic_mcp::auth::write_token(&tok) {
+            Ok(path) => tracing::info!("MCP session token written to {}", path.display()),
+            Err(e) => tracing::warn!("could not write MCP token file: {e}"),
+        }
+        Some(tok)
+    });
     let mcp_config = McpServerConfig {
         port: args.mcp_port,
-        secret: args.mcp_secret,
+        secret,
+        protocol_mode: photonic_mcp::protocol::ProtocolMode::Dual,
     };
 
     // ── Headless mode ─────────────────────────────────────────────────────────

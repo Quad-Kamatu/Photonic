@@ -1,4 +1,5 @@
 #![recursion_limit = "1024"]
+pub mod auth;
 pub mod dispatch;
 
 pub mod handlers;
