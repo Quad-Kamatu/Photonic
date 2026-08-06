@@ -26,6 +26,7 @@ use tracing::info;
 pub struct McpServerConfig {
     pub port: u16,
     pub secret: Option<String>,
+    /// Protocol negotiation policy (`dual` default — see `ProtocolMode`).
     pub protocol_mode: crate::protocol::ProtocolMode,
 }
 
@@ -81,6 +82,33 @@ pub struct AppState {
     pub clipboard_ring: Arc<StdMutex<ClipboardRing>>,
 }
 
+impl AppState {
+    /// Builds a fully in-memory `AppState` for out-of-crate integration tests
+    /// (29 §3 / CAP-019 acceptance-story harness) so callers need not hand-roll
+    /// all nine fields. Shape mirrors `mcp_parity.rs`'s `test_state()`:
+    /// a fresh 1920×1080 document, a 200-entry history, no document path,
+    /// `McpServerConfig::default()` (no bearer secret → the transport auth
+    /// layer is open, but the harness bypasses the transport anyway), an empty
+    /// audit log, and freshly constructed clipboard/video registries.
+    ///
+    /// The `capture_tx` receiver is deliberately leaked: no screenshot is ever
+    /// requested in a headless test, and leaking keeps the channel from
+    /// reporting a disconnected receiver if some path ever does send.
+    pub fn headless_for_test() -> Self {
+        let (capture_tx, capture_rx) = std::sync::mpsc::channel();
+        std::mem::forget(capture_rx);
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("t", 1920.0, 1080.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(200))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(capture_tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+}
+
 /// The MCP server — wraps axum and owns shared state.
 pub struct McpServer {
     pub state: AppState,
@@ -106,7 +134,7 @@ impl McpServer {
                 config,
                 audit_log,
                 clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
-            },
+                    },
             running,
         }
     }
@@ -130,9 +158,11 @@ impl McpServer {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
-                let doc = bg_state.document.lock().await;
-                let mut history = bg_state.history.lock().await;
-                history.tick_mcp_checkpoint(&doc);
+                {
+                    let doc = bg_state.document.lock().await;
+                    let mut history = bg_state.history.lock().await;
+                    history.tick_mcp_checkpoint(&doc);
+                }
             }
         });
 
@@ -146,10 +176,25 @@ impl McpServer {
     }
 }
 
+/// Builds the MCP router.
+///
+/// Deliberately carries NO CORS layer (28 §4 point 1): the server has no
+/// legitimate browser client, so it emits no `access-control-allow-origin`
+/// and answers no preflight. Combined with the bearer requirement below —
+/// which forces a preflight for any cross-origin caller — that closes the
+/// "any page you visit can drive your editor" vector. Neither half suffices
+/// alone.
+///
+/// `pub` so integration tests can drive it without binding a socket.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp))
+        // Cap request body size (DoS / huge tool args) before JSON parse.
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
+        // `route_layer`, not `layer`: auth runs only for matched routes (so
+        // unknown paths still 404 without touching the auth path) and, more
+        // importantly, runs BEFORE `handle_mcp` deserializes the body, so an
+        // unauthenticated caller cannot probe the JSON-RPC parser.
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -157,42 +202,79 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-
-/// Rejects every request that does not present the session token.
+/// Rejects every request that does not present the session token
+/// (28 §4 point 2).
+///
+/// On rejection this returns a bare 401 — no body, no JSON-RPC error object,
+/// no `WWW-Authenticate` header — so an unauthenticated prober learns nothing
+/// about what is listening. The presented token is never logged.
 async fn require_bearer(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    // No secret configured → open. In production `main.rs` always sets one;
+    // this arm exists for `McpServerConfig::default()`, used only by
+    // in-process test states that bypass the transport entirely.
     let Some(expected) = state.config.secret.as_deref() else {
         return next.run(req).await;
     };
+
     let presented = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split_once(' '))
+        // The scheme is case-insensitive per RFC 7235; the token is not.
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
         .map(|(_, token)| token);
+
     match presented {
         Some(token) if crate::auth::token_eq(token, expected) => next.run(req).await,
         _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
     }
 }
 
-/// Main MCP JSON-RPC handler.
+/// Main MCP JSON-RPC handler (HTTP).
 async fn handle_mcp(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> Response {
+    let header_method = headers
+        .get("mcp-method")
+        .or_else(|| headers.get("Mcp-Method"))
+        .and_then(|v| v.to_str().ok());
+    let header_name = headers
+        .get("mcp-name")
+        .or_else(|| headers.get("Mcp-Name"))
+        .and_then(|v| v.to_str().ok());
+    match process_rpc_request(state, req, header_method, header_name).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err((status, resp)) => (status, Json(resp)).into_response(),
+    }
+}
+
+/// Shared JSON-RPC entry used by HTTP and stdio transports.
+///
+/// Returns `Ok(response)` for JSON-RPC success/error payloads that should use
+/// HTTP 200, or `Err((status, response))` when the protocol demands a non-200
+/// status (invalid params / header mismatch / etc.).
+pub async fn process_rpc_request(
+    state: AppState,
+    req: JsonRpcRequest,
+    header_method: Option<&str>,
+    header_name: Option<&str>,
+) -> Result<JsonRpcResponse, (axum::http::StatusCode, JsonRpcResponse)> {
     if req.jsonrpc != "2.0" {
-        return Json(JsonRpcResponse::error(
-            req.id.clone(),
-            crate::protocol::ERR_INVALID_REQUEST,
-            "Invalid JSON-RPC version",
-        ))
-        .into_response();
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            JsonRpcResponse::error(
+                req.id,
+                crate::protocol::ERR_INVALID_REQUEST,
+                "Invalid JSON-RPC version",
+            ),
+        ));
     }
 
     let mode = state.config.protocol_mode;
@@ -202,77 +284,67 @@ async fn handle_mcp(
     } else {
         None
     };
-    let header_method = headers
-        .get("mcp-method")
-        .or_else(|| headers.get("Mcp-Method"))
-        .and_then(|v| v.to_str().ok());
-    let header_name = headers
-        .get("mcp-name")
-        .or_else(|| headers.get("Mcp-Name"))
-        .and_then(|v| v.to_str().ok());
 
     if let Err(e) =
         envelope::validate_mcp_headers(mode, header_method, header_name, &req.method, tool_name)
     {
-        return rpc_err_response(req.id.clone(), e);
+        return Err(rpc_to_http(req.id, e));
     }
 
-    // Lifecycle methods that predate per-request _meta.
     if req.method == "initialize" {
         return match mode {
-            ProtocolMode::Dual => Json(JsonRpcResponse::success(
+            ProtocolMode::Dual => Ok(JsonRpcResponse::success(
                 req.id,
                 envelope::legacy_initialize_result(),
-            ))
-            .into_response(),
-            ProtocolMode::Strict => rpc_err_response(
+            )),
+            ProtocolMode::Strict => Err(rpc_to_http(
                 req.id,
                 RpcError::new(
                     crate::protocol::ERR_METHOD_NOT_FOUND,
                     "initialize removed in 2026-07-28; use server/discover",
                 )
                 .http(400),
-            ),
+            )),
         };
     }
     if req.method == "notifications/initialized" {
         return match mode {
-            ProtocolMode::Dual => {
-                Json(JsonRpcResponse::success(req.id, json!({ "status": "ok" }))).into_response()
-            }
-            ProtocolMode::Strict => rpc_err_response(
+            ProtocolMode::Dual => Ok(JsonRpcResponse::success(req.id, json!({ "status": "ok" }))),
+            ProtocolMode::Strict => Err(rpc_to_http(
                 req.id,
                 RpcError::new(
                     crate::protocol::ERR_METHOD_NOT_FOUND,
                     "notifications/initialized is not used in 2026-07-28",
                 )
                 .http(400),
-            ),
+            )),
         };
     }
 
-    // discover may be called without prior handshake; still negotiate dialect.
     let dialect = match envelope::negotiate_dialect(mode, &params) {
         Ok(d) => d,
-        Err(e) => return rpc_err_response(req.id.clone(), e),
+        Err(e) => return Err(rpc_to_http(req.id, e)),
     };
 
-    let result = dispatch_method(state, &req.method, params, dialect).await;
-    match result {
-        Ok(value) => Json(JsonRpcResponse::success(req.id, value)).into_response(),
-        Err(e) => rpc_err_response(req.id, e),
+    match dispatch_method(state, &req.method, params, dialect).await {
+        Ok(value) => Ok(JsonRpcResponse::success(req.id, value)),
+        Err(e) => {
+            if e.http_status.is_some() {
+                Err(rpc_to_http(req.id, e))
+            } else {
+                Ok(JsonRpcResponse::from_rpc_error(req.id, e))
+            }
+        }
     }
 }
 
-fn rpc_err_response(id: Option<Value>, err: RpcError) -> Response {
-    let status = err.http_status.unwrap_or(200);
-    let body = Json(JsonRpcResponse::from_rpc_error(id, err));
-    if status == 200 {
-        body.into_response()
-    } else {
-        (axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_REQUEST), body)
-            .into_response()
-    }
+fn rpc_to_http(
+    id: Option<Value>,
+    err: RpcError,
+) -> (axum::http::StatusCode, JsonRpcResponse) {
+    let status = axum::http::StatusCode::from_u16(err.http_status.unwrap_or(400))
+        .unwrap_or(axum::http::StatusCode::BAD_REQUEST);
+    (status, JsonRpcResponse::from_rpc_error(id, err))
 }
 
 async fn dispatch_method(

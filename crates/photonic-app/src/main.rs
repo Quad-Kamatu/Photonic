@@ -168,6 +168,23 @@ fn main() -> Result<()> {
     };
 
     // ── Headless mode ─────────────────────────────────────────────────────────
+    if args.mcp_stdio {
+        tracing::info!("Running MCP on stdio (Content-Length framing)");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let mcp_server = McpServer::new(
+            Arc::clone(&document_arc),
+            Arc::clone(&history_arc),
+            capture_tx.clone(),
+            mcp_config.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            Arc::clone(&audit_log),
+        );
+        // optional with_document_path if available
+        rt.block_on(photonic_mcp::stdio::run_stdio(mcp_server.state))?;
+        return Ok(());
+    }
     if args.headless {
         info!("Running in headless mode (MCP server only)");
         let rt = tokio::runtime::Builder::new_multi_thread()

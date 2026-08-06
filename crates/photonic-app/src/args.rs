@@ -8,6 +8,8 @@ pub struct Args {
     /// Run without a GUI window (MCP server only)
     #[arg(long)]
     pub headless: bool,
+    #[arg(long)]
+    pub mcp_stdio: bool,
 
     /// Force the X11/XWayland backend on Linux (enables winit file drag-and-drop)
     #[arg(long)]
