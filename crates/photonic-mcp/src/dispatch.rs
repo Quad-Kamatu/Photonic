@@ -2,7 +2,7 @@ use crate::handlers;
 use crate::protocol::*;
 use crate::server::{AppState, ToolOutput};
 use photonic_core::{audit_timestamp, AuditEntry, Command, Document};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Notify the checkpoint system that a mutation has occurred.
 /// Resets the 60-second debounce window; the background task flushes it.
@@ -168,6 +168,26 @@ pub(crate) async fn dispatch_tool_inner(
 ) -> Result<ToolOutput, String> {
     match name {
         // ── Mutating tools (write to the document) ──────────────────────────────
+                "search_actions" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
+            let data = crate::catalog::search_actions(&query, limit);
+            return Ok(ToolOutput::readonly(
+                crate::protocol::ToolResult::text(format!("Found {} action(s) for {query:?}", data["count"]))
+                    .with_data(data),
+            ));
+        }
+        "execute_action" => {
+            let action = args.get("name").and_then(|v| v.as_str()).ok_or_else(|| "execute_action requires name".to_string())?.to_string();
+            if action == "search_actions" || action == "execute_action" {
+                return Ok(ToolOutput::readonly(crate::protocol::ToolResult::error(
+                    "execute_action cannot invoke itself or search_actions",
+                )));
+            }
+            let nested = args.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+            return Box::pin(dispatch_tool_inner(state, &action, nested)).await;
+        }
+
         "create_shape" => {
             let a: CreateShapeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(
@@ -2163,6 +2183,7 @@ mod tests {
             document_path: Arc::new(StdMutex::new(None)),
             capture_tx: Arc::new(StdMutex::new(tx)),
             config: McpServerConfig::default(),
+            path_policy: photonic_core::PathPolicy::desktop_default(),
             audit_log: Arc::new(StdMutex::new(AuditLog::new())),
             clipboard_ring: Arc::new(new_clipboard_ring()),
         }
