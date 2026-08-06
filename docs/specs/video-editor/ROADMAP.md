@@ -131,9 +131,9 @@ Landed and pushed on this branch (most recent first). Each row is committed with
 | Item | Proposal | Status | Notes |
 |---|---|---|---|
 | Index + fence | [207](../../proposals/207-opencut-harvest-index.md) | ✅ | Provenance, delivery order, explicit non-goals |
-| SDF / JFA mask feather | [208](../../proposals/208-sdf-jfa-mask-feather.md) | 🟡 partial | CPU `ops::feather_coverage` (JFA + smoothstep); IR/GPU wiring + `util.outline` residual |
+| SDF / JFA mask feather | [208](../../proposals/208-sdf-jfa-mask-feather.md) | 🟡 partial | CPU `ops::feather_coverage` (JFA + smoothstep); **`util.outline` moved onto the SDF path** (30 §5) — was a brute-force `(2t+1)²` box search with a linear ramp and no solid core; now O(W·H·log n), analytic AA, round corners. Residual: GPU twin (blits today, CPU is oracle); `feather_coverage` still has no `IrOp` consumer — its callers (K-B9/K-B8) are Band-5 gated |
 | Large-radius blur quality | [209](../../proposals/209-large-radius-blur-quality.md) | ✅ | `blur_plan` multi-iter (+ step on CPU); GPU multi-iter; tests green |
-| Timeline velocity pack | [210](../../proposals/210-timeline-interaction-velocity-pack.md) | 🟡 partial | Bookmarks category + `video.add_bookmark` (B); on-clip gain envelope paint; drag polish residual |
+| Timeline velocity pack | [210](../../proposals/210-timeline-interaction-velocity-pack.md) | 🟡 partial | Bookmarks category + `video.add_bookmark` (B); on-clip gain envelope paint; **§5 drag ergonomics closed** — snap guide fires only on an actual capture and marks the target, trim hit 12px (41 R-9; 24px vertical already met by the 28px track-height floor), cross-track drop outline, Esc cancels a mouse drag. Residual: **multi-clip drag-move** (`commit_drag` moves `state.clip` alone), group move behind K-A5 |
 | Keyframe graph editor | [211](../../proposals/211-keyframe-graph-editor.md) | ✅ (pre-existing) | Bezier graph editor already shipped; extended with clip-audio gain row |
 | Keymap schema migrations | [212](../../proposals/212-keymap-schema-migrations.md) | ✅ | `keymap_schema_version` + `migrate_keymap` on prefs load |
 | Social-first AS-1 velocity | [213](../../proposals/213-social-first-editing-velocity.md) | ✅ | Empty Import hero, coach marks, auto-place import, toolbar Captions/Export, Social format labels, AS-1 structural test |

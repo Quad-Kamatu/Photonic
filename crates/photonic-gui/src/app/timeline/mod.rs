@@ -32,7 +32,7 @@ pub use layout::TimelineView;
 
 use super::PhotonicApp;
 use interact::{DragKind, DragState, Marquee};
-use layout::{EDGE_ZONE_PX, RULER_HEIGHT_PX, SNAP_THRESHOLD_PX, ZOOM_STEP};
+use layout::{EDGE_HIT_PX, RULER_HEIGHT_PX, SNAP_THRESHOLD_PX, ZOOM_STEP};
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
 use photonic_core::timeline::clip::LinkGroupId;
@@ -1065,7 +1065,9 @@ impl PhotonicApp {
             });
 
             ui.add_space(10.0);
-            ui.weak("Tip: drop files on the window · M marker · B bookmark · S split · ? shortcuts");
+            ui.weak(
+                "Tip: drop files on the window · M marker · B bookmark · S split · ? shortcuts",
+            );
         });
     }
 
@@ -1588,7 +1590,7 @@ fn self_interact(
     // function backs selection, drag-start, and the context-menu target, so
     // the lock guard applies uniformly to all three.
     let hit_at = |pos: egui::Pos2| -> Option<(TrackId, ClipId, egui::Rect, interact::ClipZone)> {
-        interact::hit_at(pos, EDGE_ZONE_PX, hits)
+        interact::hit_at(pos, EDGE_HIT_PX, hits)
     };
 
     // ── Selection on click ──────────────────────────────────────────────────
@@ -1644,6 +1646,24 @@ fn self_interact(
                     )
                 });
             }
+        }
+    }
+
+    // ── Drag cancel: Esc abandons the gesture (210 §5) ──────────────────────
+    // Dropping the transient state is the whole cancel: the document is never
+    // touched mid-drag (only the ghost is painted), and `drag_stopped` below
+    // commits nothing when it finds no `DragState`. Mirrors the K-A7 keyboard
+    // grab, where Esc likewise discards the session instead of committing.
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let had_gesture = ui.data(|d| {
+            d.get_temp::<DragState>(drag_id).is_some()
+                || d.get_temp::<Marquee>(marquee_id).is_some()
+        });
+        if had_gesture {
+            ui.data_mut(|d| {
+                d.remove::<DragState>(drag_id);
+                d.remove::<Marquee>(marquee_id);
+            });
         }
     }
 
@@ -1892,27 +1912,38 @@ fn preview_drag(
     };
     let delta_raw = view.x_to_tick(pos.x, lane_left) - state.grab_tick;
 
-    let (edge_tick, y_shift) = match state.kind {
-        DragKind::Move | DragKind::Slide => {
-            let new_start =
-                resolved_tick(state.orig.start + delta_raw, state, snap, frame_rate, view);
-            (new_start, 0.0)
+    // The raw (pre-snap) lane tick of the edge this gesture moves, kept
+    // alongside where it resolves to so the snap guide below can ask whether a
+    // candidate was actually captured. `Slip` moves no edge — the clip holds
+    // its place and only its source window shifts.
+    let raw_edge = match state.kind {
+        DragKind::Move | DragKind::Slide | DragKind::TrimStart | DragKind::RippleTrimStart => {
+            Some(state.orig.start + delta_raw)
         }
-        DragKind::TrimStart | DragKind::RippleTrimStart => (
-            resolved_tick(state.orig.start + delta_raw, state, snap, frame_rate, view),
-            0.0,
-        ),
         DragKind::TrimEnd | DragKind::RippleTrimEnd => {
-            let end = state.orig.start + state.orig.duration + delta_raw;
-            (resolved_tick(end, state, snap, frame_rate, view), 0.0)
+            Some(state.orig.start + state.orig.duration + delta_raw)
         }
-        DragKind::Roll { .. } => (
-            resolved_tick(c.start + delta_raw, state, snap, frame_rate, view),
-            0.0,
-        ),
-        DragKind::Slip => (c.start, 0.0),
+        DragKind::Roll { .. } => Some(c.start + delta_raw),
+        DragKind::Slip => None,
     };
-    let _ = y_shift;
+    let edge_tick = match raw_edge {
+        Some(raw) => resolved_tick(raw, state, snap, frame_rate, view),
+        None => c.start,
+    };
+
+    // Cross-track move: outline the destination lane so the drop target stays
+    // legible when the ghost has travelled far from the grabbed clip's own row
+    // (13 §1.2 "dragging"). Painted before the ghost so the ghost sits on top.
+    // Only `Move` retargets a track — every trim/roll/slip/slide kind commits
+    // back to `state.track`.
+    if state.dest_track != state.track && matches!(state.kind, DragKind::Move) {
+        painter.rect(
+            track_rect,
+            egui::Rounding::same(3.0),
+            accent.gamma_multiply(0.06),
+            egui::Stroke::new(1.5, accent),
+        );
+    }
 
     // Ghost outline of the clip at its previewed position.
     let (gx0, gx1) = match state.kind {
@@ -1934,15 +1965,28 @@ fn preview_drag(
         egui::Stroke::new(1.0, accent),
     );
 
-    // Snap guide: a vertical accent line at the resolved edge (13 §1.1).
-    let gx = view.tick_to_x(edge_tick, lane_left);
-    painter.line_segment(
-        [
-            egui::pos2(gx, track_rect.top()),
-            egui::pos2(gx, track_rect.bottom()),
-        ],
-        egui::Stroke::new(1.0, accent.gamma_multiply(0.6)),
-    );
+    // Snap guide (13 §1.1): a thin accent line at the SNAP TARGET, painted only
+    // while a candidate is actually captured — "for the duration of the snap".
+    // Drawing it unconditionally at the moving edge (the pre-210 behaviour) made
+    // it a cursor tracer that read as "snapped" at every pointer position, so it
+    // carried no information. It spans all lanes because candidates come from
+    // other tracks' clip edges, the playhead, and markers (04 §2.5), not just
+    // this row.
+    if snap {
+        let threshold = view.px_to_ticks(SNAP_THRESHOLD_PX);
+        if let Some(target) =
+            raw_edge.and_then(|raw| interact::nearest_snap(raw, &state.candidates, threshold))
+        {
+            let sx = view.tick_to_x(target, lane_left);
+            painter.line_segment(
+                [
+                    egui::pos2(sx, lanes_rect.top()),
+                    egui::pos2(sx, lanes_rect.bottom()),
+                ],
+                egui::Stroke::new(1.0, accent),
+            );
+        }
+    }
 
     // Duration tooltip for trims (13 §1.3/1.6 non-color confirmation).
     if matches!(
@@ -1953,8 +1997,12 @@ fn preview_drag(
             | DragKind::RippleTrimEnd
     ) {
         let dur = (gx1 - gx0).0.max(0);
+        // Anchored to the moving edge, not to any snap target: 13 §1.6 makes
+        // this readout the non-colour-dependent confirmation of where the edge
+        // actually landed, so it must follow the edge even when nothing snaps.
+        let edge_x = view.tick_to_x(edge_tick, lane_left);
         painter.text(
-            egui::pos2(gx + 4.0, lanes_rect.top() + 4.0),
+            egui::pos2(edge_x + 4.0, lanes_rect.top() + 4.0),
             egui::Align2::LEFT_TOP,
             ruler::timecode(Tick(dur), frame_rate),
             egui::FontId::monospace(10.0),

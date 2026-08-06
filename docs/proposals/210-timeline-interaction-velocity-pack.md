@@ -1,11 +1,14 @@
 # 210 — Timeline Interaction Velocity Pack
 
-> **Status: Proposed — GUI + light model polish, pre-code.**  
+> **Status: Accepted — partially implemented.**  
+> Shipped: bookmarks category + `video.add_bookmark` and on-clip gain envelope
+> paint (wave-1, 2026-08-03); §5 drag ergonomics checklist closed 2026-08-06.
+> **Open residual: multi-clip drag-move** (§5), with group move behind K-A5
+> ([194](194-k-a5-general-and-nested-clip-groups.md)).  
 > CapCut-class editors (OpenCut classic) feel fast because of **on-clip
 > affordances** and drag ergonomics, not because of a deeper data model.
 > Photonic already owns most of the model; this pack closes the **feel** gap.
-> Clean-room under [207](207-opencut-harvest-index.md) §2. **No code
-> authorization** until Accepted.
+> Clean-room under [207](207-opencut-harvest-index.md) §2.
 
 **Owner refs:**  
 - [04](../specs/video-editor/04-ui-mode-timeline.md) timeline UI  
@@ -140,14 +143,48 @@ shipped bindings.
 Verify and close gaps (each is a checkbox for acceptance, not necessarily new
 architecture):
 
-- [ ] Edge auto-scroll fires for **multi-clip** and **group** moves (194 K-A5),
-  not only single-clip  
-- [ ] Snap indicator line matches 13 (accent, duration of snap)  
-- [ ] Trim handles remain hittable at minimum hit target (41)  
-- [ ] Vertical track reassignment while dragging shows a clear drop line  
-- [ ] Esc cancels in-progress drag without partial commit  
+- [~] Edge auto-scroll fires for **multi-clip** and **group** moves (194 K-A5),
+  not only single-clip — **auto-scroll is not the limiter.** `edge_auto_pan` runs
+  in the shared `resp.dragged()` branch keyed only on pointer x
+  (`app/timeline/mod.rs`), so it is drag-kind- and selection-count-agnostic. The
+  gap is upstream: **multi-clip drag-move does not exist.** `commit_drag`'s
+  `DragKind::Move` arm moves `state.clip` alone, so dragging one member of a
+  multi-selection moves only that member. Group moves additionally await K-A5.
+  Retargeted as a residual below rather than absorbed here — it is a new editing
+  capability, not drag polish.
+- [x] Snap indicator line matches 13 (accent, duration of snap) — the guide was
+  painted unconditionally at the moving edge, so it read as "snapped" at every
+  pointer position and carried no information. Now drawn **only while
+  `nearest_snap` actually captures a candidate**, at the **snap target**, in full
+  accent, spanning all lanes (candidates come from other tracks, the playhead and
+  markers per 04 §2.5). The trim duration readout stays anchored to the moving
+  edge — 13 §1.6 makes it the non-colour-dependent confirmation, so it must
+  follow the edge even when nothing snaps.
+- [x] Trim handles remain hittable at minimum hit target (41) — 41 §4 rules trim
+  handles to **12 × 24** ("paint 6px, hit 12 × 24"). Horizontal: new
+  `EDGE_HIT_PX = 12.0` drives hit-testing while `EDGE_ZONE_PX = 6.0` stays the
+  painted size. Vertical: **already satisfied, no code** — a clip rect is a track
+  row tall and `ops_bridge::set_track_height` clamps that to `28.0..=240.0`.
+  `hit_zone` caps the handle at a third of the clip width so widening it cannot
+  swallow the body (move) zone; without that cap every clip under 24px would have
+  become un-draggable. Covered by `hit_zone_honours_the_widened_trim_handle` and
+  `widened_handle_never_swallows_the_body_zone`.
+- [x] Vertical track reassignment while dragging shows a clear drop line — the
+  ghost already rendered in the destination row, but read identically whether or
+  not the drag had crossed tracks. The destination lane now takes an accent
+  outline + wash while `dest_track != track`, painted under the ghost. Gated to
+  `DragKind::Move`: every trim/roll/slip/slide kind commits back to `state.track`.
+- [x] Esc cancels in-progress drag without partial commit — was unhandled for
+  mouse drags (only the K-A7 *keyboard* grab honoured Esc). Esc now drops the
+  transient `DragState`/`Marquee`, which is the whole cancel: the document is
+  never touched mid-drag (only the ghost is painted) and `drag_stopped` commits
+  nothing when it finds no state.
 
-If all already true, document evidence in the PR and mark residual “none.”
+**Residual after this pass: multi-clip drag-move** (and, behind it, group move
+via K-A5). Tracked against 04 §2.3 / [194](194-k-a5-general-and-nested-clip-groups.md);
+note 194's own finding that a group move must fan out as **single plural
+commands, not a `Command::Batch`**, or `TimelineCmd::apply`'s per-command
+`Sequence::validate()` debug-assert fires on the transient overlap.
 
 ---
 

@@ -1,11 +1,25 @@
 # 208 — Signed-Distance / Jump-Flood Mask Feather
 
-> **Status: Proposed — algorithm option, pre-code.**  
+> **Status: Accepted for the render-only SDF path — partially implemented.**  
+> Shipped (wave-1, 2026-08-03): CPU `ops::feather_coverage` — a Jump-Flood
+> distance field plus a smoothstep band — with unit tests. It is **not yet
+> referenced by any `IrOp`**, so it does not run in either evaluator.  
+> Shipped 2026-08-06: **`util.outline` moved onto the SDF path**, which is what
+> [30 §5](../specs/video-editor/30-effect-catalogue.md) requires ("signed
+> distance fields, not the reference's rasterised dilation"). It bridges through
+> K-B16's `raster_bridge` (lowering as `EffectKind::Unknown("util.outline")`, so
+> it was never inert) but had shipped on a brute-force `(2t+1)²` box search —
+> the very dilation 30 rejects. See §8 for the three defects that closed.  
+> **Open:** the GPU twin — `util.outline` blits on GPU today, like every other
+> un-twinned bridge id, with CPU as the oracle. A WGSL port needs ping-pong
+> JFA passes, so it is its own piece of work.  
+> **Still gated:** *replacing* K-B9 / K-B8 Gaussian feather with this path — §4.4
+> lists those as optional integrations, and both owners remain Band-5
+> (198 additionally behind the 23 §11.1 patent review). Acceptance here covers
+> the standalone render path only; it does not authorize roto/mask work.  
 > Harvested as a *capability idea* from CapCut-class open editors (OpenCut
 > classic exposes a JFA-based SDF path for soft masks). Implementation must be
-> Photonic-native under [207](207-opencut-harvest-index.md) §2.  
-> **No code authorization** until Accepted and until K-B9 / K-B8 owners absorb
-> the contract (or explicitly defer feather to this doc).
+> Photonic-native under [207](207-opencut-harvest-index.md) §2.
 
 **Owner refs:**  
 - [198 K-B9](198-k-b9-rotoscoping-spline-masks.md) — currently specifies feather
@@ -179,8 +193,39 @@ not copy OpenCut `masks/src/sdf.rs` or its WGSL.
 
 ---
 
-## 8. Follow-ups
+## 8. What landed for `util.outline` (2026-08-06)
 
+`raster_bridge::util_outline` now derives its band from the shared Jump-Flood
+field (`ops::coverage_signed_distance`, made `pub(crate)` — it had been reachable
+only from `feather_coverage`'s own unit tests). Three defects in the box-search
+version closed:
+
+| Defect | Was | Now |
+|---|---|---|
+| **Cost** | O(W·H·thickness²) — 16,641 samples *per pixel* at the manifest's own 64px max | O(W·H·log max(W,H)), independent of thickness, so 30 §5's "no thickness ceiling" is real rather than aspirational |
+| **Boxy corners** | distances quantised to integer offsets, coverage thresholded at `alpha > 0.5` | continuous field; outer rim resolves with a smoothstep of half-width `OUTLINE_AA_PX` (§4.1 `aa_px`, 1.0) |
+| **Glow, not stroke** | coverage `1 - d/thickness` — a linear ramp across the whole band, no solid core | solid to `thickness - aa`, antialiased rim centred on `thickness` |
+
+Band convention: the edge is **centred** on `thickness` with half-width `aa`, so
+a 4px stroke is solid to 3px and falls off 3→5px. `aa` is a constant, not a
+manifest param — `OUTLINE_PARAMS` is part of the frozen catalogue schema and
+30 §5 asks for analytic antialiasing, not a user knob.
+
+Tests: `outline_band_is_solid_out_to_thickness`, `outline_band_ends_at_thickness`,
+`outline_corner_is_round_not_boxy` (T3 — same Chebyshev offset, different
+Euclidean coverage, which is exactly what a box dilation cannot reproduce),
+`outline_leaves_the_source_interior_untouched`,
+`outline_zero_thickness_or_opacity_is_identity`, `outline_honours_large_thickness`.
+
+## 9. Follow-ups
+
+- **GPU twin for `util.outline`** — blits today (CPU is the oracle, the standing
+  convention for un-twinned bridge ids). Needs ping-pong JFA passes.  
+- **`feather_coverage` still has no consumer.** The CPU op and its tests exist,
+  but no `IrOp` reaches it; its distance field is now shared with the outline,
+  so only the feather *entry point* is unwired. Its natural consumers are the
+  K-B9/K-B8 mask branches, which stay Band-5 gated — hence no IR op invented
+  here for a caller that cannot yet exist.  
 - Fold Accepted 208 into 198 §6 as “feather implementation choices.”  
 - Analytic SDF for `MaskShapeGen` / power windows (cheaper than JFA).  
 - 209 quality knobs if Gaussian remains the small-radius path.

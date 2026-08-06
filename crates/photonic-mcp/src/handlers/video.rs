@@ -10500,10 +10500,15 @@ mod tests {
             "a fresh project has no categories"
         );
 
+        // Counted against the seed itself, not a literal: proposal 210 added a
+        // sixth default ("Bookmarks") and a pinned `5` went red on a change the
+        // test has no opinion about. The seed's *length* is not what this test
+        // is protecting — idempotency and one-undo-per-batch are.
+        let seeded = photonic_core::timeline::MarkerCategory::default_seed().len();
         let r = call(&state, "seed_marker_categories", json!({})).await;
         assert_ne!(r.is_error, Some(true), "seed_marker_categories: {r:?}");
         let cats = data(&r)["categories"].as_array().cloned().unwrap();
-        assert_eq!(cats.len(), 5, "{cats:?}");
+        assert_eq!(cats.len(), seeded, "{cats:?}");
         let cut = cats[1]["id"].clone();
         let note = cats[2]["id"].clone();
 
@@ -10512,7 +10517,7 @@ mod tests {
         let r = call(&state, "list_marker_categories", json!({})).await;
         assert_eq!(
             data(&r)["categories"].as_array().unwrap().len(),
-            5,
+            seeded,
             "seeding is idempotent"
         );
 
@@ -10528,7 +10533,7 @@ mod tests {
         let r = call(&state, "redo", json!({})).await;
         assert_ne!(r.is_error, Some(true), "redo: {r:?}");
         let r = call(&state, "list_marker_categories", json!({})).await;
-        assert_eq!(data(&r)["categories"].as_array().unwrap().len(), 5);
+        assert_eq!(data(&r)["categories"].as_array().unwrap().len(), seeded);
 
         // Rename/recolour/re-glyph in place.
         let r = call(

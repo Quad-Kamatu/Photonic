@@ -1,11 +1,12 @@
 # 212 — Keymap Schema Migrations
 
-> **Status: Proposed — preferences / commands polish, pre-code.**  
+> **Status: Accepted and Implemented (wave-1, 2026-08-03).**  
+> `keymap_schema_version` + `migrate_keymap` run on preferences load; see
+> ROADMAP §0's OpenCut harvest table.  
 > CapCut-class apps version their shortcut tables so **new defaults** reach
 > existing users without wiping custom binds. Photonic’s command registry +
-> persisted keymap ([69](69-customizable-keyboard-shortcuts-searchab.md)) still
-> lack a migration chain. Clean-room under
-> [207](207-opencut-harvest-index.md) §2. **No code authorization** until Accepted.
+> persisted keymap ([69](69-customizable-keyboard-shortcuts-searchab.md)) lacked
+> a migration chain. Clean-room under [207](207-opencut-harvest-index.md) §2.
 
 **Owner refs:**  
 - [69](69-customizable-keyboard-shortcuts-searchab.md) — MVP shipped  

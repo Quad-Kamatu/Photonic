@@ -1,9 +1,11 @@
 # 209 — Large-Radius Multi-Pass Blur Quality
 
-> **Status: Proposed — engine quality contract, pre-code.**  
+> **Status: Accepted and Implemented (wave-1, 2026-08-03).**  
+> `blur_plan` multi-iteration (plus CPU `step`) and the GPU multi-iteration twin
+> are shipped with tests green; see ROADMAP §0's OpenCut harvest table.  
 > Harvested as a *quality recipe* common to CapCut-class GPU effect stacks
 > (OpenCut classic documents the same failure mode). Photonic-native under
-> [207](207-opencut-harvest-index.md) §2. **No code authorization** until Accepted.
+> [207](207-opencut-harvest-index.md) §2.
 
 **Owner refs:**  
 - [30](../specs/video-editor/30-effect-catalogue.md) Blur / Glow / surface effects  

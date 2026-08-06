@@ -1,10 +1,13 @@
 # 211 — Timeline Keyframe Graph Editor
 
-> **Status: Proposed — GUI surface, pre-code.**  
+> **Status: Accepted and Implemented (wave-1, 2026-08-03) — largely
+> pre-existing.**  
+> The bezier graph editor was already shipped when this proposal was drafted;
+> wave-1 extended it with the clip-audio gain row. See ROADMAP §0's OpenCut
+> harvest table.  
 > CapCut-class editors expose a **curve graph** for easing, not only discrete
 > keyframe dots. Photonic already stores interpolation and named ease presets
-> (K-B12); this proposal adds the **visual editor**. Clean-room under
-> [207](207-opencut-harvest-index.md) §2. **No code authorization** until Accepted.
+> (K-B12). Clean-room under [207](207-opencut-harvest-index.md) §2.
 
 **Owner refs:**  
 - [01 §6](../specs/video-editor/01-data-model.md) `AnimProps` / `Keyframe` / `Interp`  

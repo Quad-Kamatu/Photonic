@@ -122,7 +122,13 @@ This index is “done” when:
   state, proposed contract, non-goals, and tests  
 - [x] ROADMAP §0 links this harvest (OpenCut harvest table under Band-5)  
 - [x] [00-overview](../specs/video-editor/00-overview.md) document map points here  
-- [ ] No child proposal claims code authorization without its own Accepted status  
+- [x] No child proposal claims code authorization without its own Accepted status
+  — reconciled 2026-08-06. Wave-1 landed code while 208–212 still read "Proposed
+  — pre-code"; each status header now records what actually shipped. 209/211/212
+  are Accepted+Implemented, 210 and 208 Accepted+partial with their residuals
+  named. 208's acceptance is **scoped to the standalone render path** and
+  explicitly does *not* authorize the K-B9/K-B8 mask integration, which stays
+  Band-5 gated. 214 remains deferred and unimplemented.  
 
 ---
 

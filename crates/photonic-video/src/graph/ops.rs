@@ -431,11 +431,7 @@ pub fn gaussian_kernel_1d_stepped(sigma: f32, step: f32) -> Vec<f32> {
     if sigma < 0.5 {
         return Vec::new();
     }
-    let step = if step.is_finite() {
-        step.max(1.0)
-    } else {
-        1.0
-    };
+    let step = if step.is_finite() { step.max(1.0) } else { 1.0 };
     // Cover ~3σ in texels; number of taps is coverage/step, capped.
     let radius_texels = (sigma * 3.0).ceil().max(1.0);
     let radius_taps = ((radius_texels / step).ceil() as i32).clamp(1, BLUR_RADIUS_CAP);
@@ -562,7 +558,11 @@ pub fn feather_coverage(input: &Image, feather_px: f32) -> Image {
 
 /// Approximate signed distance (negative inside coverage) via Jump Flooding.
 /// Coverage threshold is alpha ≥ 0.5. Units: pixels.
-fn coverage_signed_distance(input: &Image) -> Vec<f32> {
+///
+/// Shared with `raster_bridge::util_outline` (30 §5 requires the outline be
+/// SDF-based). Jump Flooding is O(W·H·log max(W,H)) regardless of radius, which
+/// is what lets both consumers drop a per-pixel neighbourhood search.
+pub(crate) fn coverage_signed_distance(input: &Image) -> Vec<f32> {
     let w = input.width as i32;
     let h = input.height as i32;
     let n = (w * h) as usize;
@@ -570,9 +570,7 @@ fn coverage_signed_distance(input: &Image) -> Vec<f32> {
     let mut seed_in: Vec<(i32, i32)> = vec![(-1, -1); n];
     let mut seed_out: Vec<(i32, i32)> = vec![(-1, -1); n];
     let idx = |x: i32, y: i32| -> usize { (y * w + x) as usize };
-    let inside = |x: i32, y: i32| -> bool {
-        input.pixel(x as u32, y as u32)[3] >= 0.5
-    };
+    let inside = |x: i32, y: i32| -> bool { input.pixel(x as u32, y as u32)[3] >= 0.5 };
     // Init: boundary pixels (inside next to outside, or vice versa) seed themselves.
     for y in 0..h {
         for x in 0..w {

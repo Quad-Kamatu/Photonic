@@ -217,14 +217,24 @@ pub(crate) fn hit_at(
 }
 
 /// Hit-test a pointer x against a clip rect `[x0, x1]`. Returns the zone, or
-/// `None` if the pointer is outside the rect. Clips narrower than `2*edge` split
-/// at the midpoint so a tiny clip is still trimmable from both sides.
+/// `None` if the pointer is outside the rect.
+///
+/// `edge` is the *requested* handle width — [`EDGE_HIT_PX`](super::layout::EDGE_HIT_PX)
+/// (12px per 41 R-9), which is wider than the 6px that gets painted. Two clamps
+/// keep that from costing the body (move) zone on short clips:
+///
+/// - Clips narrower than two *painted* handles split at the midpoint, so a tiny
+///   clip stays trimmable from both sides (unchanged behaviour).
+/// - Above that, the handle is capped at a third of the width, so every clip
+///   wide enough to have had a body zone at 6px still has one at 12px. Without
+///   this, widening the handle would make any clip under 24px un-draggable —
+///   trading a trim-target win for a move-target regression.
 pub(crate) fn hit_zone(x0: f32, x1: f32, px: f32, edge: f32) -> Option<ClipZone> {
     if px < x0 || px > x1 {
         return None;
     }
     let width = x1 - x0;
-    if width <= 2.0 * edge {
+    if width <= 2.0 * super::layout::EDGE_ZONE_PX {
         let mid = x0 + width * 0.5;
         return Some(if px < mid {
             ClipZone::LeftEdge
@@ -232,6 +242,7 @@ pub(crate) fn hit_zone(x0: f32, x1: f32, px: f32, edge: f32) -> Option<ClipZone>
             ClipZone::RightEdge
         });
     }
+    let edge = edge.min(width / 3.0);
     if px <= x0 + edge {
         Some(ClipZone::LeftEdge)
     } else if px >= x1 - edge {
@@ -888,6 +899,45 @@ mod tests {
             Some(ClipZone::RightEdge)
         );
         assert!(hit_zone(100.0, 108.0, 104.0, 6.0).is_some());
+    }
+
+    /// 41 R-9 / 210 §5: the trim handle is *hit* at 12px even though it paints
+    /// at 6px, so a pointer 10px inside the edge still grabs the trim.
+    #[test]
+    fn hit_zone_honours_the_widened_trim_handle() {
+        let edge = super::super::layout::EDGE_HIT_PX;
+        // 100px clip: 10px in is inside the 12px handle (it was Body at 6px).
+        assert_eq!(
+            hit_zone(200.0, 300.0, 210.0, edge),
+            Some(ClipZone::LeftEdge)
+        );
+        assert_eq!(
+            hit_zone(200.0, 300.0, 290.0, edge),
+            Some(ClipZone::RightEdge)
+        );
+        assert_eq!(hit_zone(200.0, 300.0, 250.0, edge), Some(ClipZone::Body));
+    }
+
+    /// Widening the handle must not cost the body (move) zone: every clip wide
+    /// enough to have had a body at 6px still has one at 12px, because
+    /// `hit_zone` caps the handle at a third of the width. Without the cap a
+    /// clip under 24px would become un-draggable — a move regression traded for
+    /// a trim win.
+    #[test]
+    fn widened_handle_never_swallows_the_body_zone() {
+        let edge = super::super::layout::EDGE_HIT_PX;
+        for width in [13.0f32, 16.0, 20.0, 24.0, 30.0, 48.0, 200.0] {
+            let (x0, x1) = (100.0f32, 100.0 + width);
+            let mid = x0 + width * 0.5;
+            assert_eq!(
+                hit_zone(x0, x1, mid, edge),
+                Some(ClipZone::Body),
+                "a {width}px clip must stay draggable from its middle"
+            );
+            // Both handles still resolve as trims at the very edge.
+            assert_eq!(hit_zone(x0, x1, x0 + 0.5, edge), Some(ClipZone::LeftEdge));
+            assert_eq!(hit_zone(x0, x1, x1 - 0.5, edge), Some(ClipZone::RightEdge));
+        }
     }
 
     #[test]

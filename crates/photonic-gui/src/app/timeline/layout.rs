@@ -21,8 +21,18 @@ pub const HEADER_DEFAULT_PX: f32 = 160.0;
 
 /// Ruler strip height (04 §2.1).
 pub const RULER_HEIGHT_PX: f32 = 24.0;
-/// Trim-handle hit zone at each clip edge (04 §2.3).
+/// Trim-handle *painted* width at each clip edge (04 §2.3, 13 §1.1 "6px
+/// trim-handle hit zones ... invisible until hover"). This is the design size;
+/// the pointer target is the wider [`EDGE_HIT_PX`].
 pub const EDGE_ZONE_PX: f32 = 6.0;
+/// Trim-handle *hit* width (210 §5, 41 R-9). WCAG 2.2 SC 2.5.8 asks for
+/// 24 x 24 logical px; 41 §4 rules trim handles down to **12 x 24** — "paint
+/// 6px, hit 12 x 24", discharged further by the `,` `.` `[` `]` keyboard
+/// equivalents. The 24px vertical half needs no code: a clip rect is a track
+/// row tall and `ops_bridge::set_track_height` clamps that to `28.0..=240.0`.
+/// `interact::hit_zone` clamps this back down on narrow clips so widening the
+/// handle can never swallow the body (move) zone.
+pub const EDGE_HIT_PX: f32 = 12.0;
 /// Snap magnet threshold in *screen* pixels, converted to ticks via zoom (04 §2.5).
 pub const SNAP_THRESHOLD_PX: f32 = 8.0;
 /// K-A10: how far from a lane edge (px) starts continuous auto-pan while dragging.

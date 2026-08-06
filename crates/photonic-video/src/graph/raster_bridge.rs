@@ -487,50 +487,67 @@ fn util_drop_shadow(
     out
 }
 
+/// Antialiasing half-width for the outline's outer edge, in pixels
+/// (proposal 208 §4.1 `aa_px`, default 1.0). Deliberately a constant rather
+/// than a manifest param: `OUTLINE_PARAMS` is part of the frozen catalogue
+/// schema, and 30 §5 asks for analytic antialiasing, not a user knob.
+const OUTLINE_AA_PX: f32 = 1.0;
+
+/// `util.outline` (30 §5, proposal 208 §4.1 `OutlineFromSdf`) — a stroke band
+/// around the coverage isosurface, composited **behind** the source.
+///
+/// 30 §5 requires this be signed-distance-based "not the reference's rasterised
+/// dilation: analytic antialiasing, smooth at hard angles, no thickness
+/// ceiling". The original implementation was that rejected dilation: a
+/// per-pixel `(2t+1)²` box search for the nearest opaque pixel. It had three
+/// defects this rewrite closes.
+///
+/// 1. **Cost.** O(W·H·thickness²) — at the manifest's own 64px maximum that is
+///    16,641 samples *per pixel*. The shared Jump-Flood field
+///    ([`ops::coverage_signed_distance`]) is O(W·H·log max(W,H)) and does not
+///    grow with thickness at all, so the "no thickness ceiling" clause becomes
+///    true rather than aspirational.
+/// 2. **Boxy corners.** Distances were quantised to integer pixel offsets and
+///    thresholded at `alpha > 0.5`, so a diagonal or a corner stepped. The
+///    distance field is continuous, and the band edge now resolves with a
+///    smoothstep of half-width [`OUTLINE_AA_PX`].
+/// 3. **It was a glow, not a stroke.** Coverage was `1 - d/thickness`, a linear
+///    ramp across the *whole* band, so the outline had no solid core and faded
+///    from the shape edge outward. The band is now solid out to `thickness` and
+///    only antialiases at its outer rim.
+///
+/// The band runs from the isosurface outward; the portion under the source is
+/// hidden by the composite, so the visible ring is `thickness` px wide.
 fn util_outline(input: &Image, thickness: f32, color: [f32; 3], opacity: f32) -> Image {
     let w = input.width;
     let h = input.height;
-    let t = thickness.ceil().max(1.0) as i32;
-    // Outside distance field via min distance to any opaque pixel.
+    if thickness <= 0.0 || !thickness.is_finite() || opacity <= 0.0 {
+        return input.clone();
+    }
+    // Negative inside the shape, positive outside, in pixels.
+    let dist = super::ops::coverage_signed_distance(input);
     let mut out = Image::new(w, h);
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let center = sample_clamped(input, x, y);
-            let mut min_d = f32::MAX;
-            let inside = center[3] > 0.5;
-            if !inside {
-                for j in -t..=t {
-                    for i in -t..=t {
-                        let s = sample_clamped(input, x + i, y + j);
-                        if s[3] > 0.5 {
-                            let d = ((i * i + j * j) as f32).sqrt();
-                            if d < min_d {
-                                min_d = d;
-                            }
-                        }
-                    }
-                }
-            }
-            let edge = if inside {
-                0.0
-            } else if min_d <= thickness {
-                // Soft falloff at the outer rim.
-                (1.0 - (min_d / thickness.max(1e-4))).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let ea = edge * opacity;
+    let aa = OUTLINE_AA_PX.max(1e-4);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let center = input.pixel(x, y);
+            // Solid from the isosurface out to `thickness`, then a smoothstep
+            // of half-width `aa` centred on the outer edge.
+            let t = ((dist[i] - (thickness - aa)) / (2.0 * aa)).clamp(0.0, 1.0);
+            let band = 1.0 - t * t * (3.0 - 2.0 * t);
+            let ea = band * opacity;
             let outline = [color[0] * ea, color[1] * ea, color[2] * ea, ea];
-            // Premultiplied over: original over outline (outline behind content).
-            let oa = center[3] + outline[3] * (1.0 - center[3]);
+            // Premultiplied over: source over outline (outline behind content).
+            let ia = center[3];
             out.set(
-                x as u32,
-                y as u32,
+                x,
+                y,
                 [
-                    center[0] + outline[0] * (1.0 - center[3]),
-                    center[1] + outline[1] * (1.0 - center[3]),
-                    center[2] + outline[2] * (1.0 - center[3]),
-                    oa,
+                    center[0] + outline[0] * (1.0 - ia),
+                    center[1] + outline[1] * (1.0 - ia),
+                    center[2] + outline[2] * (1.0 - ia),
+                    ia + outline[3] * (1.0 - ia),
                 ],
             );
         }
@@ -944,5 +961,132 @@ mod tests {
                 assert!((a[c] - b[c]).abs() < 0.02, "channel {c}: {a:?} vs {b:?}");
             }
         }
+    }
+
+    // ── util.outline on the SDF path (30 §5, proposal 208 §6 T3) ────────────
+
+    /// An opaque white square inset by `inset` px inside a `n`x`n` transparent
+    /// frame — enough margin that a thickness-4 outline never clips the border.
+    fn square_matte(n: u32, inset: u32) -> Image {
+        let mut img = Image::new(n, n);
+        for y in inset..n - inset {
+            for x in inset..n - inset {
+                img.set(x, y, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+        img
+    }
+
+    fn outline(img: &Image, thickness: f32) -> Image {
+        util_outline(img, thickness, [1.0, 0.0, 0.0], 1.0)
+    }
+
+    /// The defect this rewrite exists to fix: the old `1 - d/thickness` ramp
+    /// gave the outline no solid core, so it read as a glow. The band is now
+    /// fully opaque from the shape edge out to `thickness - aa`, where the
+    /// antialiased rim (centred on `thickness`) begins.
+    #[test]
+    fn outline_band_is_solid_out_to_thickness() {
+        let img = square_matte(40, 12);
+        let out = outline(&img, 4.0);
+        // Row through the square's middle; the left edge sits at x == 12.
+        let y = 20;
+        for dx in 1..=3u32 {
+            let a = out.pixel(12 - dx, y)[3];
+            assert!(
+                a > 0.95,
+                "{dx}px outside the edge must be solid outline, got alpha {a}"
+            );
+        }
+    }
+
+    /// Beyond `thickness` (plus the antialiasing half-width) the band is gone,
+    /// so the stroke has the width the user asked for.
+    #[test]
+    fn outline_band_ends_at_thickness() {
+        let img = square_matte(40, 12);
+        let out = outline(&img, 4.0);
+        let y = 20;
+        // 6px out is past thickness 4 + aa 1 → transparent.
+        assert!(
+            out.pixel(12 - 6, y)[3] < 0.05,
+            "band should not extend past thickness + aa"
+        );
+        // The rim in between is partially covered, not a hard step.
+        let rim = out.pixel(12 - 5, y)[3];
+        assert!(
+            (0.0..=0.95).contains(&rim),
+            "outer rim should be antialiased, got {rim}"
+        );
+    }
+
+    /// 30 §5's "smooth at hard angles": the field is Euclidean, so corners come
+    /// out round. Both samples below sit at the same *Chebyshev* offset (4, the
+    /// box-search metric) from the shape — a boxy dilation would cover them
+    /// identically. Euclidean distance separates them: the axial pixel is 4px
+    /// away and still inside the stroke's antialiased rim, while the diagonal
+    /// one is 5.66px from the corner and fully outside it.
+    #[test]
+    fn outline_corner_is_round_not_boxy() {
+        let img = square_matte(40, 12);
+        let out = outline(&img, 4.0);
+        // Corner of the square is (12, 12).
+        let diagonal = out.pixel(12 - 4, 12 - 4)[3];
+        let axial = out.pixel(12 - 4, 20)[3];
+        assert!(
+            axial > 0.4,
+            "4px out along an axis is still within the stroke rim, got {axial}"
+        );
+        assert!(
+            diagonal < 0.05,
+            "4px out diagonally is 5.66px from the corner — past a 4px stroke; \
+             a boxy dilation would cover it like the axial sample. got {diagonal}"
+        );
+        assert!(
+            axial > diagonal + 0.3,
+            "the corner must fall off faster than the flat edge (round, not \
+             boxy): axial {axial} vs diagonal {diagonal}"
+        );
+    }
+
+    /// The source is composited over its own outline, so opaque interior
+    /// pixels are returned untouched.
+    #[test]
+    fn outline_leaves_the_source_interior_untouched() {
+        let img = square_matte(40, 12);
+        let out = outline(&img, 4.0);
+        assert_eq!(out.pixel(20, 20), [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    /// Degenerate params are a bit-exact identity rather than a full JFA pass.
+    #[test]
+    fn outline_zero_thickness_or_opacity_is_identity() {
+        let img = square_matte(24, 8);
+        assert_eq!(
+            util_outline(&img, 0.0, [1.0, 0.0, 0.0], 1.0).pixels,
+            img.pixels
+        );
+        assert_eq!(
+            util_outline(&img, 4.0, [1.0, 0.0, 0.0], 0.0).pixels,
+            img.pixels
+        );
+        assert_eq!(
+            util_outline(&img, f32::NAN, [1.0, 0.0, 0.0], 1.0).pixels,
+            img.pixels
+        );
+    }
+
+    /// Thickness is not capped by a search window any more (30 §5 "no thickness
+    /// ceiling"), so a large stroke still reaches its full width.
+    #[test]
+    fn outline_honours_large_thickness() {
+        let img = square_matte(64, 24);
+        let out = outline(&img, 16.0);
+        let y = 32;
+        assert!(
+            out.pixel(24 - 15, y)[3] > 0.95,
+            "15px out must still be solid"
+        );
+        assert!(out.pixel(24 - 18, y)[3] < 0.05, "18px out must be clear");
     }
 }
