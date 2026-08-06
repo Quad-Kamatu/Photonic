@@ -36,14 +36,27 @@ fn tool_name(t: &Value) -> Option<&str> {
     t.get("name").and_then(|n| n.as_str())
 }
 
+fn meta_tool(name: &str) -> Value {
+    let description = match name {
+        "search_actions" => "Search the MCP tool catalog by keywords (name/description).",
+        _ => "Run a tool by name with a params object.",
+    };
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": { "type": "object", "properties": {} }
+    })
+}
+
 /// Compact list: promoted tools that exist in this build, plus search/execute.
 pub fn compact_tool_list() -> Value {
     let all = all_tools();
     let mut out = Vec::new();
-    // Always include meta tools if registered
     for name in ["search_actions", "execute_action"] {
         if let Some(t) = all.iter().find(|t| tool_name(t) == Some(name)) {
             out.push(t.clone());
+        } else {
+            out.push(meta_tool(name));
         }
     }
     for name in promoted_tool_names() {
@@ -86,7 +99,6 @@ pub fn search_actions(query: &str, limit: usize) -> Value {
             }
         }
         if score > 0 {
-            // Summarize: name, description (trunc), required params only
             let summary = json!({
                 "name": t.get("name"),
                 "description": t.get("description"),
@@ -108,7 +120,6 @@ fn summarize_schema(schema: Option<&Value>) -> Value {
     };
     let props = schema.get("properties").cloned().unwrap_or(json!({}));
     let required = schema.get("required").cloned().unwrap_or(json!([]));
-    // Keep property keys + types only
     let mut slim = serde_json::Map::new();
     if let Some(obj) = props.as_object() {
         for (k, v) in obj {

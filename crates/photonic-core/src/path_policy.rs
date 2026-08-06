@@ -254,10 +254,13 @@ mod tests {
 
     fn tmp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "photonic-path-policy-{}",
-            std::process::id()
+            "photonic-path-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
-        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
     }
