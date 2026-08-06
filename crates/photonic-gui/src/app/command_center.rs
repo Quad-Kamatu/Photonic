@@ -1215,12 +1215,7 @@ impl PhotonicApp {
         let n = project
             .sequences
             .get(&seq_id)
-            .map(|s| {
-                s.markers
-                    .iter()
-                    .filter(|m| m.category == cat_id)
-                    .count()
-            })
+            .map(|s| s.markers.iter().filter(|m| m.category == cat_id).count())
             .unwrap_or(0);
         let name = format!("Bookmark {}", n + 1);
         let Ok(cmds) =

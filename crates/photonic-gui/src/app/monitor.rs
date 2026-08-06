@@ -1278,7 +1278,10 @@ impl PhotonicApp {
                     egui::vec2(148.0, 28.0),
                 );
                 if ui
-                    .put(btn, egui::Button::new(format!("{} Import…", ph::UPLOAD_SIMPLE)))
+                    .put(
+                        btn,
+                        egui::Button::new(format!("{} Import…", ph::UPLOAD_SIMPLE)),
+                    )
                     .clicked()
                 {
                     self.open_drawer = Some(crate::panels::DrawerGroup::MediaPool);

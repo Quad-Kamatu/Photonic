@@ -688,11 +688,13 @@ fn draw_caption_look_chips(
         for &(look, label) in CAPTION_LOOKS {
             let style = caption_look_style(look);
             let active = track.style == style;
-            let resp = ui.selectable_label(active, label).on_hover_text(match look {
-                CaptionLook::Clean => "White text, light stroke — clean social / broadcast",
-                CaptionLook::Karaoke => "Word-pop karaoke highlight with yellow active word",
-                CaptionLook::Social => "Bold pill background — CapCut/TikTok-style social",
-            });
+            let resp = ui
+                .selectable_label(active, label)
+                .on_hover_text(match look {
+                    CaptionLook::Clean => "White text, light stroke — clean social / broadcast",
+                    CaptionLook::Karaoke => "Word-pop karaoke highlight with yellow active word",
+                    CaptionLook::Social => "Bold pill background — CapCut/TikTok-style social",
+                });
             if resp.clicked() {
                 let old = Some(track.style.clone());
                 let cmd = TimelineCmd::CaptionEdit(CaptionCmd::SetStyle {

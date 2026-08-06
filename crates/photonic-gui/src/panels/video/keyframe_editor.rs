@@ -1645,10 +1645,9 @@ fn paint_gain_envelope(
         let t = ((gain - GAIN_FLOOR) / (GAIN_CEIL - GAIN_FLOOR)).clamp(0.0, 1.0) as f32;
         // Higher gain → higher on screen.
         let y = y_bot - t * y_span;
-        let x = view.tick_to_x(clip.start + dt, lane_left).clamp(
-            clip_rect.left() + 1.0,
-            clip_rect.right() - 1.0,
-        );
+        let x = view
+            .tick_to_x(clip.start + dt, lane_left)
+            .clamp(clip_rect.left() + 1.0, clip_rect.right() - 1.0);
         points.push(Pos2::new(x, y));
     }
     if points.len() >= 2 {

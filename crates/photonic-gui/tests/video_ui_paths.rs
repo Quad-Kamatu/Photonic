@@ -703,9 +703,8 @@ fn ui_as1_social_path_structural_arm() {
     let mut history = CommandHistory::new(64);
 
     // Ensure project + sequence like empty-state Import CTA.
-    let seq_id =
-        ops_bridge::ensure_project_and_sequence(&mut doc, &mut history, FrameRate::FPS_30)
-            .expect("project+sequence");
+    let seq_id = ops_bridge::ensure_project_and_sequence(&mut doc, &mut history, FrameRate::FPS_30)
+        .expect("project+sequence");
     ops_bridge::add_track(&mut doc, &mut history, seq_id, TrackKind::Video);
 
     // Social 9:16 format (same as empty-state quick chip / format bar).
