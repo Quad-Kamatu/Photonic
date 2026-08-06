@@ -173,6 +173,9 @@ fn main() -> Result<()> {
     if args.mcp_stdio {
         info!("Running MCP on stdio (Content-Length framing)");
         let rt = tokio::runtime::Builder::new_multi_thread()
+            // Large match in dispatch_tool_inner + schema_gen need more than
+            // the default ~2 MiB worker stack (else search_actions / full list overflow).
+            .thread_stack_size(8 * 1024 * 1024)
             .enable_all()
             .build()?;
         let mcp_server = McpServer::new(
@@ -200,6 +203,9 @@ fn main() -> Result<()> {
         // memory for the same media).
         info!("Running in headless mode (MCP server only)");
         let rt = tokio::runtime::Builder::new_multi_thread()
+            // Large match in dispatch_tool_inner + schema_gen need more than
+            // the default ~2 MiB worker stack (else search_actions / full list overflow).
+            .thread_stack_size(8 * 1024 * 1024)
             .enable_all()
             .build()?;
         let mcp_server = McpServer::new(
@@ -428,6 +434,9 @@ fn spawn_mcp_server(
     let state = server.state.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
+            // Large match in dispatch_tool_inner + schema_gen need more than
+            // the default ~2 MiB worker stack (else search_actions / full list overflow).
+            .thread_stack_size(8 * 1024 * 1024)
             .enable_all()
             .build()
             .expect("tokio runtime");
