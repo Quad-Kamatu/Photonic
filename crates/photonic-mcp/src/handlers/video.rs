@@ -1267,6 +1267,62 @@ pub async fn move_clip(state: &AppState, args: MoveClipArgs) -> ToolResult {
     }
 }
 
+/// Shift several clips by one shared delta in a single undo step (04 §2.6,
+/// 210 §5) — the MCP arm of the GUI's multi-select body move, per 19 G-21's
+/// standing requirement that landed editing verbs keep an MCP trail.
+///
+/// Link partners are folded into the same moving set rather than expanded per
+/// clip: a partner that is also named in `clip_ids` must not move twice, and
+/// `ops::move_clips` needs the whole set to tell a collision the move is
+/// vacating from a real obstruction.
+pub async fn move_clips(state: &AppState, args: MoveClipsArgs) -> ToolResult {
+    tracing::debug!("tool: move_clips {} clips", args.clip_ids.len());
+    if args.clip_ids.is_empty() {
+        return ToolResult::error("clip_ids must not be empty");
+    }
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+
+    let mut seq_id = None;
+    let mut moving: Vec<(TrackId, ClipId)> = Vec::new();
+    for clip_id in &args.clip_ids {
+        let Some((s, track_id)) = locate_clip(project, *clip_id) else {
+            return ToolResult::error(format!("clip {clip_id} not found"));
+        };
+        // One sequence per call: a delta means nothing across sequences that
+        // may not even share a frame rate.
+        match seq_id {
+            None => seq_id = Some(s),
+            Some(existing) if existing != s => {
+                return ToolResult::error("all clips must be in the same sequence");
+            }
+            Some(_) => {}
+        }
+        if !moving.contains(&(track_id, *clip_id)) {
+            moving.push((track_id, *clip_id));
+        }
+        for partner in link_partners(project, s, track_id, *clip_id) {
+            if !moving.contains(&partner) {
+                moving.push(partner);
+            }
+        }
+    }
+    let seq_id = seq_id.expect("clip_ids is non-empty and every id resolved");
+
+    match ops::move_clips(project, seq_id, &moving, Tick(args.delta_ticks)) {
+        Ok(cmds) if cmds.is_empty() => ToolResult::text("No clips moved (zero delta)"),
+        Ok(cmds) => {
+            let n = cmds.len();
+            history.execute_discrete(batch_or_single(cmds), &mut doc);
+            ToolResult::text(format!("Moved {n} clips"))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
 pub async fn trim_clip(state: &AppState, args: TrimClipArgs) -> ToolResult {
     tracing::debug!("tool: trim_clip {}", args.clip_id);
     let mut doc = state.document.lock().await;
@@ -10271,6 +10327,116 @@ mod tests {
         let r = call(&state, "list_clips", json!({ "track_id": a_track })).await;
         let clips_on_audio = data(&r)["clips"].as_array().cloned().unwrap_or_default();
         assert_eq!(clips_on_audio.len(), 1, "audio partner must stay on A1");
+    }
+
+    // ── move_clips: multi-select body move (04 §2.6, 210 §5, 19 G-21) ──────
+
+    /// A contiguous run shifts as a body in one undo step. Contiguity is the
+    /// point: three separate `move_clip` calls would each refuse on the
+    /// neighbour they are about to vacate.
+    #[tokio::test]
+    async fn move_clips_shifts_a_contiguous_run_in_one_undo_step() {
+        let state = test_state();
+        let (_, track_id) = create_seq_and_track(&state, "video").await;
+        let a = insert_solid_clip(&state, &track_id, 100, 100).await;
+        let b = insert_solid_clip(&state, &track_id, 200, 100).await;
+        let c = insert_solid_clip(&state, &track_id, 300, 100).await;
+
+        let r = call(
+            &state,
+            "move_clips",
+            json!({ "clip_ids": [a, b, c], "delta_ticks": 50 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "move_clips: {r:?}");
+
+        let starts = |v: &Value| -> Vec<i64> {
+            let mut s: Vec<i64> = v["clips"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|c| c["start_ticks"].as_i64().unwrap())
+                .collect();
+            s.sort_unstable();
+            s
+        };
+        let r = call(&state, "list_clips", json!({ "track_id": track_id })).await;
+        assert_eq!(starts(&data(&r)), vec![150, 250, 350]);
+
+        // One undo returns the whole body.
+        let r = call(&state, "undo", json!({})).await;
+        assert_ne!(r.is_error, Some(true), "undo: {r:?}");
+        let r = call(&state, "list_clips", json!({ "track_id": track_id })).await;
+        assert_eq!(
+            starts(&data(&r)),
+            vec![100, 200, 300],
+            "one undo must revert the whole multi-move"
+        );
+    }
+
+    /// Refused whole, not in part: a blocked move leaves every clip put.
+    #[tokio::test]
+    async fn move_clips_blocked_move_shifts_nothing() {
+        let state = test_state();
+        let (_, track_id) = create_seq_and_track(&state, "video").await;
+        let a = insert_solid_clip(&state, &track_id, 100, 100).await;
+        let b = insert_solid_clip(&state, &track_id, 200, 100).await;
+        // Stationary obstacle just past the run.
+        let _blocker = insert_solid_clip(&state, &track_id, 320, 50).await;
+
+        let r = call(
+            &state,
+            "move_clips",
+            json!({ "clip_ids": [a, b], "delta_ticks": 50 }),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "blocked move should fail: {r:?}");
+
+        let r = call(&state, "list_clips", json!({ "track_id": track_id })).await;
+        let mut s: Vec<i64> = data(&r)["clips"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c["start_ticks"].as_i64().unwrap())
+            .collect();
+        s.sort_unstable();
+        assert_eq!(s, vec![100, 200, 320], "nothing may move on a refusal");
+    }
+
+    /// Naming a linked pair explicitly must not shift the partner twice.
+    #[tokio::test]
+    async fn move_clips_moves_a_selected_link_partner_exactly_once() {
+        let state = test_state();
+        let (seq_id, v_track) = create_seq_and_track(&state, "video").await;
+        let a_track = create_track(&state, &seq_id, "audio").await;
+        let vclip = insert_solid_clip(&state, &v_track, 100, 100).await;
+        let aclip = insert_solid_clip(&state, &a_track, 100, 100).await;
+        let r = call(
+            &state,
+            "link_clips",
+            json!({ "clip_id_a": vclip.clone(), "clip_id_b": aclip.clone() }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "link_clips: {r:?}");
+
+        let r = call(
+            &state,
+            "move_clips",
+            json!({ "clip_ids": [vclip.clone(), aclip.clone()], "delta_ticks": 40 }),
+        )
+        .await;
+        assert_ne!(r.is_error, Some(true), "move_clips: {r:?}");
+
+        let r = call(&state, "get_clip", json!({ "clip_id": vclip })).await;
+        assert_eq!(data(&r)["clip"]["start"], json!(140));
+        let r = call(&state, "get_clip", json!({ "clip_id": aclip })).await;
+        assert_eq!(
+            data(&r)["clip"]["start"],
+            json!(140),
+            "a selected partner moves once, not once per mention"
+        );
     }
 
     #[tokio::test]

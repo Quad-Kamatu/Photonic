@@ -180,11 +180,33 @@ architecture):
   never touched mid-drag (only the ghost is painted) and `drag_stopped` commits
   nothing when it finds no state.
 
-**Residual after this pass: multi-clip drag-move** (and, behind it, group move
-via K-A5). Tracked against 04 §2.3 / [194](194-k-a5-general-and-nested-clip-groups.md);
-note 194's own finding that a group move must fan out as **single plural
-commands, not a `Command::Batch`**, or `TimelineCmd::apply`'s per-command
-`Sequence::validate()` debug-assert fires on the transient overlap.
+**Multi-clip drag-move — landed 2026-08-06.** Dragging any member of a
+multi-selection now carries the whole selection by one delta in a single undo
+step, via a new plural op `ops::move_clips`, its `ops_bridge` wrapper, and the
+`move_clips` MCP verb (19 G-21's standing MCP-trail requirement).
+
+Two things forced a plural op rather than a loop over `move_clip`:
+
+1. **Collision.** `move_clip` validates against the *current* project, where
+   every other selected clip is still in place — so a contiguous run has each
+   clip refuse on the neighbour it is about to vacate. Overlap is therefore
+   tested against non-moving clips only; the set is displaced as a body.
+2. **Ordering.** This is 194 K-A5's finding, confirmed in code:
+   `TimelineCmd::apply` debug-asserts `Sequence::validate()` after *every*
+   command and `Command::Batch` applies members one at a time, so an unordered
+   fan-out panics in debug on a transient overlap. Commands are emitted
+   trailing-edge-first when moving later and leading-edge-first when moving
+   earlier, so each clip lands in space its neighbour has already left and no
+   intermediate state is ever invalid.
+
+A blocked or before-zero move is refused **whole** — a half-applied selection is
+not a state the user asked for. Link partners fold into the same moving set
+rather than expanding per clip, so a partner that is also selected moves once.
+
+**Residual: vertical (cross-track) multi-move**, which needs a track-offset
+model, and group move via [194 K-A5](194-k-a5-general-and-nested-clip-groups.md).
+A cross-track drag of a multi-selection falls through to the single-clip path
+rather than collapsing every member onto one row.
 
 ---
 

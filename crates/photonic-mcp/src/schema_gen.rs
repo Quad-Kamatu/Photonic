@@ -5256,6 +5256,18 @@ pub fn tool_list() -> Value {
                 }
             },
             {
+                "name": "move_clips",
+                "description": "Shift several clips along the timeline by one shared delta, preserving their relative spacing, in a single undo step. Each clip keeps its own track (there is no plural cross-track move — use move_clip for that). Linked partners ride along automatically and are never moved twice. The move is refused as a whole if any clip would land on a clip outside the set or before zero; collisions *within* the set are fine, since the set is displaced as a body.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "clip_ids": { "type": "array", "items": { "type": "string" }, "description": "All must be in the same sequence." },
+                        "delta_ticks": { "type": "integer", "description": "Signed offset applied to every clip. Negative moves earlier." }
+                    },
+                    "required": ["clip_ids","delta_ticks"]
+                }
+            },
+            {
                 "name": "trim_clip",
                 "description": "Trim a clip's in or out edge to an exact position. edge=in adjusts start+source_in and shortens/lengthens duration, keeping the out point fixed; edge=out changes only duration. Supports undo.",
                 "inputSchema": {

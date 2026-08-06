@@ -467,6 +467,44 @@ pub fn move_clip(
     commit_group(history, doc, cmds);
 }
 
+/// Shift every clip in `clips`, plus their link-group partners, by one shared
+/// `delta` as a single undo step (04 §2.6 multi-select, 210 §5).
+///
+/// Partners are folded into one moving set rather than expanded per clip the
+/// way [`move_clip`] does it. Two reasons: a partner that is *also* selected
+/// must not be moved twice, and `ops::move_clips` needs the complete set to
+/// tell an internal collision (a clip the move is vacating) from a real one.
+///
+/// Horizontal only — each clip keeps its own track. Vertical reassignment of a
+/// whole selection needs a track-offset model and is left to K-A5 groups.
+/// CAP-019 GUI-arm surface (29 §3) — driven headlessly by the acceptance-story harness.
+pub fn move_clips(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    seq: SequenceId,
+    clips: &[(TrackId, photonic_core::timeline::ClipId)],
+    delta: Tick,
+) {
+    let Some(p) = doc.timeline.as_ref() else {
+        return;
+    };
+    let mut moving: Vec<(TrackId, photonic_core::timeline::ClipId)> = Vec::new();
+    for (track, clip) in clips {
+        if !moving.contains(&(*track, *clip)) {
+            moving.push((*track, *clip));
+        }
+        for partner in link_partners(p, seq, *track, *clip) {
+            if !moving.contains(&partner) {
+                moving.push(partner);
+            }
+        }
+    }
+    let Ok(cmds) = ops::move_clips(p, seq, &moving, delta) else {
+        return;
+    };
+    commit_group(history, doc, cmds);
+}
+
 /// Move a clip to a different track via `ops::move_clip_to_track` — a single
 /// lossless `MoveClip` command (its inverse restores the clip to its original
 /// track + position), rather than composing remove+insert. A linked partner
@@ -1875,6 +1913,92 @@ mod link_group_tests {
         remove_clip(&mut doc, &mut history, seq, v_track, vclip);
         assert!(!clip_exists(&doc, seq, v_track, vclip));
         assert!(clip_exists(&doc, seq, a_track, aclip));
+    }
+
+    // ── Multi-select body move (04 §2.6, 210 §5) ───────────────────────────
+
+    /// A contiguous run moves as a body in ONE undo step. Contiguity matters:
+    /// per-clip `move_clip` calls would each refuse on the neighbour they are
+    /// about to vacate.
+    #[test]
+    fn move_clips_shifts_a_contiguous_run_in_one_undo_step() {
+        let (mut doc, mut history, seq, v_track, _) = doc_with_two_tracks();
+        let a = insert(&mut doc, &mut history, seq, v_track, Tick(100), Tick(100));
+        let b = insert(&mut doc, &mut history, seq, v_track, Tick(200), Tick(100));
+        let c = insert(&mut doc, &mut history, seq, v_track, Tick(300), Tick(100));
+
+        move_clips(
+            &mut doc,
+            &mut history,
+            seq,
+            &[(v_track, a), (v_track, b), (v_track, c)],
+            Tick(50),
+        );
+        assert_eq!(start_of(&doc, seq, v_track, a), Tick(150));
+        assert_eq!(start_of(&doc, seq, v_track, b), Tick(250));
+        assert_eq!(start_of(&doc, seq, v_track, c), Tick(350));
+
+        // One undo restores all three — the whole gesture is a single step.
+        history.undo(&mut doc);
+        assert_eq!(start_of(&doc, seq, v_track, a), Tick(100));
+        assert_eq!(start_of(&doc, seq, v_track, b), Tick(200));
+        assert_eq!(start_of(&doc, seq, v_track, c), Tick(300));
+    }
+
+    /// A linked partner of a selected clip rides along without being selected,
+    /// and is not moved twice when it happens to be selected as well.
+    #[test]
+    fn move_clips_carries_link_partners_exactly_once() {
+        let (mut doc, mut history, seq, v_track, a_track) = doc_with_two_tracks();
+        let vclip = insert(&mut doc, &mut history, seq, v_track, Tick(100), Tick(100));
+        let aclip = insert(&mut doc, &mut history, seq, a_track, Tick(100), Tick(100));
+        link(&mut doc, &mut history, seq, v_track, vclip, a_track, aclip);
+
+        // Only the video clip is "selected"; the audio partner rides along.
+        move_clips(&mut doc, &mut history, seq, &[(v_track, vclip)], Tick(40));
+        assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(140));
+        assert_eq!(
+            start_of(&doc, seq, a_track, aclip),
+            Tick(140),
+            "linked partner rides along"
+        );
+
+        // Now select BOTH: the partner must not be shifted twice.
+        move_clips(
+            &mut doc,
+            &mut history,
+            seq,
+            &[(v_track, vclip), (a_track, aclip)],
+            Tick(40),
+        );
+        assert_eq!(start_of(&doc, seq, v_track, vclip), Tick(180));
+        assert_eq!(
+            start_of(&doc, seq, a_track, aclip),
+            Tick(180),
+            "a selected partner must move once, not once per mention"
+        );
+    }
+
+    /// A blocked move is refused whole — no member shifts, so the user never
+    /// gets a half-applied selection.
+    #[test]
+    fn move_clips_blocked_by_a_stationary_clip_moves_nothing() {
+        let (mut doc, mut history, seq, v_track, _) = doc_with_two_tracks();
+        let a = insert(&mut doc, &mut history, seq, v_track, Tick(100), Tick(100));
+        let b = insert(&mut doc, &mut history, seq, v_track, Tick(200), Tick(100));
+        // Stationary obstacle just past the run.
+        let blocker = insert(&mut doc, &mut history, seq, v_track, Tick(320), Tick(50));
+
+        move_clips(
+            &mut doc,
+            &mut history,
+            seq,
+            &[(v_track, a), (v_track, b)],
+            Tick(50),
+        );
+        assert_eq!(start_of(&doc, seq, v_track, a), Tick(100), "nothing moved");
+        assert_eq!(start_of(&doc, seq, v_track, b), Tick(200), "nothing moved");
+        assert_eq!(start_of(&doc, seq, v_track, blocker), Tick(320));
     }
 }
 

@@ -1725,7 +1725,16 @@ fn self_interact(
             if state.moved {
                 if let Some(pos) = resp.interact_pointer_pos() {
                     commit_drag(
-                        doc, history, seq_id, &state, view, lane_left, snap, frame_rate, pos,
+                        doc,
+                        history,
+                        seq_id,
+                        &state,
+                        view,
+                        lane_left,
+                        snap,
+                        frame_rate,
+                        pos,
+                        selection.as_slice(),
                     );
                 }
             }
@@ -2011,6 +2020,30 @@ fn preview_drag(
     }
 }
 
+/// Pair each selected `ClipId` with the track holding it.
+///
+/// Selection is stored as bare `ClipId`s (04 §6), but the ops layer addresses
+/// clips by `(track, clip)`, so the track has to be recovered from the
+/// sequence. Returns `None` if there is no timeline; silently drops ids that no
+/// longer resolve, which can happen when a selection outlives the clips it
+/// named (an undo, or a delete from another surface).
+fn resolve_selection_tracks(
+    doc: &Document,
+    seq_id: SequenceId,
+    selection: &[ClipId],
+) -> Option<Vec<(TrackId, ClipId)>> {
+    let seq = doc.timeline.as_ref()?.sequences.get(&seq_id)?;
+    let mut out = Vec::with_capacity(selection.len());
+    for track in seq.tracks() {
+        for clip in &track.clips {
+            if selection.contains(&clip.id) {
+                out.push((track.id, clip.id));
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Commit a finished drag as one undo step through `ops_bridge`.
 #[allow(clippy::too_many_arguments)]
 fn commit_drag(
@@ -2023,12 +2056,40 @@ fn commit_drag(
     snap: bool,
     frame_rate: FrameRate,
     pos: egui::Pos2,
+    selection: &[ClipId],
 ) {
     let delta_raw = view.x_to_tick(pos.x, lane_left) - state.grab_tick;
     match state.kind {
         DragKind::Move => {
             let new_start =
                 resolved_tick(state.orig.start + delta_raw, state, snap, frame_rate, view);
+
+            // Multi-select body move (04 §2.6, 210 §5): the grabbed clip drags
+            // the rest of the selection with it by the same delta, in one undo
+            // step. Horizontal only — `ops_bridge::move_clips` keeps each clip
+            // on its own track, so a cross-track drag of a multi-selection
+            // falls through to the single-clip path below rather than
+            // reassigning every member to one row.
+            if selection.len() > 1
+                && selection.contains(&state.clip)
+                && state.dest_track == state.track
+            {
+                if let Some(moving) = resolve_selection_tracks(doc, seq_id, selection) {
+                    // Deliberately unclamped: clamping the primary to zero
+                    // would shrink the delta and squash the spacing the
+                    // selection had. `ops::move_clips` refuses the whole move
+                    // if any member would land before zero.
+                    ops_bridge::move_clips(
+                        doc,
+                        history,
+                        seq_id,
+                        &moving,
+                        new_start - state.orig.start,
+                    );
+                    return;
+                }
+            }
+
             let new_start = if new_start.0 < 0 {
                 Tick::ZERO
             } else {

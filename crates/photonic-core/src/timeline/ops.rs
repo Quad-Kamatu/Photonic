@@ -1104,6 +1104,90 @@ pub fn remove_clip(
     })
 }
 
+/// Shift several clips along the timeline by one shared `delta`, each staying
+/// on its own track (04 §2.6 multi-select, 210 §5).
+///
+/// # Why this is a plural op and not a loop over [`move_clip`]
+///
+/// Two reasons, both load-bearing.
+///
+/// 1. **Collision.** `move_clip` validates against the *current* project, where
+///    every other selected clip is still at its old position. Moving a
+///    contiguous run right by 50 would have each clip refuse on the neighbour
+///    it is about to vacate. Overlap here is therefore tested against
+///    non-moving clips only — the moving set is displaced as a body.
+/// 2. **Ordering.** `TimelineCmd::apply` debug-asserts `Sequence::validate()`
+///    after *every* command and `Command::Batch` applies members one at a time,
+///    so a fan-out whose intermediate states overlap panics in debug (the
+///    hazard 194 K-A5 records). Commands are emitted rightmost-first when
+///    moving later and leftmost-first when moving earlier, so each clip lands
+///    in space its neighbour has already left and no intermediate state is
+///    ever invalid.
+///
+/// Returns commands in that safe application order. Empty when `delta == 0` or
+/// nothing is addressed. Rejects the whole move rather than applying part of
+/// it: a partial multi-clip move is not a state the user asked for.
+pub fn move_clips(
+    p: &TimelineProject,
+    id: SequenceId,
+    moving: &[(TrackId, ClipId)],
+    delta: Tick,
+) -> Result<Vec<TimelineCmd>, EditError> {
+    if delta.0 == 0 || moving.is_empty() {
+        return Ok(Vec::new());
+    }
+    let s = seq(p, id)?;
+
+    // Resolve every addressed clip up front so an unknown id fails before any
+    // command is built.
+    let mut resolved = Vec::with_capacity(moving.len());
+    for (track_id, clip_id) in moving {
+        let t = track(s, *track_id)?;
+        let c = clip(t, *clip_id)?;
+        let new_start = c.start + delta;
+        if new_start.0 < 0 {
+            return Err(EditError::Overlap);
+        }
+        resolved.push((*track_id, *clip_id, c.start, c.duration, new_start));
+    }
+
+    // Destination must be clear of every clip that is NOT part of the move.
+    for (track_id, _, _, duration, new_start) in &resolved {
+        let t = track(s, *track_id)?;
+        let end = *new_start + *duration;
+        let hits_stationary = t
+            .clips
+            .iter()
+            .filter(|c| !moving.iter().any(|(_, m)| *m == c.id))
+            .any(|c| c.start < end && *new_start < c.end());
+        if hits_stationary {
+            return Err(EditError::Overlap);
+        }
+    }
+
+    // Trailing edge first when moving later, leading edge first when moving
+    // earlier — see the ordering note above.
+    if delta.0 > 0 {
+        resolved.sort_by_key(|(_, _, start, _, _)| std::cmp::Reverse(*start));
+    } else {
+        resolved.sort_by_key(|(_, _, start, _, _)| *start);
+    }
+
+    Ok(resolved
+        .into_iter()
+        .map(
+            |(track_id, clip_id, old_start, _, new_start)| TimelineCmd::MoveClip {
+                seq: id,
+                track: track_id,
+                clip: clip_id,
+                old_start,
+                new_start,
+                new_track: None,
+            },
+        )
+        .collect())
+}
+
 /// Move a clip within its track. Signature preserved for existing callers;
 /// cross-track moves use [`move_clip_to_track`].
 pub fn move_clip(
@@ -3925,6 +4009,200 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::history::Command;
+
+    // ── move_clips: multi-select body move (04 §2.6, 210 §5) ───────────────
+
+    /// A fixture with a contiguous run on one video track: 100..200, 200..300,
+    /// 300..400. Contiguity is the point — it is what makes a naive loop over
+    /// `move_clip` refuse, and what makes an unordered fan-out panic. The run
+    /// starts at 100, not 0, so there is headroom to test moving *earlier*
+    /// without immediately hitting the before-zero refusal.
+    fn run_of_three() -> (Document, SequenceId, TrackId, Vec<ClipId>) {
+        let (mut doc, seq_id, vtrack, first) = fixture();
+        let mut ids = vec![first];
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let t = project
+                .sequences
+                .get_mut(&seq_id)
+                .unwrap()
+                .track_mut(vtrack)
+                .unwrap();
+            t.clips.iter_mut().find(|c| c.id == first).unwrap().start = Tick(100);
+            for start in [200, 300] {
+                let c = Clip::new(ClipSource::Adjustment, Tick(start), Tick(100));
+                ids.push(c.id);
+                t.clips.push(c);
+            }
+        }
+        (doc, seq_id, vtrack, ids)
+    }
+
+    fn starts(doc: &Document, seq_id: SequenceId, track_id: TrackId) -> Vec<i64> {
+        let mut v: Vec<i64> = doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .sequences
+            .get(&seq_id)
+            .unwrap()
+            .track(track_id)
+            .unwrap()
+            .clips
+            .iter()
+            .map(|c| c.start.0)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// The whole selection shifts by one delta. Applying the commands in the
+    /// returned order must never trip `TimelineCmd::apply`'s per-command
+    /// `Sequence::validate()` debug-assert — this test runs in debug, so a
+    /// wrong order panics here rather than in the field (194 K-A5's hazard).
+    #[test]
+    fn move_clips_shifts_a_contiguous_run_without_a_transient_overlap() {
+        let (mut doc, seq_id, vtrack, ids) = run_of_three();
+        let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(50)).unwrap();
+        assert_eq!(cmds.len(), 3);
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        assert_eq!(starts(&doc, seq_id, vtrack), vec![150, 250, 350]);
+    }
+
+    /// Same, moving earlier: the order flips to leading-edge-first.
+    #[test]
+    fn move_clips_shifts_a_contiguous_run_earlier() {
+        let (mut doc, seq_id, vtrack, ids) = run_of_three();
+        let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(-100)).unwrap();
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        assert_eq!(starts(&doc, seq_id, vtrack), vec![0, 100, 200]);
+    }
+
+    /// Emission order is the safe one, not the selection's order. Moving later
+    /// must start from the trailing clip.
+    #[test]
+    fn move_clips_orders_trailing_edge_first_when_moving_later() {
+        let (doc, seq_id, vtrack, ids) = run_of_three();
+        let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+
+        let later = move_clips(project, seq_id, &moving, Tick(50)).unwrap();
+        let order: Vec<i64> = later
+            .iter()
+            .map(|c| match c {
+                TimelineCmd::MoveClip { old_start, .. } => old_start.0,
+                other => panic!("expected MoveClip, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(order, vec![300, 200, 100], "trailing edge first");
+
+        let earlier = move_clips(project, seq_id, &moving, Tick(-50)).unwrap();
+        let order: Vec<i64> = earlier
+            .iter()
+            .map(|c| match c {
+                TimelineCmd::MoveClip { old_start, .. } => old_start.0,
+                other => panic!("expected MoveClip, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(order, vec![100, 200, 300], "leading edge first");
+    }
+
+    /// A clip the selection is vacating is not an obstacle — this is the case
+    /// a loop over `move_clip` cannot express, since each call would see its
+    /// neighbour still in place.
+    #[test]
+    fn move_clips_ignores_collisions_within_the_moving_set() {
+        let (doc, seq_id, vtrack, ids) = run_of_three();
+        // Move only the first two into space the third is NOT vacating would
+        // collide; move all three and it is fine.
+        let all: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+        assert!(move_clips(project, seq_id, &all, Tick(100)).is_ok());
+
+        let leading: Vec<_> = ids[..2].iter().map(|c| (vtrack, *c)).collect();
+        assert_eq!(
+            move_clips(project, seq_id, &leading, Tick(100)),
+            Err(EditError::Overlap),
+            "the third clip stays put, so the second has nowhere to land"
+        );
+    }
+
+    /// A stationary clip blocks the move, and nothing partial is emitted.
+    #[test]
+    fn move_clips_refuses_when_a_stationary_clip_blocks() {
+        let (mut doc, seq_id, vtrack, ids) = run_of_three();
+        {
+            let project = doc.timeline.as_mut().unwrap();
+            let t = project
+                .sequences
+                .get_mut(&seq_id)
+                .unwrap()
+                .track_mut(vtrack)
+                .unwrap();
+            t.clips
+                .push(Clip::new(ClipSource::Adjustment, Tick(420), Tick(50)));
+        }
+        let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+        assert_eq!(
+            move_clips(project, seq_id, &moving, Tick(50)),
+            Err(EditError::Overlap),
+            "the trailing clip would land on the stationary one at 420"
+        );
+    }
+
+    /// Moving before zero is refused for the whole set, not clamped — clamping
+    /// would silently collapse the spacing the selection had.
+    #[test]
+    fn move_clips_refuses_a_move_before_zero() {
+        let (doc, seq_id, vtrack, ids) = run_of_three();
+        let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+        // The run starts at 100, so -101 takes its leading clip to -1.
+        assert_eq!(
+            move_clips(project, seq_id, &moving, Tick(-101)),
+            Err(EditError::Overlap)
+        );
+        // ...and the whole set is refused, not just the offending clip.
+        assert!(move_clips(project, seq_id, &moving, Tick(-100)).is_ok());
+    }
+
+    /// Clips on different tracks each keep their own track and shift together.
+    #[test]
+    fn move_clips_spans_tracks_keeping_each_clip_on_its_own() {
+        let (mut doc, seq_id, vtrack, vclip) = fixture();
+        let (atrack, aclip) = add_audio_clip(&mut doc, seq_id);
+        let moving = vec![(vtrack, vclip), (atrack, aclip)];
+        let project = doc.timeline.as_ref().unwrap();
+        let cmds = move_clips(project, seq_id, &moving, Tick(75)).unwrap();
+        for c in &cmds {
+            c.apply(&mut doc);
+        }
+        assert_eq!(starts(&doc, seq_id, vtrack), vec![75]);
+        assert_eq!(starts(&doc, seq_id, atrack), vec![75]);
+    }
+
+    /// A zero delta is not an undo entry.
+    #[test]
+    fn move_clips_zero_delta_emits_nothing() {
+        let (doc, seq_id, vtrack, ids) = run_of_three();
+        let moving: Vec<_> = ids.iter().map(|c| (vtrack, *c)).collect();
+        let project = doc.timeline.as_ref().unwrap();
+        assert!(move_clips(project, seq_id, &moving, Tick(0))
+            .unwrap()
+            .is_empty());
+        assert!(move_clips(project, seq_id, &[], Tick(50))
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn insert_space_shifts_later_clips_on_all_unlocked_tracks() {

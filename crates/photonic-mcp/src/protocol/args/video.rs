@@ -401,6 +401,16 @@ pub struct MoveClipArgs {
 /// gap (`ops::ripple_trim`). `edge` uses the same in/out vocabulary as
 /// `trim_clip` (in = clip's in-point/`ClipEdge::Start`, out = clip's
 /// out-point/`ClipEdge::End`).
+/// Args for `move_clips` — shift several clips by one shared delta in a single
+/// undo step (04 §2.6 multi-select, 210 §5). Each clip keeps its own track;
+/// there is no plural cross-track move. `delta_ticks` rather than an absolute
+/// start, because the operation's whole point is preserving relative spacing.
+#[derive(Debug, Deserialize)]
+pub struct MoveClipsArgs {
+    pub clip_ids: Vec<ClipId>,
+    pub delta_ticks: i64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RippleEditArgs {
     pub clip_id: ClipId,

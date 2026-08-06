@@ -2311,6 +2311,12 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::move_clip(state, a).await,
             ))
         }
+        "move_clips" => {
+            let a: MoveClipsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::move_clips(state, a).await,
+            ))
+        }
         "trim_clip" => {
             let a: TrimClipArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(
