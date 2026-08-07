@@ -112,13 +112,57 @@ fn choose_surface_config(
 
 /// Owns the surface frame for one in-flight render.
 ///
-/// After `begin_frame` records the document pass, callers may record
-/// additional passes (e.g. egui) into `encoder` before handing the handle
-/// back to `finish_frame`.
+/// `begin_frame` opens the scene phase. Callers add live text there, then use
+/// [`PhotonicRenderer::present_scene`] to transition to the surface phase before
+/// recording surface-level passes (e.g. glow and egui).
 pub struct FrameHandle {
     pub surface_texture: wgpu::SurfaceTexture,
     pub view: wgpu::TextureView,
     pub encoder: wgpu::CommandEncoder,
+    stage: FrameStage,
+}
+
+/// The two attachment formats used by a live frame. Keeping this state on the
+/// frame handle makes it difficult to accidentally attach glyphon or another
+/// scene pass to the presentation surface before the scene blit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FrameStage {
+    /// Geometry and live text must render into `PhotonicRenderer::scene_view`.
+    Scene,
+    /// The scene has been blitted to the surface; glow and egui may now load it.
+    Surface,
+}
+
+impl FrameStage {
+    pub(crate) fn transition_to_surface(&mut self) {
+        assert_eq!(
+            *self,
+            Self::Scene,
+            "scene must be blitted before entering the surface render stage"
+        );
+        *self = Self::Surface;
+    }
+}
+
+impl FrameHandle {
+    pub(crate) fn assert_scene_stage(&self, pass: &str) {
+        assert_eq!(
+            self.stage,
+            FrameStage::Scene,
+            "{pass} must be recorded before the scene is blitted to the surface"
+        );
+    }
+
+    /// Assert that a caller is recording a pass against the presentation surface.
+    /// App-level integrations use this immediately before their surface pass so
+    /// a missing `present_scene` fails before wgpu validation does.
+    pub fn assert_surface_stage(&self, pass: &str) {
+        assert_eq!(
+            self.stage,
+            FrameStage::Surface,
+            "{pass} must be recorded after the scene is blitted to the surface"
+        );
+    }
 }
 
 // ─── Main renderer ───────────────────────────────────────────────────────────
@@ -903,7 +947,10 @@ impl PhotonicRenderer {
     /// Convenience: full render loop without an egui overlay.
     pub fn render(&mut self) {
         let (verts, idxs) = self.update(); // already &mut self
-        if let Ok(Some(frame)) = self.begin_frame(&verts, &idxs) {
+        if let Ok(Some(mut frame)) = self.begin_frame(&verts, &idxs) {
+            self.render_text_pass(&mut frame);
+            self.present_scene(&mut frame);
+            self.render_gaussian_glow_pass(&mut frame);
             self.finish_frame(frame);
         }
         self.service_captures(&verts, &idxs);
@@ -2313,6 +2360,50 @@ mod scene_format_tests {
         assert!(
             r.scene_format().is_srgb(),
             "scene_format must be sRGB so document blending runs in linear light",
+        );
+    }
+
+    #[test]
+    fn scene_target_contract_is_distinct_from_the_surface_target() {
+        let Some(r) = try_offscreen() else {
+            eprintln!("no GPU adapter — skipping scene/surface target contract test");
+            return;
+        };
+        assert_eq!(r.scene_format(), crate::pipeline::SCENE_FORMAT);
+        assert_eq!(r.surface_format(), wgpu::TextureFormat::Rgba8Unorm);
+        assert_ne!(
+            r.scene_format(),
+            r.surface_format(),
+            "scene passes and surface passes must not share an attachment format"
+        );
+    }
+
+    #[test]
+    fn scene_pass_has_no_wgpu_validation_errors() {
+        let Some(mut r) = try_offscreen() else {
+            eprintln!("no GPU adapter — skipping scene pass error-scope test");
+            return;
+        };
+        let (vertices, indices) = r.update();
+        let mut encoder = r.device.create_command_encoder(&Default::default());
+
+        r.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        r.render_scene(
+            &mut encoder,
+            &r.msaa_view,
+            &r.scene_view,
+            r.width,
+            r.height,
+            &vertices,
+            &indices,
+        );
+        r.queue.submit([encoder.finish()]);
+        r.device.poll(wgpu::Maintain::Wait);
+        let error = pollster::block_on(r.device.pop_error_scope());
+
+        assert!(
+            error.is_none(),
+            "scene pass submitted a wgpu validation error: {error:?}"
         );
     }
 }

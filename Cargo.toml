@@ -89,7 +89,10 @@ lto = "thin"
 codegen-units = 16
 debug = false
 strip = "debuginfo"
-panic = "abort"
+# BooleanOps is an untrusted third-party geometry boundary. Keep unwinding
+# enabled so the core can contain geo's degenerate-ring panics with
+# `catch_unwind` and return an MCP error instead of terminating the process.
+panic = "unwind"
 # Windows: avoid /INCREMENTAL noise; Unix: same semantics.
 incremental = false
 

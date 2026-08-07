@@ -3,10 +3,11 @@ use super::*;
 impl PhotonicRenderer {
     /// Execute all pending Gaussian glow jobs collected during `update()`.
     ///
-    /// Must be called **after** `begin_frame` (so the scene is already rendered on the
-    /// surface texture) and **before** `finish_frame`.
+    /// Must be called **after** `present_scene` (so the scene is already blitted to
+    /// the surface texture) and **before** `finish_frame`.
     /// Uses an additive blend so the glow brightens the scene without erasing the fill.
     pub fn render_gaussian_glow_pass(&mut self, frame: &mut FrameHandle) {
+        frame.assert_surface_stage("render_gaussian_glow_pass");
         if self.pending_gaussian_glows.is_empty() {
             return;
         }

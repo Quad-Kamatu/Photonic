@@ -21,6 +21,10 @@
 //!   documents. A malformed history payload is likewise dropped, never fatal.
 
 use serde::Serialize;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::document::{Document, CURRENT_FORMAT_VERSION};
 use crate::history::HistorySnapshot;
@@ -29,6 +33,133 @@ use crate::history::HistorySnapshot;
 /// document's own `format_version`). Bump only on breaking changes to how the
 /// `photon_history` payload is laid out.
 pub const PHOTON_FORMAT_VERSION: u32 = 1;
+
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Write bytes to `path` without exposing a partially written destination.
+///
+/// The complete payload is written and synced to a uniquely named sibling before
+/// the sibling replaces the destination. A failed write or replacement leaves an
+/// existing destination untouched and removes the staging file.
+pub fn write_atomic_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_file_with_replacer(path, bytes, replace_destination)
+}
+
+fn write_atomic_file_with_replacer<F>(path: &Path, bytes: &[u8], replace: F) -> io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    let staging = staging_path(path)?;
+    let mut staging_created = false;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        staging_created = true;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        replace(&staging, path)
+    })();
+
+    if staging_created {
+        // A successful replacement has already consumed the staging path.
+        // Ignore both that expected NotFound and cleanup errors from a failed
+        // write so the original operation's error remains useful.
+        let _ = fs::remove_file(&staging);
+    }
+    result
+}
+
+fn staging_path(path: &Path) -> io::Result<PathBuf> {
+    use std::ffi::OsString;
+
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic file writes require a destination file name",
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let serial = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = OsString::from(".");
+    name.push(file_name);
+    name.push(format!(".photonic-tmp-{}-{serial}", std::process::id()));
+    Ok(parent.join(name))
+}
+
+#[cfg(not(windows))]
+fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
+    // POSIX rename atomically replaces an existing regular file.
+    fs::rename(staging, destination)
+}
+
+#[cfg(windows)]
+fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let staging = wide(staging);
+    let destination = wide(destination);
+    unsafe {
+        if ReplaceFileW(
+            destination.as_ptr(),
+            staging.as_ptr(),
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        ) != 0
+        {
+            return Ok(());
+        }
+
+        let replace_error = io::Error::last_os_error();
+        if replace_error.raw_os_error() != Some(ERROR_FILE_NOT_FOUND) {
+            return Err(replace_error);
+        }
+
+        if MoveFileExW(
+            staging.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        ) != 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+    fn ReplaceFileW(
+        replaced_file_name: *const u16,
+        replacement_file_name: *const u16,
+        backup_file_name: *const u16,
+        replace_flags: u32,
+        exclude: *mut std::ffi::c_void,
+        reserved: *mut std::ffi::c_void,
+    ) -> i32;
+}
 
 /// Serialize a document plus its history snapshot to a pretty-printed `.photon`
 /// JSON string. Pass `None` for `history` to write a document-only file (the
@@ -201,5 +332,72 @@ mod tests {
             PHOTON_FORMAT_VERSION, 1,
             "document migration is independent"
         );
+    }
+
+    fn test_dir(label: &str) -> PathBuf {
+        let serial = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "photonic-photon-file-{label}-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn staging_files(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".photonic-tmp-"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn atomic_write_replaces_with_exact_bytes_and_leaves_no_staging_file() {
+        let dir = test_dir("success");
+        let path = dir.join("project.photon");
+        let bytes = b"fully serialized photon bytes\n\0";
+
+        write_atomic_file(&path, bytes).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(staging_files(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn injected_replace_failure_preserves_destination_and_cleans_staging() {
+        let dir = test_dir("injected-failure");
+        let path = dir.join("project.photon");
+        let original = b"old project bytes";
+        fs::write(&path, original).unwrap();
+
+        let error = write_atomic_file_with_replacer(&path, b"new project bytes", |_staging, _| {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "injected replacement failure",
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(staging_files(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn structural_replace_failure_preserves_existing_destination_and_cleans_staging() {
+        let dir = test_dir("structural-failure");
+        let path = dir.join("project.photon");
+        fs::create_dir(&path).unwrap();
+
+        assert!(write_atomic_file(&path, b"cannot replace a directory").is_err());
+        assert!(path.is_dir());
+        assert!(staging_files(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

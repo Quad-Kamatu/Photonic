@@ -60,7 +60,7 @@ impl PhotonicRenderer {
         self.scene_view = scene_view;
     }
 
-    /// Present the offscreen document target (03 §4.5.4, audit A-1) into a
+    /// Record the offscreen document target (03 §4.5.4, audit A-1) into a
     /// swapchain frame: a full-screen pass that samples the sRGB
     /// [`scene_view`](Self::scene_tex) — the sampler hardware-decodes it to linear
     /// — and writes the sRGB-encoded pixel (explicit `srgb_oetf` in the blit
@@ -71,7 +71,7 @@ impl PhotonicRenderer {
     /// The document scene is opaque-over-BG, so no unpremultiply is needed here; if
     /// an `ExportBackground::Transparent` scene ever reaches this present path it
     /// must unpremultiply before the OETF.
-    pub fn blit_scene_to_surface(
+    fn blit_scene_to_surface(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
@@ -126,11 +126,11 @@ impl PhotonicRenderer {
     }
 
     /// Acquire the swapchain frame and record the document render pass into
-    /// `FrameHandle::encoder`. Returns `None` on a transient timeout and an
-    /// error only when the surface stays invalid after a reconfigure + retry.
+    /// `scene_view`. Returns `None` on a transient timeout and an error only
+    /// when the surface stays invalid after a reconfigure + retry.
     ///
-    /// Callers may append further render passes (e.g. egui) to `handle.encoder`
-    /// before calling `finish_frame`.
+    /// Callers must render live text, call [`Self::present_scene`], and may then
+    /// append further surface passes (e.g. glow and egui) before `finish_frame`.
     pub fn begin_frame(
         &self,
         vertices: &[Vertex],
@@ -181,8 +181,8 @@ impl PhotonicRenderer {
                 label: Some("frame_encoder"),
             });
         // Render the document into the offscreen sRGB scene target (linear-light
-        // blending, matching headless), then present it into the swapchain frame
-        // (03 §4.5.4). egui still paints on top into `handle.view` afterwards.
+        // blending, matching headless). Live text is appended to this same target
+        // by `render_text_pass` before `present_scene` performs the surface blit.
         self.render_scene(
             &mut encoder,
             &self.msaa_view,
@@ -192,16 +192,25 @@ impl PhotonicRenderer {
             vertices,
             indices,
         );
-        self.blit_scene_to_surface(&mut encoder, &view);
         Ok(Some(FrameHandle {
             surface_texture,
             view,
             encoder,
+            stage: FrameStage::Scene,
         }))
+    }
+
+    /// Blit the completed sRGB scene into the non-sRGB presentation surface.
+    /// This is the only transition from scene rendering to surface rendering.
+    pub fn present_scene(&self, frame: &mut FrameHandle) {
+        frame.assert_scene_stage("present_scene");
+        self.blit_scene_to_surface(&mut frame.encoder, &frame.view);
+        frame.stage.transition_to_surface();
     }
 
     /// Submit the frame encoder and present the surface texture.
     pub fn finish_frame(&self, handle: FrameHandle) {
+        handle.assert_surface_stage("finish_frame");
         self.queue.submit([handle.encoder.finish()]);
         handle.surface_texture.present();
     }
@@ -209,7 +218,7 @@ impl PhotonicRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_surface_dims;
+    use super::{clamp_surface_dims, FrameStage};
 
     #[test]
     fn clamps_each_axis_independently_to_the_device_limit() {
@@ -223,5 +232,13 @@ mod tests {
         assert_eq!(clamp_surface_dims(100_000, 1080, max), (max, 1080));
         assert_eq!(clamp_surface_dims(1920, 100_000, max), (1920, max));
         assert_eq!(clamp_surface_dims(u32::MAX, u32::MAX, max), (max, max));
+    }
+
+    #[test]
+    fn frame_stage_contract_requires_scene_before_surface_work() {
+        let mut stage = FrameStage::Scene;
+        assert_eq!(stage, FrameStage::Scene);
+        stage.transition_to_surface();
+        assert_eq!(stage, FrameStage::Surface);
     }
 }

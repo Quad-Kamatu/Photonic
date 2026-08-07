@@ -3,9 +3,10 @@ use super::*;
 impl PhotonicRenderer {
     /// Render any text nodes collected during `update()` into the frame.
     ///
-    /// Call this after `begin_frame` and before the egui pass.
+    /// Call this after `begin_frame` and before `present_scene`.
     /// No-op if there are no text nodes this frame.
     pub fn render_text_pass(&mut self, frame: &mut FrameHandle) {
+        frame.assert_scene_stage("render_text_pass");
         if self.pending_texts.is_empty() {
             return;
         }
@@ -89,7 +90,10 @@ impl PhotonicRenderer {
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("text_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &frame.view,
+                        // Glyphon's atlas/pipeline is built for scene_format
+                        // (Rgba8UnormSrgb), so live text must stay in the scene
+                        // phase. The surface is Rgba8Unorm on the live path.
+                        view: &self.scene_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,

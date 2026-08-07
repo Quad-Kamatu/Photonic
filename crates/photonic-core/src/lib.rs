@@ -46,7 +46,7 @@ pub use node::{
 };
 pub use path::PathData;
 pub use path_policy::{DenyReason, PathAccess, PathPolicy, PathPolicyError, PathVerdict};
-pub use photon_file::{load_photon, save_photon, PHOTON_FORMAT_VERSION};
+pub use photon_file::{load_photon, save_photon, write_atomic_file, PHOTON_FORMAT_VERSION};
 pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{

@@ -828,13 +828,17 @@ impl PhotonicWinitApp {
             None => return Ok(None),
         };
 
-        // 2b. Render text nodes over the document (before egui).
+        // 2b. Render text nodes over the sRGB scene (before the scene blit).
         state.renderer.render_text_pass(&mut frame);
 
-        // 2c. Render Gaussian glow effects (GPU blur passes, additive composite).
+        // 2c. Blit the completed scene to the presentation surface. Surface-level
+        // effects and egui must only be recorded after this transition.
+        state.renderer.present_scene(&mut frame);
+
+        // 2d. Render Gaussian glow effects (GPU blur passes, additive composite).
         state.renderer.render_gaussian_glow_pass(&mut frame);
 
-        // 2d. Present the newest video EngineFrame (03 §5) into its egui
+        // 2e. Present the newest video EngineFrame (03 §5) into its egui
         // native texture BEFORE the egui pass runs, so the monitor paints the
         // current frame this very frame. No-op when nothing new was published.
         if let Some(bridge) = state.gui.engine.as_mut() {
@@ -846,6 +850,7 @@ impl PhotonicWinitApp {
         }
 
         // 3. Run egui (doc lock is held only for the duration of this closure)
+        frame.assert_surface_stage("egui_pass");
         let raw_input = state.egui_state.take_egui_input(&state.window);
         let (w, h) = state.renderer.size();
 

@@ -1,7 +1,6 @@
 use crate::handlers::shared::{ordering::*, paths::*};
 use crate::protocol::*;
 use crate::server::AppState;
-use kurbo;
 use photonic_core::{
     history::Command,
     node::{PathNode, SceneNode, SceneNodeKind},
@@ -38,7 +37,12 @@ pub async fn boolean_operation(state: &AppState, args: BooleanOperationArgs) -> 
 
     let result_path = match boolean_op(&target_baked, &tool_baked, args.operation) {
         Ok(p) => p,
-        Err(e) => return ToolResult::error(format!("Boolean operation failed: {}", e)),
+        Err(e) => {
+            return ToolResult::error(format!(
+                "pathfinder boolean stage failed for target {} and tool {}: {}",
+                args.target_id, args.tool_id, e
+            ))
+        }
     };
 
     // Determine target's layer and z-position for result placement
@@ -191,7 +195,10 @@ pub async fn pathfinder_crop(state: &AppState, args: PathfinderCropArgs) -> Tool
         let intersected = match boolean_op(&baked_path, &front_path, BooleanOp::Intersect) {
             Ok(p) => p,
             Err(e) => {
-                return ToolResult::error(format!("intersection failed for node {}: {}", nid, e))
+                return ToolResult::error(format!(
+                    "pathfinder_crop intersection stage failed for node {}: {}",
+                    nid, e
+                ))
             }
         };
 
@@ -264,9 +271,19 @@ pub async fn pathfinder_divide(state: &AppState, args: PathfinderDivideArgs) -> 
     let back_baked = apply_affine_to_path(&back_pn.path_data, back_node.transform.to_kurbo());
     let front_baked = apply_affine_to_path(&front_pn.path_data, front_node.transform.to_kurbo());
 
-    let faces = divide_paths(&back_baked, &front_baked);
+    let faces = match divide_paths(&back_baked, &front_baked) {
+        Ok(faces) => faces,
+        Err(e) => {
+            return ToolResult::error(format!(
+                "pathfinder_divide geometry stage failed for nodes {} and {}: {}",
+                back_id, front_id, e
+            ))
+        }
+    };
     if faces.is_empty() {
-        return ToolResult::error("Divide produced no faces — shapes may not overlap");
+        return ToolResult::error(
+            "pathfinder_divide result stage produced no faces — shapes may not overlap",
+        );
     }
 
     let target_layer = args.layer_id.unwrap_or(back_node.layer_id);
@@ -376,7 +393,10 @@ pub async fn pathfinder_merge(state: &AppState, args: PathfinderMergeArgs) -> To
             match boolean_op(&trimmed, &baked[j].1, BooleanOp::Subtract) {
                 Ok(p) => trimmed = p,
                 Err(e) => {
-                    return ToolResult::error(format!("merge trim step failed at z {}: {}", j, e))
+                    return ToolResult::error(format!(
+                        "pathfinder_merge trim stage failed at z step {} (node {}): {}",
+                        j, baked[j].0, e
+                    ))
                 }
             }
         }
@@ -421,7 +441,12 @@ pub async fn pathfinder_merge(state: &AppState, args: PathfinderMergeArgs) -> To
         for path in &paths[1..] {
             match boolean_op(&merged, path, BooleanOp::Union) {
                 Ok(p) => merged = p,
-                Err(e) => return ToolResult::error(format!("merge union step failed: {}", e)),
+                Err(e) => {
+                    return ToolResult::error(format!(
+                        "pathfinder_merge union stage failed for fill group {}: {}",
+                        fill_key, e
+                    ))
+                }
             }
         }
 
@@ -531,7 +556,10 @@ pub async fn pathfinder_minus_back(state: &AppState, args: PathfinderMinusBackAr
         result_path = match boolean_op(&result_path, &baked, BooleanOp::Subtract) {
             Ok(p) => p,
             Err(e) => {
-                return ToolResult::error(format!("subtraction failed for node {}: {}", nid, e))
+                return ToolResult::error(format!(
+                    "pathfinder_minus_back subtraction stage failed for node {}: {}",
+                    nid, e
+                ))
             }
         };
     }
@@ -636,7 +664,10 @@ pub async fn pathfinder_minus_front(
         let result = match boolean_op(&baked, &front_path, BooleanOp::Subtract) {
             Ok(p) => p,
             Err(e) => {
-                return ToolResult::error(format!("subtraction failed for node {}: {}", nid, e))
+                return ToolResult::error(format!(
+                    "pathfinder_minus_front subtraction stage failed for node {}: {}",
+                    nid, e
+                ))
             }
         };
         let mut new_node = node.clone();
@@ -809,8 +840,8 @@ pub async fn pathfinder_trim(state: &AppState, args: PathfinderTrimArgs) -> Tool
                 Ok(p) => p,
                 Err(e) => {
                     return ToolResult::error(format!(
-                        "trim subtraction failed at step {}: {}",
-                        j, e
+                        "pathfinder_trim subtraction stage failed at step {} (node {}): {}",
+                        j, baked_paths[j].0, e
                     ))
                 }
             };
@@ -888,15 +919,28 @@ pub async fn divide_objects_below(state: &AppState, args: DivideObjectsBelowArgs
             apply_affine_to_path(&target_pn.path_data, target_node.transform.to_kurbo());
 
         // Skip if no overlap.
-        let overlap = boolean_op(&target_baked, &cutter_baked, BooleanOp::Intersect)
-            .unwrap_or_else(|_| {
-                photonic_core::path::PathData::from_bez_path(&kurbo::BezPath::new())
-            });
+        let overlap = match boolean_op(&target_baked, &cutter_baked, BooleanOp::Intersect) {
+            Ok(overlap) => overlap,
+            Err(e) => {
+                return ToolResult::error(format!(
+                    "divide_objects_below overlap-check stage failed for node {}: {}",
+                    target_id, e
+                ))
+            }
+        };
         if overlap.is_empty() {
             continue;
         }
 
-        let faces = divide_paths(&target_baked, &cutter_baked);
+        let faces = match divide_paths(&target_baked, &cutter_baked) {
+            Ok(faces) => faces,
+            Err(e) => {
+                return ToolResult::error(format!(
+                    "divide_objects_below divide stage failed for node {}: {}",
+                    target_id, e
+                ))
+            }
+        };
         commands.push(Command::RemoveNode {
             node_id: *target_id,
         });
@@ -938,4 +982,84 @@ pub async fn divide_objects_below(state: &AppState, args: DivideObjectsBelowArgs
         split_count
     ))
     .with_data(serde_json::json!({ "split_count": split_count }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use photonic_core::{
+        history::Command,
+        node::{PathNode, SceneNode},
+        path::PathData,
+    };
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn merge_geometry_failure_is_transactional() {
+        let state = AppState::headless_for_test();
+        let layer_id = state.document.lock().await.active_layer_id.unwrap();
+        let invalid_path = PathData::from_svg("M 0 0 L 1 0 L 2 0 Z").unwrap();
+        let bad = SceneNode::new(
+            "degenerate",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(invalid_path)),
+        );
+        let good = SceneNode::new(
+            "rectangle",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        let bad_id = bad.id;
+        let good_id = good.id;
+
+        {
+            let mut doc = state.document.lock().await;
+            let mut history = state.history.lock().await;
+            history.execute_discrete(
+                Command::AddNode {
+                    node: bad,
+                    layer_id: Some(layer_id),
+                },
+                &mut doc,
+            );
+            history.execute_discrete(
+                Command::AddNode {
+                    node: good,
+                    layer_id: Some(layer_id),
+                },
+                &mut doc,
+            );
+        }
+
+        let before_document = {
+            let doc = state.document.lock().await;
+            serde_json::to_value(&*doc).unwrap()
+        };
+        let before_history = state.history.lock().await.current_node();
+
+        let result = crate::dispatch::dispatch_tool(
+            &state,
+            "pathfinder_merge",
+            json!({ "node_ids": [bad_id, good_id] }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        let message = match &result.content[0] {
+            crate::protocol::ContentItem::Text { text } => text,
+            other => panic!("unexpected result content: {other:?}"),
+        };
+        assert!(
+            message.contains("pathfinder_merge trim stage failed"),
+            "{message}"
+        );
+
+        let after_document = {
+            let doc = state.document.lock().await;
+            serde_json::to_value(&*doc).unwrap()
+        };
+        assert_eq!(after_document, before_document);
+        assert_eq!(state.history.lock().await.current_node(), before_history);
+    }
 }
