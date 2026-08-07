@@ -33,6 +33,13 @@ use winit::{
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
+fn native_project_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
+        .then(|| path.to_path_buf())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -119,7 +126,7 @@ fn main() -> Result<()> {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-        if is_svg {
+        if is_svg && !content.trim_start().starts_with('{') {
             let doc = photonic_core::import_svg(&content)
                 .map_err(|e| anyhow::anyhow!("failed to import SVG '{}': {e}", path.display()))?;
             (doc, None)
@@ -152,7 +159,9 @@ fn main() -> Result<()> {
 
     // Audit log shared between the MCP server thread and the GUI Audit panel.
     let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::new()));
-    let mcp_document_path = Arc::new(std::sync::Mutex::new(args.file.clone()));
+    let mcp_document_path = Arc::new(std::sync::Mutex::new(
+        args.file.as_deref().and_then(native_project_path),
+    ));
 
     let secret = args.mcp_secret.clone().or_else(|| {
         // Generate a session token when not pinned (28 §4 / MCP local profile).
@@ -706,7 +715,7 @@ impl ApplicationHandler for PhotonicWinitApp {
                 if let Ok(doc) = self.document.try_lock() {
                     state.gui.welcome.add_recent(path.clone(), doc.name.clone());
                 }
-                state.gui.current_file = Some(path);
+                state.gui.current_file = native_project_path(&path);
             }
         }
     }
