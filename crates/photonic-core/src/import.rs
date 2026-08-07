@@ -6,6 +6,7 @@ use crate::{
     style::{Gradient, GradientStop, LineCap, LineJoin},
     Color, Document, Fill, PathData, SceneNode, SceneNodeKind, Stroke, Transform,
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
@@ -24,7 +25,11 @@ pub enum ImportError {
 
 /// Parse an SVG string and return a Photonic [`Document`].
 pub fn import_svg(svg_text: &str) -> Result<Document, ImportError> {
-    let tree = roxmltree::Document::parse(svg_text)?;
+    // roxmltree deliberately rejects every DTD. SVG editors commonly emit the
+    // standard SVG 1.1 external doctype even though the document does not rely
+    // on it. Remove the declaration without resolving external resources.
+    let svg_text = without_doctype(svg_text);
+    let tree = roxmltree::Document::parse(&svg_text)?;
     let root = tree.root_element();
 
     if root.tag_name().name() != "svg" {
@@ -60,6 +65,39 @@ pub fn import_svg(svg_text: &str) -> Result<Document, ImportError> {
     }
 
     Ok(doc)
+}
+
+fn without_doctype(svg: &str) -> Cow<'_, str> {
+    let Some(start) = svg.find("<!DOCTYPE") else {
+        return Cow::Borrowed(svg);
+    };
+
+    let bytes = svg.as_bytes();
+    let mut quote = None;
+    let mut subset_depth = 0usize;
+    for (offset, byte) in bytes[start + "<!DOCTYPE".len()..]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        match (quote, byte) {
+            (Some(active), b) if b == active => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'[') => subset_depth += 1,
+            (None, b']') => subset_depth = subset_depth.saturating_sub(1),
+            (None, b'>') if subset_depth == 0 => {
+                let end = start + "<!DOCTYPE".len() + offset + 1;
+                let mut sanitized = String::with_capacity(svg.len() - (end - start));
+                sanitized.push_str(&svg[..start]);
+                sanitized.push_str(&svg[end..]);
+                return Cow::Owned(sanitized);
+            }
+            _ => {}
+        }
+    }
+
+    Cow::Borrowed(svg)
 }
 
 // ─── Context: CSS rules + gradient defs ──────────────────────────────────────
@@ -1330,5 +1368,17 @@ mod tests {
             fills.iter().any(|c| approx(*c, "5d4096")),
             "missing .cls-2 fill #5d4096: {fills:?}"
         );
+    }
+
+    #[test]
+    fn standard_svg_doctype_is_ignored_without_external_resolution() {
+        let svg = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <path d="M0 0 L10 0 L10 10 Z"/>
+</svg>"#;
+
+        let doc = import_svg(svg).expect("standard external SVG doctype should be accepted");
+        assert_eq!(doc.nodes.len(), 1);
     }
 }

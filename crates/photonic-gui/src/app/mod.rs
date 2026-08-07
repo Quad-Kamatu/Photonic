@@ -1752,12 +1752,59 @@ fn load_document(
         .unwrap_or("")
         .to_lowercase();
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if ext == "svg" {
+    if ext == "svg" && !content.trim_start().starts_with('{') {
         photonic_core::import_svg(&content)
             .map(|doc| (doc, None))
             .map_err(|e| e.to_string())
     } else {
         photonic_core::load_photon(&content).map_err(|e| e.to_string())
+    }
+}
+
+/// Only native `.photon` projects are writable in place. Imported source files
+/// become unsaved documents so Save/Autosave can never overwrite the source.
+fn native_project_path(path: &Path) -> Option<std::path::PathBuf> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
+        .then(|| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod file_lifecycle_tests {
+    use super::{load_document, native_project_path};
+    use std::path::Path;
+
+    #[test]
+    fn only_native_projects_are_writable_in_place() {
+        assert_eq!(
+            native_project_path(Path::new("project.photon")),
+            Some(Path::new("project.photon").to_path_buf())
+        );
+        assert_eq!(
+            native_project_path(Path::new("PROJECT.PHOTON")),
+            Some(Path::new("PROJECT.PHOTON").to_path_buf())
+        );
+        assert_eq!(native_project_path(Path::new("artwork.svg")), None);
+        assert_eq!(native_project_path(Path::new("photo.png")), None);
+    }
+
+    #[test]
+    fn photon_json_mislabeled_as_svg_remains_recoverable() {
+        let path = std::env::temp_dir().join(format!(
+            "photonic-mislabeled-svg-{}.svg",
+            std::process::id()
+        ));
+        let document = photonic_core::Document::new("Recovered", 64.0, 32.0);
+        let json = photonic_core::save_photon(&document, None).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        let (loaded, history) = load_document(&path).expect("mislabeled project should open");
+        assert_eq!(loaded.name, "Recovered");
+        assert!(history.is_none());
+        assert_eq!(native_project_path(&path), None);
+
+        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -2508,7 +2555,7 @@ impl PhotonicApp {
                             *doc = loaded;
                             apply_opened_history(history, hist_snap);
                             self.fit_pending = true;
-                            self.current_file = Some(path);
+                            self.current_file = native_project_path(&path);
                             self.selected_id = None;
                             self.show_welcome = false;
                             doc_modified = true;
@@ -2585,7 +2632,7 @@ impl PhotonicApp {
                                         *doc = loaded;
                                         apply_opened_history(history, hist_snap);
                                         self.fit_pending = true;
-                                        self.current_file = Some(path);
+                                        self.current_file = native_project_path(&path);
                                         self.selected_id = None;
                                         self.show_welcome = false;
                                         doc_modified = true;
