@@ -1896,7 +1896,7 @@ fn write_photon_file(
     history.enforce_size();
     let snap = history.snapshot_state();
     let json = photonic_core::save_photon(doc, Some(&snap)).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())
+    photonic_core::write_atomic_file(path, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 impl PhotonicApp {
