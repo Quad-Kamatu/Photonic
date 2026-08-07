@@ -1176,7 +1176,7 @@ fn build_geometry(
             let opacity = path_node.fill.opacity * node.opacity * gop;
             let mesh = tessellate_fill(
                 &path_node.path_data,
-                false,
+                path_node.is_compound,
                 adaptive_tolerance(view_scale, &node.transform.matrix),
             );
             if !mesh.is_empty() {
@@ -1546,6 +1546,45 @@ mod blend_tests {
             force_fallback_adapter: false,
         }))?;
         Some(pollster::block_on(HeadlessRenderer::new()))
+    }
+
+    #[test]
+    fn raster_export_preserves_compound_path_cutouts() {
+        let Some(renderer) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping compound raster export test");
+            return;
+        };
+        let mut document = Document::new("compound", 64.0, 64.0);
+        let layer_id = document.active_layer_id.unwrap();
+        let data = PathData::from_svg(
+            "M8 8 L56 8 L56 56 L8 56 Z \
+             M18 18 L28 18 L28 28 L18 28 Z \
+             M36 36 L46 36 L46 46 L36 46 Z",
+        )
+        .unwrap();
+        let mut path = PathNode::new(data).with_fill(Fill::solid(Color::BLACK));
+        path.is_compound = true;
+        document.add_node(
+            SceneNode::new("compound", layer_id, SceneNodeKind::Path(path)),
+            None,
+        );
+
+        let png = renderer.render_png_with_opts(
+            &document,
+            64,
+            64,
+            &ExportOptions {
+                background: ExportBackground::Transparent,
+                ..ExportOptions::default()
+            },
+        );
+        let image = image::load_from_memory(&png).unwrap().to_rgba8();
+        let outer = image.get_pixel(10, 10).0;
+        let hole_1 = image.get_pixel(23, 23).0;
+        let hole_2 = image.get_pixel(41, 41).0;
+        assert!(outer[3] > 0, "outer contour is filled: {outer:?}");
+        assert_eq!(hole_1[3], 0, "first cutout is transparent: {hole_1:?}");
+        assert_eq!(hole_2[3], 0, "second cutout is transparent: {hole_2:?}");
     }
 
     // Backdrop and source fills chosen so every separable mode yields a distinct

@@ -166,9 +166,16 @@ pub async fn make_compound_path(state: &AppState, args: MakeCompoundPathArgs) ->
     // The bottommost node is the base: its ID becomes the compound path ID.
     let base_id = ordered_ids[0];
     let base_node = doc.nodes[&base_id].clone();
-    // Concatenate all BezPaths, baking each node's world transform.
-    let [ba, bb, bc, bd, be, bf] = base_node.transform.matrix;
+    // Concatenate all BezPaths in the base node's local coordinate system. Use
+    // kurbo's canonical affine composition instead of hand-rolling point and
+    // inverse transforms; this preserves every command/control point and avoids
+    // subtly mixing SVG and affine matrix conventions.
+    let [ba, bb, bc, bd, _, _] = base_node.transform.matrix;
     let base_det = ba * bd - bb * bc;
+    if !base_det.is_finite() || base_det.abs() < 1e-12 {
+        return ToolResult::error("Cannot make a compound path with a singular base transform");
+    }
+    let world_to_base = base_node.transform.to_kurbo().inverse();
     let mut merged = kurbo::BezPath::new();
     for &id in &ordered_ids {
         let node = &doc.nodes[&id];
@@ -176,64 +183,30 @@ pub async fn make_compound_path(state: &AppState, args: MakeCompoundPathArgs) ->
             SceneNodeKind::Path(p) => p,
             _ => unreachable!(),
         };
-        let [a, b, c, d, e, f] = node.transform.matrix;
-        let bez = pn.path_data.to_bez_path();
-        for el in bez.elements() {
-            use kurbo::PathEl::*;
-            // Transform to world coords, then into base node's local space (inverse of base transform).
-            let to_local = |wx: f64, wy: f64| -> (f64, f64) {
-                // world → base local (inverse affine)
-                if base_det.abs() < 1e-12 {
-                    return (wx - be, wy - bf);
-                }
-                let tx = wx - be;
-                let ty = wy - bf;
-                (
-                    (bd * tx - bc * ty) / base_det,
-                    (-bb * tx + ba * ty) / base_det,
-                )
-            };
-            let world_pt = |px: f64, py: f64| -> kurbo::Point {
-                kurbo::Point::new(a * px + c * py + e, b * px + d * py + f)
-            };
-            let transformed = match el {
-                MoveTo(p) => {
-                    let wp = world_pt(p.x, p.y);
-                    let lp = to_local(wp.x, wp.y);
-                    MoveTo(kurbo::Point::new(lp.0, lp.1))
-                }
-                LineTo(p) => {
-                    let wp = world_pt(p.x, p.y);
-                    let lp = to_local(wp.x, wp.y);
-                    LineTo(kurbo::Point::new(lp.0, lp.1))
-                }
-                QuadTo(p1, p2) => {
-                    let wp1 = world_pt(p1.x, p1.y);
-                    let lp1 = to_local(wp1.x, wp1.y);
-                    let wp2 = world_pt(p2.x, p2.y);
-                    let lp2 = to_local(wp2.x, wp2.y);
-                    QuadTo(
-                        kurbo::Point::new(lp1.0, lp1.1),
-                        kurbo::Point::new(lp2.0, lp2.1),
-                    )
-                }
-                CurveTo(p1, p2, p3) => {
-                    let wp1 = world_pt(p1.x, p1.y);
-                    let lp1 = to_local(wp1.x, wp1.y);
-                    let wp2 = world_pt(p2.x, p2.y);
-                    let lp2 = to_local(wp2.x, wp2.y);
-                    let wp3 = world_pt(p3.x, p3.y);
-                    let lp3 = to_local(wp3.x, wp3.y);
-                    CurveTo(
-                        kurbo::Point::new(lp1.0, lp1.1),
-                        kurbo::Point::new(lp2.0, lp2.1),
-                        kurbo::Point::new(lp3.0, lp3.1),
-                    )
-                }
-                ClosePath => ClosePath,
-            };
-            merged.push(transformed);
+        let mut bez = match pn.path_data.try_to_bez_path() {
+            Ok(bez) if !bez.elements().is_empty() => bez,
+            Ok(_) => return ToolResult::error(format!("Path node {} has no geometry", id)),
+            Err(error) => {
+                return ToolResult::error(format!(
+                    "Path node {} has invalid geometry: {}",
+                    id, error
+                ))
+            }
+        };
+        bez.apply_affine(world_to_base * node.transform.to_kurbo());
+        for element in bez.elements() {
+            merged.push(*element);
         }
+    }
+
+    // Round-trip now, before deleting any source nodes. PathData is the stored
+    // representation used by bounds, inspection, rendering, and SVG export.
+    let merged_path = PathData::from_bez_path(&merged);
+    if merged_path
+        .try_to_bez_path()
+        .map_or(true, |path| path.elements().is_empty())
+    {
+        return ToolResult::error("Compound path assembly produced invalid or empty geometry");
     }
 
     let compound_name = args
@@ -244,7 +217,7 @@ pub async fn make_compound_path(state: &AppState, args: MakeCompoundPathArgs) ->
     let mut updated_node = base_node.clone();
     updated_node.name = compound_name.clone();
     if let SceneNodeKind::Path(ref mut p) = updated_node.kind {
-        p.path_data = PathData::from_bez_path(&merged);
+        p.path_data = merged_path;
         p.is_compound = true;
     }
 
@@ -382,4 +355,156 @@ pub async fn release_compound_path(state: &AppState, args: ReleaseCompoundPathAr
         "node_ids": new_ids,
         "subpath_count": new_ids.len(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::clipboard::new_clipboard_ring;
+    use crate::server::McpServerConfig;
+    use kurbo::Shape;
+    use photonic_core::{
+        export::{export_svg, SvgExportOptions},
+        transform::Transform,
+        AuditLog, Document,
+    };
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state(document: Document) -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(document)),
+            history: Arc::new(Mutex::new(photonic_core::CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(new_clipboard_ring()),
+        }
+    }
+
+    fn transformed_rect(
+        name: &str,
+        layer_id: photonic_core::layer::LayerId,
+        width: f64,
+        height: f64,
+        transform: Transform,
+    ) -> SceneNode {
+        let mut node = SceneNode::new(
+            name,
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, width, height))),
+        );
+        node.transform = transform;
+        node
+    }
+
+    fn mesh_covers(mesh: &photonic_render::tessellator::Mesh, point: [f32; 2]) -> bool {
+        fn side(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+            (p[0] - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (p[1] - b[1])
+        }
+        mesh.indices.chunks_exact(3).any(|triangle| {
+            let a = mesh.vertices[triangle[0] as usize];
+            let b = mesh.vertices[triangle[1] as usize];
+            let c = mesh.vertices[triangle[2] as usize];
+            let s1 = side(point, a, b);
+            let s2 = side(point, b, c);
+            let s3 = side(point, c, a);
+            (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0)
+        })
+    }
+
+    #[tokio::test]
+    async fn transformed_contours_make_renderable_exportable_compound_with_holes() {
+        let mut document = Document::new("compound regression", 160.0, 140.0);
+        let layer_id = document.active_layer_id.expect("default layer");
+
+        // All three contours have distinct, non-identity transforms. In world
+        // space the outer contour is x=20..120/y=20..120 and the two holes are
+        // x=40..60/y=45..65 and x=80..100/y=75..95.
+        let outer = transformed_rect(
+            "outer",
+            layer_id,
+            50.0,
+            50.0,
+            Transform::new(2.0, 0.0, 0.0, 2.0, 20.0, 20.0),
+        );
+        let hole_1 = transformed_rect(
+            "hole 1",
+            layer_id,
+            10.0,
+            10.0,
+            Transform::new(2.0, 0.0, 0.0, 2.0, 40.0, 45.0),
+        );
+        let hole_2 = transformed_rect(
+            "hole 2",
+            layer_id,
+            8.0,
+            8.0,
+            Transform::new(2.5, 0.0, 0.0, 2.5, 80.0, 75.0),
+        );
+        let ids = vec![outer.id, hole_1.id, hole_2.id];
+        for node in [outer, hole_1, hole_2] {
+            document.add_node(node, Some(layer_id));
+        }
+        let state = test_state(document);
+
+        let result = make_compound_path(
+            &state,
+            MakeCompoundPathArgs {
+                node_ids: ids.clone(),
+                name: Some("dancer contours".into()),
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+
+        let document = state.document.lock().await;
+        assert_eq!(
+            document.nodes.len(),
+            1,
+            "source contours should be replaced"
+        );
+        let compound = document.nodes.get(&ids[0]).expect("base node retained");
+        let path = match &compound.kind {
+            SceneNodeKind::Path(path) => path,
+            _ => panic!("compound must remain a path"),
+        };
+        assert!(path.is_compound);
+        let bez = path
+            .path_data
+            .try_to_bez_path()
+            .expect("valid stored SVG path");
+        let anchor_count = bez
+            .elements()
+            .iter()
+            .filter(|element| !matches!(element, kurbo::PathEl::ClosePath))
+            .count();
+        assert_eq!(anchor_count, 12, "all three four-anchor contours survive");
+        let bounds = compound.local_bounds().expect("nonempty local bounds");
+        assert!(bounds.width() > 0.0 && bounds.height() > 0.0);
+        assert!(bez.area().abs() > 0.0);
+
+        // This is the exact even-odd tessellation consumed by the interactive
+        // and headless raster renderers. Sample local points corresponding to a
+        // solid part of the silhouette and each transparent cutout.
+        let mesh = photonic_render::tessellator::tessellate_fill(&path.path_data, true, 0.1);
+        assert!(!mesh.is_empty());
+        assert!(mesh_covers(&mesh, [5.0, 5.0]));
+        assert!(
+            !mesh_covers(&mesh, [15.0, 17.5]),
+            "first cutout must be clear"
+        );
+        assert!(
+            !mesh_covers(&mesh, [35.0, 32.5]),
+            "second cutout must be clear"
+        );
+
+        let svg = export_svg(&document, &SvgExportOptions::default());
+        assert!(svg.contains("fill-rule=\"evenodd\""), "{svg}");
+        let d = path.path_data.as_svg();
+        assert_eq!(d.matches('M').count(), 3, "SVG must contain three subpaths");
+        assert!(kurbo::BezPath::from_svg(d).is_ok(), "exported d must parse");
+    }
 }

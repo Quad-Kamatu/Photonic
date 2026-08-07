@@ -298,10 +298,17 @@ impl PathData {
 
     /// Get the underlying kurbo `BezPath`.
     pub fn to_bez_path(&self) -> BezPath {
+        self.try_to_bez_path().unwrap_or_default()
+    }
+
+    /// Parse the stored SVG data without converting malformed geometry into an
+    /// empty path. Mutation code should use this form so a parse failure cannot
+    /// silently erase a node's contours.
+    pub fn try_to_bez_path(&self) -> Result<BezPath, String> {
         if self.svg.is_empty() {
-            BezPath::new()
+            Ok(BezPath::new())
         } else {
-            BezPath::from_svg(&self.svg).unwrap_or_default()
+            BezPath::from_svg(&self.svg).map_err(|e| e.to_string())
         }
     }
 

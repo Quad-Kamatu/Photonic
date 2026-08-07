@@ -498,13 +498,18 @@ fn emit_node_inner(
         SceneNodeKind::Path(p) => {
             let fill = fill_attrs(&p.fill, ctx);
             let stroke = stroke_attrs(&p.stroke, affine_scale(&node.transform), ctx);
+            let fill_rule = if p.is_compound {
+                " fill-rule=\"evenodd\""
+            } else {
+                ""
+            };
             let d = match ctx.path_p {
                 Some(prec) => path_d_rounded(&p.path_data, prec),
                 None => p.path_data.as_svg().to_string(),
             };
             body.push_str(&format!(
-                "{}<path{}{}{}{}{}{}{} d=\"{}\"/>\n",
-                pad, id_attr, transform, opacity, blend, filter, fill, stroke, d,
+                "{}<path{}{}{}{}{}{}{}{} d=\"{}\"/>\n",
+                pad, id_attr, transform, opacity, blend, filter, fill, stroke, fill_rule, d,
             ));
         }
         SceneNodeKind::Group(g) => {
