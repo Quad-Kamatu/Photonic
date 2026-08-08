@@ -13,6 +13,9 @@ use photonic_core::{
 use regex::Regex;
 use std::{collections::HashMap, path::PathBuf};
 
+const MAX_LUCIDE_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_LUCIDE_NODES: usize = 256;
+
 #[derive(Debug, Clone)]
 pub(crate) struct LucideAsset {
     pub name: String,
@@ -135,7 +138,37 @@ fn checked_candidate(
 }
 
 fn read_source(path: &std::path::Path) -> Result<String, LucideDiagnostic> {
-    std::fs::read_to_string(path).map_err(|_| {
+    let size = std::fs::metadata(path)
+        .map_err(|_| {
+            diagnostic(
+                "LUCIDE_ASSET_READ",
+                "installed Lucide asset metadata is unavailable",
+                path.display().to_string(),
+            )
+        })?
+        .len();
+    if size > MAX_LUCIDE_SOURCE_BYTES {
+        return Err(diagnostic(
+            "LUCIDE_ASSET_LIMIT",
+            format!("installed Lucide asset exceeds {MAX_LUCIDE_SOURCE_BYTES} bytes"),
+            path.display().to_string(),
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|_| {
+        diagnostic(
+            "LUCIDE_ASSET_READ",
+            "installed Lucide asset is not readable UTF-8",
+            path.display().to_string(),
+        )
+    })?;
+    if bytes.len() as u64 > MAX_LUCIDE_SOURCE_BYTES {
+        return Err(diagnostic(
+            "LUCIDE_ASSET_LIMIT",
+            format!("installed Lucide asset exceeds {MAX_LUCIDE_SOURCE_BYTES} bytes"),
+            path.display().to_string(),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
         diagnostic(
             "LUCIDE_ASSET_READ",
             "installed Lucide asset is not readable UTF-8",
@@ -182,6 +215,7 @@ fn parse_asset(
         )
     })?;
     if document.nodes.is_empty()
+        || document.nodes.len() > MAX_LUCIDE_NODES
         || !document
             .nodes
             .values()
@@ -190,6 +224,17 @@ fn parse_asset(
         return Err(diagnostic(
             "LUCIDE_GEOMETRY_UNSUPPORTED",
             "Lucide icon must contain editable path/group geometry",
+            slug,
+        ));
+    }
+    if !document.width.is_finite()
+        || !document.height.is_finite()
+        || document.width <= 0.0
+        || document.height <= 0.0
+    {
+        return Err(diagnostic(
+            "LUCIDE_SVG_VIEWPORT",
+            "Lucide icon must have a finite positive viewport",
             slug,
         ));
     }

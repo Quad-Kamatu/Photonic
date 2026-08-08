@@ -14,25 +14,46 @@ use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight};
 use photonic_core::{
     color::Color,
     history::Command,
-    node::{GroupNode, PathNode, SceneNode, SceneNodeKind, TextNode},
+    node::{DropShadow, GroupNode, PathNode, SceneNode, SceneNodeKind, TextNode},
     path::PathData,
     style::{Fill, Stroke},
     transform::Transform,
     Document,
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 const MAX_JSX_BYTES: usize = 256 * 1024;
 const MAX_ELEMENTS: usize = 512;
+const MAX_SOURCE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SVG_FILE_BYTES: u64 = 512 * 1024;
+const MAX_SVG_NODES: usize = 4096;
+const MAX_SVG_DEPTH: usize = 64;
+const MAX_TILES: usize = 64;
 
 pub async fn create_vectors_from_react(
     state: &AppState,
     args: CreateVectorsFromReactArgs,
 ) -> ToolResult {
+    let has_file_snapshot = args.source_path.is_some();
+    let has_inline_fragment = args.jsx.is_some();
+    let has_legacy_snapshot = args.source.is_some() || args.snapshot.is_some();
+    if has_file_snapshot && (has_inline_fragment || has_legacy_snapshot) {
+        return ToolResult::error("React source import rejected").with_data(serde_json::json!({
+            "diagnostics":[diag(
+                "INPUT_CONFLICT",
+                "source_path cannot be combined with jsx, source, or snapshot",
+                "source_path"
+            )],
+            "contract_version":2
+        }));
+    }
     if args.source_path.is_some() {
         return create_source_path_snapshot(state, &args).await;
     }
-    if args.source.is_some() || args.snapshot.is_some() {
+    if has_legacy_snapshot {
         return ToolResult::error("React source import rejected").with_data(serde_json::json!({
             "diagnostics":[diag(
                 "SOURCE_PATH_REQUIRED",
@@ -43,7 +64,7 @@ pub async fn create_vectors_from_react(
         }));
     }
     let Some(jsx) = &args.jsx else {
-        return ToolResult::error("provide either jsx or source plus snapshot");
+        return ToolResult::error("provide exactly one supported input: jsx or source_path");
     };
     let css = match jsx_to_css(jsx) {
         Ok(css) => css,
@@ -115,6 +136,24 @@ struct Theme {
     muted: String,
     border: String,
 }
+
+#[derive(Debug, Clone)]
+struct ResponsivePx {
+    base: f64,
+    /// Tailwind min-width rules ordered from narrowest to widest.
+    variants: Vec<(f64, f64)>,
+}
+
+impl ResponsivePx {
+    fn resolve(&self, viewport_width: f64) -> f64 {
+        self.variants
+            .iter()
+            .filter(|(breakpoint, _)| viewport_width >= *breakpoint)
+            .map(|(_, value)| *value)
+            .next_back()
+            .unwrap_or(self.base)
+    }
+}
 fn theme(args: &CreateVectorsFromReactArgs, source: &Theme) -> Result<Theme, String> {
     let t = args.theme_tokens.as_ref();
     let val = |v: Option<&String>, d: &str| {
@@ -162,6 +201,14 @@ async fn create_source_path_snapshot(
         }
     };
     let props = args.props.as_ref().and_then(|v| v.as_object());
+    if let Some(props) = props {
+        if let Some(unsupported) = props
+            .keys()
+            .find(|key| !matches!(key.as_str(), "isSuperAdmin" | "loading"))
+        {
+            return ToolResult::error("React source import rejected").with_data(serde_json::json!({"diagnostics":[diag("SNAPSHOT_PROPS_UNSUPPORTED", "this bounded AppDirectory branch does not silently ignore props that change its visible tree", unsupported)],"contract_version":2}));
+        }
+    }
     let is_admin = props
         .and_then(|p| p.get("isSuperAdmin"))
         .and_then(|v| v.as_bool())
@@ -177,7 +224,12 @@ async fn create_source_path_snapshot(
 }
 
 fn actual_span(path: &str, needle: &str) -> serde_json::Value {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let text = read_bounded_text(
+        std::path::Path::new(path),
+        "DIAGNOSTIC_SOURCE",
+        MAX_SOURCE_FILE_BYTES,
+    )
+    .unwrap_or_default();
     let start = if needle.is_empty() {
         0
     } else {
@@ -190,6 +242,59 @@ fn actual_span(path: &str, needle: &str) -> serde_json::Value {
     serde_json::json!({"byte_start":start,"byte_end":end,"line_start":line(start),"column_start":column(start),"line_end":line(end),"column_end":column(end)})
 }
 
+fn read_bounded_bytes(
+    path: &std::path::Path,
+    code: &str,
+    limit: u64,
+) -> Result<Vec<u8>, serde_json::Value> {
+    let size = std::fs::metadata(path)
+        .map_err(|_| {
+            diag(
+                code,
+                "source file metadata is unavailable",
+                path.display().to_string(),
+            )
+        })?
+        .len();
+    if size > limit {
+        return Err(diag(
+            &format!("{code}_LIMIT"),
+            format!("source file exceeds the {limit}-byte parser limit"),
+            path.display().to_string(),
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|_| {
+        diag(
+            code,
+            "source file is not readable",
+            path.display().to_string(),
+        )
+    })?;
+    if bytes.len() as u64 > limit {
+        return Err(diag(
+            &format!("{code}_LIMIT"),
+            format!("source file exceeds the {limit}-byte parser limit"),
+            path.display().to_string(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_bounded_text(
+    path: &std::path::Path,
+    code: &str,
+    limit: u64,
+) -> Result<String, serde_json::Value> {
+    let bytes = read_bounded_bytes(path, code, limit)?;
+    String::from_utf8(bytes).map_err(|_| {
+        diag(
+            code,
+            "source file is not readable UTF-8",
+            path.display().to_string(),
+        )
+    })
+}
+
 #[derive(Debug, Clone)]
 struct CheckinPage {
     texts: Vec<String>,
@@ -200,10 +305,12 @@ struct CheckinPage {
     primary_blue: String,
     card_width: f64,
     card_padding: f64,
+    card_padding_responsive: ResponsivePx,
     outer_padding: f64,
     card_radius: f64,
     section_gap: f64,
     button_height: f64,
+    button_horizontal_padding: f64,
     button_gap: f64,
     button_icon_size: f64,
     button_icon_margin_right: f64,
@@ -255,6 +362,16 @@ fn read_checkin_mode_selector(
         .as_ref()
         .and_then(|value| value.as_object())
     {
+        if let Some(unsupported) = dynamic
+            .keys()
+            .find(|key| !matches!(key.as_str(), "backgroundImage" | "enableInactivity"))
+        {
+            return Err(diag(
+                "DYNAMIC_CONTENT_UNSUPPORTED",
+                "dynamic_content contains a branch this bounded wrapper does not model",
+                unsupported,
+            ));
+        }
         if dynamic
             .get("backgroundImage")
             .is_some_and(|value| !value.is_null())
@@ -272,7 +389,7 @@ fn read_checkin_mode_selector(
     }
     if !matches!(
         args.interaction_policy.as_deref().unwrap_or("reject"),
-        "reject" | "strict" | "strip"
+        "reject" | "strip"
     ) {
         return Err(diag(
             "INTERACTION_POLICY",
@@ -312,7 +429,8 @@ fn read_checkin_mode_selector(
     })?;
     let root = roots
         .iter()
-        .find(|root| source.starts_with(root))
+        .filter(|root| source.starts_with(root))
+        .max_by_key(|root| root.components().count())
         .ok_or_else(|| {
             diag(
                 "SOURCE_OUTSIDE_ROOT",
@@ -328,8 +446,7 @@ fn read_checkin_mode_selector(
             source_name,
         ));
     }
-    let mode = std::fs::read_to_string(&source)
-        .map_err(|_| diag("SOURCE_READ", "source is not readable UTF-8", source_name))?;
+    let mode = read_bounded_text(&source, "SOURCE_READ", MAX_SOURCE_FILE_BYTES)?;
     for required in [
         "export function ModeSelector",
         "<KioskLayout enableInactivity={false}>",
@@ -385,7 +502,7 @@ fn read_checkin_mode_selector(
     let button = resolve_checkin_import(root, "apps/checkin/src/components/ui/button.jsx")?;
     let card = resolve_checkin_import(root, "apps/checkin/src/components/ui/card.jsx")?;
     let css = resolve_checkin_import(root, "apps/checkin/src/index.css")?;
-    let layout_index_text = std::fs::read_to_string(&layout_index).unwrap_or_default();
+    let layout_index_text = read_bounded_text(&layout_index, "IMPORT_READ", MAX_SOURCE_FILE_BYTES)?;
     if !layout_index_text.contains("export { KioskLayout } from './KioskLayout'") {
         return Err(diag(
             "IMPORT_UNRESOLVED",
@@ -393,7 +510,7 @@ fn read_checkin_mode_selector(
             "KioskLayout",
         ));
     }
-    let layout_text = std::fs::read_to_string(&layout).unwrap_or_default();
+    let layout_text = read_bounded_text(&layout, "IMPORT_READ", MAX_SOURCE_FILE_BYTES)?;
     if !layout_text.contains("{activeBackground && (")
         || !layout_text.contains("{enableInactivity && (")
         || !layout_text.contains("{children}")
@@ -430,7 +547,7 @@ fn read_checkin_mode_selector(
             )
         })?;
 
-    let button_text = std::fs::read_to_string(&button).unwrap_or_default();
+    let button_text = read_bounded_text(&button, "BUTTON_PRIMITIVE_READ", MAX_SOURCE_FILE_BYTES)?;
     let button_base = string_after(&button_text, "const buttonVariants = cva(")?;
     for class in ["inline-flex", "rounded-lg"] {
         if !button_base.split_whitespace().any(|value| value == class) {
@@ -454,19 +571,20 @@ fn read_checkin_mode_selector(
             )
         })?;
     let button_height = class_px(large_classes, "h-")?;
+    let button_horizontal_padding = class_px(large_classes, "px-")?;
     let button_gap = class_px(button_base, "gap-")?;
     let button_icon_size = descendant_size_px(button_base)?;
     let icon_classes = format!("{mode}\n{layout_text}");
     let button_icon_margin_right = largest_space_class(&icon_classes, "mr-")?;
 
-    let css_text = std::fs::read_to_string(&css).unwrap_or_default();
+    let css_text = read_bounded_text(&css, "CSS_READ", MAX_SOURCE_FILE_BYTES)?;
     let blue = css_hex_token(&css_text, "bgch-blue")?;
     let gold = css_hex_token(&css_text, "bgch-gold")?;
     let primary_blue = css_hex_token(&css_text, primary_token)?;
     let card_width = arbitrary_px(&layout_text, "max-w-[")?;
     let card_classes = literal_class_containing(&layout_text, "bg-white p-")?;
     let card_padding = class_px(card_classes, "p-")?;
-    let card_padding = largest_axis_padding_px(card_classes, card_padding);
+    let card_padding_responsive = responsive_px_rules(card_classes, card_padding);
     let outer_classes = literal_class_containing(&layout_text, "justify-center p-")?;
     let outer_padding = class_px(outer_classes, "p-")?;
     let card_radius = radius_px(card_classes)?;
@@ -495,10 +613,12 @@ fn read_checkin_mode_selector(
         primary_blue,
         card_width,
         card_padding,
+        card_padding_responsive,
         outer_padding,
         card_radius,
         section_gap,
         button_height,
+        button_horizontal_padding,
         button_gap,
         button_icon_size,
         button_icon_margin_right,
@@ -558,19 +678,129 @@ fn return_jsx(source: &str) -> Result<&str, serde_json::Value> {
     Ok(&rendered[..end])
 }
 
-fn event_handlers(source: &str) -> Vec<String> {
+#[derive(Debug, Clone)]
+struct JsxAttributeExpression {
+    name: String,
+    start: usize,
+    end: usize,
+    expression: String,
+}
+
+fn scan_braced_expression(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut i = start;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => quote = Some(byte),
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn jsx_attribute_expressions(source: &str) -> Vec<JsxAttributeExpression> {
+    let bytes = source.as_bytes();
     let mut out = Vec::new();
-    let mut rest = source;
-    while let Some(pos) = rest.find("onClick={") {
-        let tail = &rest[pos..];
-        if let Some(end) = tail.find('}') {
-            out.push(tail[..=end].to_string());
-            rest = &tail[end + 1..];
-        } else {
-            break;
+    let mut i = 0usize;
+    let mut in_tag = false;
+    let mut quote = None;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if !in_tag {
+            if byte == b'<' {
+                in_tag = true;
+            }
+            i += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'>' => in_tag = false,
+            b if b.is_ascii_alphabetic() || b == b'_' || b == b':' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b':' | b'-'))
+                {
+                    i += 1;
+                }
+                let name = &source[start..i];
+                let mut value_start = i;
+                while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                    value_start += 1;
+                }
+                if value_start >= bytes.len() || bytes[value_start] != b'=' {
+                    continue;
+                }
+                value_start += 1;
+                while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                    value_start += 1;
+                }
+                if value_start >= bytes.len() || bytes[value_start] != b'{' {
+                    continue;
+                }
+                let Some(close) = scan_braced_expression(source, value_start) else {
+                    out.push(JsxAttributeExpression {
+                        name: name.to_string(),
+                        start,
+                        end: bytes.len(),
+                        expression: source[value_start + 1..].trim().to_string(),
+                    });
+                    break;
+                };
+                out.push(JsxAttributeExpression {
+                    name: name.to_string(),
+                    start,
+                    end: close + 1,
+                    expression: source[value_start + 1..close].trim().to_string(),
+                });
+                i = close + 1;
+            }
+            _ => i += 1,
         }
     }
     out
+}
+
+fn event_handlers(source: &str) -> Vec<String> {
+    jsx_attribute_expressions(source)
+        .into_iter()
+        .filter(|expression| expression.name == "onClick")
+        .map(|expression| source[expression.start..expression.end].to_string())
+        .collect()
 }
 
 fn strip_jsx_comments_and_handlers(source: &str) -> String {
@@ -581,25 +811,32 @@ fn strip_jsx_comments_and_handlers(source: &str) -> String {
         };
         result.replace_range(start..start + 3 + end + 3, "");
     }
-    while let Some(start) = result.find("onClick={") {
-        let Some(end) = result[start..].find('}') else {
-            break;
-        };
-        result.replace_range(start..=start + end, "");
+    let mut ranges: Vec<_> = jsx_attribute_expressions(&result)
+        .into_iter()
+        .filter(|expression| expression.name == "onClick")
+        .map(|expression| (expression.start, expression.end))
+        .collect();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    for (start, end) in ranges.into_iter().rev() {
+        result.replace_range(start..end, "");
     }
     result
 }
 
 fn first_unsupported_rendered_expression(source: &str) -> Option<String> {
-    let mut rest = source;
-    while let Some(start) = rest.find('{') {
-        let tail = &rest[start..];
-        let end = tail.find('}')?;
-        let token = &tail[..=end];
-        if token != "{false}" {
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        let end = scan_braced_expression(source, i)?;
+        let token = &source[i..=end];
+        if token.trim() != "{false}" {
             return Some(token.to_string());
         }
-        rest = &tail[end + 1..];
+        i = end + 1;
     }
     None
 }
@@ -678,11 +915,19 @@ fn object_string<'a>(source: &'a str, marker: &str) -> Result<&'a str, serde_jso
     Ok(&rest[1..end + 1])
 }
 
+fn bounded_number(raw: &str, min: f64, max: f64) -> Option<f64> {
+    let value = raw.parse::<f64>().ok()?;
+    value
+        .is_finite()
+        .then_some(value)
+        .filter(|value| *value >= min && *value <= max)
+}
+
 fn class_px(classes: &str, prefix: &str) -> Result<f64, serde_json::Value> {
     classes
         .split_whitespace()
         .find_map(|class| class.strip_prefix(prefix))
-        .and_then(|n| n.parse::<f64>().ok())
+        .and_then(|n| bounded_number(n, 0., 96.))
         .map(|n| n * 4.0)
         .ok_or_else(|| {
             diag(
@@ -697,7 +942,7 @@ fn descendant_size_px(classes: &str) -> Result<f64, serde_json::Value> {
     classes
         .split_whitespace()
         .find_map(|class| class.rsplit_once(":size-").map(|(_, value)| value))
-        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(|value| bounded_number(value, 0., 96.))
         .map(|value| value * 4.)
         .ok_or_else(|| {
             diag(
@@ -708,13 +953,30 @@ fn descendant_size_px(classes: &str) -> Result<f64, serde_json::Value> {
         })
 }
 
-fn largest_axis_padding_px(classes: &str, base: f64) -> f64 {
-    classes
-        .split_whitespace()
-        .filter_map(|class| class.rsplit_once("px-").map(|(_, value)| value))
-        .filter_map(|value| value.parse::<f64>().ok())
-        .map(|value| value * 4.)
-        .fold(base, f64::max)
+fn responsive_px_rules(classes: &str, base: f64) -> ResponsivePx {
+    let mut variants: Vec<(f64, f64)> = Vec::new();
+    for class in classes.split_whitespace() {
+        let Some((prefix, utility)) = class.split_once(':') else {
+            continue;
+        };
+        let Some(raw) = utility.strip_prefix("px-") else {
+            continue;
+        };
+        let Some(value) = bounded_number(raw, 0., 96.).map(|n| n * 4.) else {
+            continue;
+        };
+        let breakpoint = match prefix {
+            "sm" => 640.,
+            "md" => 768.,
+            "lg" => 1024.,
+            "xl" => 1280.,
+            "2xl" => 1536.,
+            _ => continue,
+        };
+        variants.push((breakpoint, value));
+    }
+    variants.sort_by(|a, b| a.0.total_cmp(&b.0));
+    ResponsivePx { base, variants }
 }
 
 fn radius_px(classes: &str) -> Result<f64, serde_json::Value> {
@@ -738,7 +1000,7 @@ fn largest_space_class(source: &str, prefix: &str) -> Result<f64, serde_json::Va
     source
         .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
         .filter_map(|class| class.strip_prefix(prefix))
-        .filter_map(|value| value.parse::<f64>().ok())
+        .filter_map(|value| bounded_number(value, 0., 96.))
         .map(|value| value * 4.)
         .reduce(f64::max)
         .ok_or_else(|| {
@@ -763,7 +1025,7 @@ fn arbitrary_px(source: &str, marker: &str) -> Result<f64, serde_json::Value> {
         })?;
     rest.split("px]")
         .next()
-        .and_then(|n| n.parse().ok())
+        .and_then(|n| bounded_number(n, 0., 4096.))
         .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "arbitrary size must use px", marker))
 }
 
@@ -820,9 +1082,15 @@ async fn create_checkin_nodes(
     args: &CreateVectorsFromReactArgs,
     page: &CheckinPage,
 ) -> ToolResult {
-    let (doc_w, doc_h, active_layer) = {
+    let (doc_w, doc_h, board_origin, active_layer) = {
         let doc = state.document.lock().await;
-        (doc.width, doc.height, doc.active_layer_id)
+        let board = doc.active_artboard();
+        (
+            board.map_or(doc.width, |artboard| artboard.width),
+            board.map_or(doc.height, |artboard| artboard.height),
+            board.map_or((0., 0.), |artboard| (artboard.x, artboard.y)),
+            doc.active_layer_id,
+        )
     };
     let Some(layer) = args.layer_id.or(active_layer) else {
         return ToolResult::error("Document has no active layer");
@@ -836,7 +1104,21 @@ async fn create_checkin_nodes(
     {
         return ToolResult::error("ModeSelector viewport must be finite and at least 500 by 600");
     }
-    let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
+    {
+        let doc = state.document.lock().await;
+        if !doc.layers.get(&layer).is_some_and(|target| !target.locked) {
+            return ToolResult::error("destination layer is missing or locked");
+        }
+    }
+    let origin = args
+        .origin
+        .as_ref()
+        .map(|p| (p.x, p.y))
+        .unwrap_or(board_origin);
+    if !origin.0.is_finite() || !origin.1.is_finite() {
+        return ToolResult::error("ModeSelector origin must be finite");
+    }
+    let card_padding = page.card_padding_responsive.resolve(viewport.0);
     let mut font_system = FontSystem::new();
     let mut nodes = Vec::new();
     let mut children = vec![rect_node(
@@ -856,7 +1138,7 @@ async fn create_checkin_nodes(
     let card_x = origin.0 + (viewport.0 - card_w) / 2.;
     let card_y = origin.1 + page.outer_padding.max(20.) + 44.;
     let card_h = (viewport.1 - 128.).min(650.);
-    children.push(rect_node(
+    let card_id = rect_node(
         "Kiosk content surface",
         card_x,
         card_y,
@@ -868,7 +1150,18 @@ async fn create_checkin_nodes(
         1.,
         layer,
         &mut nodes,
-    ));
+    );
+    if let Some(card) = nodes.iter_mut().find(|node| node.id == card_id) {
+        card.drop_shadow = DropShadow {
+            color: Color::BLACK,
+            opacity: 0.08,
+            dx: 0.,
+            dy: 6.,
+            blur: 24.,
+            enabled: true,
+        };
+    }
+    children.push(card_id);
     children.push(rounded_top_border_node(
         "Kiosk gold accent",
         card_x,
@@ -884,11 +1177,13 @@ async fn create_checkin_nodes(
     let (exit_text_width, exit_text_height) = measure_text(&mut font_system, exit, 16., 500);
     let exit_top = origin.1 + page.outer_padding;
     let exit_gap = page.button_gap + page.button_icon_margin_right;
-    let exit_content_width = page.button_icon_size + exit_gap + exit_text_width;
+    let exit_inner_width = page.button_icon_size + exit_gap + exit_text_width;
+    let exit_content_width = exit_inner_width + page.button_horizontal_padding * 2.;
     let exit_x = origin.0 + viewport.0 - page.outer_padding - exit_content_width;
+    let exit_content_x = exit_x + page.button_horizontal_padding;
     let exit_text = text_node(
         exit,
-        exit_x + page.button_icon_size + exit_gap,
+        exit_content_x + page.button_icon_size + exit_gap,
         exit_top + (page.button_height - exit_text_height) / 2.,
         16.,
         500,
@@ -904,7 +1199,7 @@ async fn create_checkin_nodes(
     match append_lucide_icon(
         logout,
         (
-            exit_x,
+            exit_content_x,
             exit_top + (page.button_height - page.button_icon_size) / 2.,
         ),
         page.button_icon_size,
@@ -915,8 +1210,8 @@ async fn create_checkin_nodes(
         Ok(id) => children.push(id),
         Err(error) => return ToolResult::error(error.message),
     }
-    let content_x = card_x + page.card_padding;
-    let content_w = card_w - page.card_padding * 2.;
+    let content_x = card_x + card_padding;
+    let content_w = card_w - card_padding * 2.;
     let mut y = card_y + 48.;
     for text in page.texts.iter().skip(1) {
         let mut positioned_text = None;
@@ -1015,12 +1310,18 @@ async fn create_checkin_nodes(
             node.tags.push(format!("stripped-interaction:{handler}"));
         }
     }
-    let created: Vec<_> = nodes.iter().map(|node| node.id).collect();
+    let planned_node_count = nodes.len();
+    let created: Vec<_> = if args.dry_run {
+        Vec::new()
+    } else {
+        nodes.iter().map(|node| node.id).collect()
+    };
     let data = serde_json::json!({
-        "root_node_ids":[root], "created_node_ids":created,
-        "node_counts":{"nodes":nodes.len(),"text":page.texts.len(),"interactions_stripped":page.interactions.len()},
+        "root_node_ids": if args.dry_run { serde_json::json!([]) } else { serde_json::json!([root]) }, "created_node_ids":created,
+        "planned_node_count":planned_node_count,
+        "node_counts":{"nodes":planned_node_count,"text":page.texts.len(),"interactions_stripped":page.interactions.len()},
         "visible_text":page.texts, "theme":{"bgch_blue":page.blue,"bgch_gold":page.gold,"primary_blue":page.primary_blue},
-        "layout":{"card_width_px":page.card_width,"card_padding_px":page.card_padding,"outer_padding_px":page.outer_padding,"card_radius_px":page.card_radius,"card_top_border_width_px":page.card_top_border_width,"section_gap_px":page.section_gap,"button_height_px":page.button_height,"button_gap_px":page.button_gap,"button_icon_size_px":page.button_icon_size,"button_icon_margin_right_px":page.button_icon_margin_right},
+        "layout":{"card_width_px":page.card_width,"card_padding_px":card_padding,"card_padding_base_px":page.card_padding,"card_padding_breakpoints_px":page.card_padding_responsive.variants.iter().map(|(breakpoint,value)| serde_json::json!({"min_width_px":breakpoint,"value_px":value})).collect::<Vec<_>>(),"outer_padding_px":page.outer_padding,"card_radius_px":page.card_radius,"card_top_border_width_px":page.card_top_border_width,"section_gap_px":page.section_gap,"button_height_px":page.button_height,"button_horizontal_padding_px":page.button_horizontal_padding,"button_gap_px":page.button_gap,"button_icon_size_px":page.button_icon_size,"button_icon_margin_right_px":page.button_icon_margin_right},
         "styles":{"backdrop":page.blue,"card_fill":"#ffffff","card_top_border":page.gold,"button_fill":page.primary_blue},
         "semantic_tree":page.texts.iter().map(|text| serde_json::json!({"kind":"text","value":text})).collect::<Vec<_>>(),
         "stripped_interactions":page.interactions,
@@ -1088,13 +1389,7 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
             &source.display().to_string(),
         ));
     }
-    let text = std::fs::read_to_string(&source).map_err(|_| {
-        diag(
-            "SOURCE_READ",
-            "source file is not readable UTF-8",
-            &source.display().to_string(),
-        )
-    })?;
+    let text = read_bounded_text(&source, "SOURCE_READ", MAX_SOURCE_FILE_BYTES)?;
     if text.contains("className={") {
         return Err(diag(
             "JSX_UNSUPPORTED_EXPRESSION",
@@ -1130,7 +1425,8 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
     }
     let root = roots
         .iter()
-        .find(|root| source.starts_with(root))
+        .filter(|root| source.starts_with(root))
+        .max_by_key(|root| root.components().count())
         .expect("checked above");
     let catalog = root.join("packages/waffle/src/suiteApps.js");
     let catalog = std::fs::canonicalize(&catalog).map_err(|_| {
@@ -1147,29 +1443,11 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
             "@bgch/waffle",
         ));
     }
-    let catalog_text = std::fs::read_to_string(&catalog).map_err(|_| {
-        diag(
-            "IMPORT_READ",
-            "catalog module is not readable UTF-8",
-            "@bgch/waffle",
-        )
-    })?;
+    let catalog_text = read_bounded_text(&catalog, "IMPORT_READ", MAX_SOURCE_FILE_BYTES)?;
     let card_module = bounded_file(root, "packages/ui/src/card.jsx", "CARD_PRIMITIVE")?;
-    let card_text = std::fs::read_to_string(&card_module).map_err(|_| {
-        diag(
-            "CARD_PRIMITIVE_READ",
-            "shared Card primitive is not readable UTF-8",
-            "packages/ui/src/card.jsx",
-        )
-    })?;
+    let card_text = read_bounded_text(&card_module, "CARD_PRIMITIVE_READ", MAX_SOURCE_FILE_BYTES)?;
     let theme_module = bounded_file(root, "packages/theme/tokens.css", "THEME_TOKENS")?;
-    let theme_text = std::fs::read_to_string(&theme_module).map_err(|_| {
-        diag(
-            "THEME_TOKENS_READ",
-            "shared theme tokens are not readable UTF-8",
-            "packages/theme/tokens.css",
-        )
-    })?;
+    let theme_text = read_bounded_text(&theme_module, "THEME_TOKENS_READ", MAX_SOURCE_FILE_BYTES)?;
     let layout = parse_grid_layout(&text)?;
     let tile_style = parse_tile_style(&text, &card_text)?;
     let source_theme = parse_light_theme(&theme_text)?;
@@ -1536,13 +1814,7 @@ fn resolve_svg_asset(
             &path.display().to_string(),
         ));
     }
-    let svg = std::fs::read_to_string(&path).map_err(|_| {
-        diag(
-            "ASSET_READ",
-            "local SVG asset is not readable UTF-8",
-            &path.display().to_string(),
-        )
-    })?;
+    let svg = read_bounded_text(&path, "ASSET_READ", MAX_SVG_FILE_BYTES)?;
     let document = photonic_core::import_svg(&svg).map_err(|error| {
         diag(
             "ASSET_SVG_INVALID",
@@ -1561,6 +1833,7 @@ fn resolve_svg_asset(
             &path.display().to_string(),
         ));
     }
+    validate_svg_document(&document, &path.display().to_string())?;
     if !document.width.is_finite()
         || !document.height.is_finite()
         || document.width <= 0.0
@@ -1573,6 +1846,63 @@ fn resolve_svg_asset(
         ));
     }
     Ok(ImportedSvgAsset { path, document })
+}
+
+fn validate_svg_document(document: &Document, value: &str) -> Result<(), serde_json::Value> {
+    if document.nodes.len() > MAX_SVG_NODES {
+        return Err(diag(
+            "ASSET_SVG_LIMIT",
+            format!("SVG contains more than {MAX_SVG_NODES} nodes"),
+            value,
+        ));
+    }
+    if document.nodes.values().any(|node| {
+        node.transform
+            .matrix
+            .iter()
+            .any(|component| !component.is_finite())
+    }) {
+        return Err(diag(
+            "ASSET_SVG_NONFINITE",
+            "SVG geometry contains a non-finite transform",
+            value,
+        ));
+    }
+    let mut pending = Vec::new();
+    for layer in document
+        .layer_order
+        .iter()
+        .filter_map(|id| document.layers.get(id))
+    {
+        pending.extend(layer.node_ids.iter().copied().map(|id| (id, 1usize)));
+    }
+    let mut seen = HashSet::new();
+    while let Some((id, depth)) = pending.pop() {
+        if depth > MAX_SVG_DEPTH {
+            return Err(diag(
+                "ASSET_SVG_DEPTH",
+                format!("SVG nesting exceeds {MAX_SVG_DEPTH} levels"),
+                value,
+            ));
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(SceneNode {
+            kind: SceneNodeKind::Group(group),
+            ..
+        }) = document.nodes.get(&id)
+        {
+            pending.extend(
+                group
+                    .children
+                    .iter()
+                    .copied()
+                    .map(|child| (child, depth + 1)),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn strip_unreachable_branches(source: &str) -> String {
@@ -1638,29 +1968,16 @@ fn parse_grid_layout(source: &str) -> Result<LayoutSpec, serde_json::Value> {
 }
 
 fn unsupported_attribute_expression(source: &str) -> Option<String> {
-    let mut rest = source;
-    while let Some(offset) = rest.find("={") {
-        let before = &rest[..offset];
-        let name_start = before
-            .rfind(|c: char| c.is_whitespace() || c == '<')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let name = &before[name_start..];
-        let after = &rest[offset + 2..];
-        let close = after.find('}')?;
-        // These three references are the exact values consumed by the
-        // catalog-to-tile lowering; every other attribute expression fails.
+    for expression in jsx_attribute_expressions(source) {
+        // These references are the exact values consumed by the
+        // catalog-to-tile lowering; every other expression fails.
         if matches!(
-            (name, &after[..close]),
+            (expression.name.as_str(), expression.expression.as_str()),
             ("href", "app.url") | ("src", "app.icon") | ("key", "app.id") | ("app", "app")
         ) {
-            rest = &after[close + 1..];
             continue;
         }
-        if !name.is_empty() {
-            return Some(format!("{}={{{}}}", name, &after[..close]));
-        }
-        rest = &after[close + 1..];
+        return Some(format!("{}={{{}}}", expression.name, expression.expression));
     }
     None
 }
@@ -1681,13 +1998,7 @@ fn tailwind_space(token: &str) -> Result<f64, serde_json::Value> {
 fn source_fingerprint(paths: &[PathBuf]) -> Result<String, serde_json::Value> {
     let mut hash = 14695981039346656037u64;
     for path in paths {
-        let bytes = std::fs::read(path).map_err(|_| {
-            diag(
-                "FINGERPRINT_READ",
-                "resolved source file could not be fingerprinted",
-                &path.display().to_string(),
-            )
-        })?;
+        let bytes = read_bounded_bytes(path, "FINGERPRINT_READ", MAX_SOURCE_FILE_BYTES)?;
         for byte in (bytes.len() as u64).to_le_bytes().into_iter().chain(bytes) {
             hash = (hash ^ byte as u64).wrapping_mul(1099511628211);
         }
@@ -1747,6 +2058,13 @@ fn parse_suite_apps(source: &str) -> Result<Vec<ImportedTile>, serde_json::Value
         return Err(diag(
             "CATALOG_UNSUPPORTED",
             "SUITE_APPS must contain object literals",
+            "SUITE_APPS",
+        ));
+    }
+    if objects.len() > MAX_TILES {
+        return Err(diag(
+            "CATALOG_LIMIT",
+            format!("SUITE_APPS contains more than {MAX_TILES} entries"),
             "SUITE_APPS",
         ));
     }
@@ -1854,9 +2172,15 @@ async fn create_snapshot_nodes(
     parsed: &ParsedPage,
     root_label: &str,
 ) -> ToolResult {
-    let (doc_w, doc_h, active_layer) = {
+    let (doc_w, doc_h, board_origin, active_layer) = {
         let doc = state.document.lock().await;
-        (doc.width, doc.height, doc.active_layer_id)
+        let board = doc.active_artboard();
+        (
+            board.map_or(doc.width, |artboard| artboard.width),
+            board.map_or(doc.height, |artboard| artboard.height),
+            board.map_or((0., 0.), |artboard| (artboard.x, artboard.y)),
+            doc.active_layer_id,
+        )
     };
     let Some(layer_id) = args.layer_id.or(active_layer) else {
         return ToolResult::error("Document has no active layer");
@@ -1879,7 +2203,14 @@ async fn create_snapshot_nodes(
             return ToolResult::error("destination layer is missing or locked");
         }
     }
-    let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
+    let origin = args
+        .origin
+        .as_ref()
+        .map(|p| (p.x, p.y))
+        .unwrap_or(board_origin);
+    if !origin.0.is_finite() || !origin.1.is_finite() {
+        return ToolResult::error("origin must be finite");
+    }
     let theme = match theme(args, &parsed.source_theme) {
         Ok(v) => v,
         Err(e) => return ToolResult::error(e),
@@ -1899,10 +2230,15 @@ async fn create_snapshot_nodes(
         n.name = args.group_name.clone().unwrap_or_else(|| root_label.into());
         n.tags.push("react-role:page".into());
     }
-    let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
+    let planned_node_count = nodes.len();
+    let created: Vec<_> = if args.dry_run {
+        Vec::new()
+    } else {
+        nodes.iter().map(|n| n.id).collect()
+    };
     let text_count = parsed.tiles.len() * 2 + 1;
     let semantic_tree: Vec<_> = parsed.tiles.iter().map(|tile| serde_json::json!({"kind":"link","href":tile.url,"children":[{"kind":"image","src":tile.icon},{"kind":"text","value":tile.name},{"kind":"text","value":tile.description}]})).collect();
-    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"card":{"radius_px":parsed.tile_style.card_radius,"border_width_px":parsed.tile_style.card_border_width,"icon_radius_px":parsed.tile_style.icon_radius},"theme":{"card":theme.card,"foreground":theme.foreground,"muted_foreground":theme.muted,"border":theme.border},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
+    let data = serde_json::json!({"root_node_ids": if args.dry_run { serde_json::json!([]) } else { serde_json::json!([root]) },"created_node_ids":created,"planned_node_count":planned_node_count,"node_counts":{"nodes":planned_node_count,"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"card":{"radius_px":parsed.tile_style.card_radius,"border_width_px":parsed.tile_style.card_border_width,"icon_radius_px":parsed.tile_style.icon_radius},"theme":{"card":theme.card,"foreground":theme.foreground,"muted_foreground":theme.muted,"border":theme.border},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
     if args.dry_run {
         return ToolResult::text("React source import plan").with_data(data);
     }
@@ -1931,9 +2267,9 @@ fn layout_app_directory(
     // page bounds come directly from origin + viewport.
     let padding = 0.0;
     let gap = layout.gap;
-    let cols = if viewport.0 >= 900.0 {
+    let cols = if viewport.0 >= 1024.0 {
         layout.desktop_columns
-    } else if viewport.0 >= 560.0 {
+    } else if viewport.0 >= 640.0 {
         2
     } else {
         1
@@ -2178,7 +2514,7 @@ fn rounded_top_border_node(
     let top = y + half_stroke;
     let inner_radius = (radius - half_stroke).max(0.).min((right - left) / 2.);
     let path = format!(
-        "M {left} {} Q {left} {top} {} {top} L {} {top} Q {right} {top} {right} {}",
+        "M {left} {} A {inner_radius} {inner_radius} 0 0 1 {} {top} L {} {top} A {inner_radius} {inner_radius} 0 0 1 {right} {}",
         top + inner_radius,
         left + inner_radius,
         right - inner_radius,
@@ -2211,7 +2547,7 @@ fn measure_text(
         font_system,
         content,
         Attrs::new()
-            .family(Family::SansSerif)
+            .family(Family::Name("Inter"))
             .weight(Weight(font_weight)),
         Shaping::Advanced,
     );
@@ -2237,6 +2573,7 @@ fn text_node(
     out: &mut Vec<SceneNode>,
 ) -> uuid::Uuid {
     let mut t = TextNode::new(content);
+    t.font_family = "Inter".into();
     t.font_size = size;
     t.font_weight = weight;
     t.fill = Fill::solid(Color::from_hex(color).unwrap_or(Color::BLACK));
@@ -2466,13 +2803,18 @@ fn arbitrary_size(class: &str) -> Option<String> {
     }
 }
 
-fn diag(code: &str, message: &str, value: &str) -> serde_json::Value {
-    serde_json::json!({"severity":"error", "code":code, "message":message, "value":value})
+fn diag(
+    code: impl AsRef<str>,
+    message: impl AsRef<str>,
+    value: impl AsRef<str>,
+) -> serde_json::Value {
+    serde_json::json!({"severity":"error", "code":code.as_ref(), "message":message.as_ref(), "value":value.as_ref()})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::CssViewportArg;
     use crate::server::McpServerConfig;
     use photonic_core::{history::CommandHistory, AuditLog, Document};
     use std::sync::{Arc, Mutex as StdMutex};
@@ -2807,11 +3149,32 @@ export function ModeSelector() { return (
         let before = state.document.lock().await.nodes.len();
         let undo = state.history.lock().await.undo_depth();
         let rejected =
-            create_vectors_from_react(&state, checkin_args(&root, false, "strict")).await;
+            create_vectors_from_react(&state, checkin_args(&root, false, "reject")).await;
         assert_eq!(rejected.is_error, Some(true));
         assert!(format!("{rejected:?}").contains("JSX_INTERACTION_UNSUPPORTED"));
         assert_eq!(state.document.lock().await.nodes.len(), before);
         assert_eq!(state.history.lock().await.undo_depth(), undo);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn checkin_responsive_padding_follows_tailwind_breakpoints() {
+        let root = copied_checkin_root();
+        let state = source_test_state();
+        let mut args = checkin_args(&root, true, "strip");
+        args.viewport = Some(CssViewportArg {
+            width: 640.,
+            height: 800.,
+        });
+        let narrow = plan_json(&create_vectors_from_react(&state, args.clone()).await);
+        assert_eq!(narrow["layout"]["card_padding_px"], 20.0);
+        args.viewport = Some(CssViewportArg {
+            width: 768.,
+            height: 800.,
+        });
+        let medium = plan_json(&create_vectors_from_react(&state, args).await);
+        assert_eq!(medium["layout"]["card_padding_px"], 40.0);
+        assert_eq!(medium["layout"]["card_padding_base_px"], 20.0);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2822,7 +3185,7 @@ export function ModeSelector() { return (
             root.join("apps/checkin/src/features/mode-selection/components/ModeSelector.jsx");
         let changed = std::fs::read_to_string(&path).unwrap().replace(
             "<h1 className=",
-            "<h1 data-fixture={unknownValue} className=",
+            "<h1 data-fixture = {unknownValue} className=",
         );
         std::fs::write(&path, changed).unwrap();
         let state = source_test_state();
@@ -2834,6 +3197,44 @@ export function ModeSelector() { return (
         assert_eq!(state.document.lock().await.nodes.len(), 0);
         assert_eq!(state.history.lock().await.undo_depth(), 0);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn conflicting_react_inputs_reject_without_mutation() {
+        let root = copied_checkin_root();
+        let mut args = checkin_args(&root, false, "strip");
+        args.jsx = Some("<div className=\"p-2\" />".into());
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, args).await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(format!("{result:?}").contains("INPUT_CONFLICT"));
+        assert_eq!(state.document.lock().await.nodes.len(), 0);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dry_run_reports_plans_without_node_ids_or_history() {
+        let root = copied_root();
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, source_args(&root, true)).await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let plan = plan_json(&result);
+        assert_eq!(plan["dry_run"], true);
+        assert!(plan["root_node_ids"].as_array().unwrap().is_empty());
+        assert!(plan["created_node_ids"].as_array().unwrap().is_empty());
+        assert!(plan["planned_node_count"].as_u64().unwrap() > 0);
+        assert_eq!(state.document.lock().await.nodes.len(), 0);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn numeric_parser_rejects_non_finite_values() {
+        assert!(bounded_number("NaN", 0., 96.).is_none());
+        assert!(bounded_number("inf", 0., 96.).is_none());
+        assert!(class_px("h-NaN", "h-").is_err());
+        assert!(arbitrary_px("max-w-[NaNpx]", "max-w-[").is_err());
     }
 
     #[tokio::test]

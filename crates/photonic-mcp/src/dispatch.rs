@@ -190,9 +190,13 @@ pub(crate) async fn dispatch_tool_inner(
         "create_vectors_from_react" => {
             let a: CreateVectorsFromReactArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;
-            Ok(ToolOutput::mutating(
-                handlers::react_vectors::create_vectors_from_react(state, a).await,
-            ))
+            let dry_run = a.dry_run;
+            let result = handlers::react_vectors::create_vectors_from_react(state, a).await;
+            Ok(if dry_run {
+                ToolOutput::readonly(result)
+            } else {
+                ToolOutput::mutating(result)
+            })
         }
         "create_curvature_path" => {
             let a: CreateCurvaturePathArgs =

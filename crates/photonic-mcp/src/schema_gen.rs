@@ -113,7 +113,7 @@ pub fn tool_list() -> Value {
                     "layer_id": { "type": "string" }, "group_name": { "type": "string" },
                     "strict": { "type": "boolean", "default": true }, "dry_run": { "type": "boolean", "default": false }
                 },
-                "anyOf": [{"required":["jsx"]},{"required":["source_path","export_name","props","module_roots"]}]
+                "oneOf": [{"required":["jsx"]},{"required":["source_path","export_name","props","module_roots"]}]
             }
         },
         {
