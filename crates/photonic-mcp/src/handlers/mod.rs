@@ -6,6 +6,7 @@ pub mod charts;
 pub mod clipboard;
 pub mod clipping;
 pub mod color_guide;
+pub mod css_vectors;
 pub mod doc_analysis;
 pub mod doc_automation;
 pub mod doc_data;

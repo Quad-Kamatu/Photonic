@@ -4,6 +4,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Arguments for the native CSS-to-editable-vector compiler (#251).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateVectorsFromCssArgs {
+    pub css: String,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub origin: Option<CssPointArg>,
+    #[serde(default)]
+    pub viewport: Option<CssViewportArg>,
+    #[serde(default)]
+    pub layer_id: Option<Uuid>,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default = "default_css_strict")]
+    pub strict: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct CssPointArg {
+    pub x: f64,
+    pub y: f64,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct CssViewportArg {
+    pub width: f64,
+    pub height: f64,
+}
+fn default_css_strict() -> bool {
+    true
+}
+
 /// Arguments for the `set_paint` tool — apply one paint to many nodes at once,
 /// each re-fit to its own bounding box (issue #202). The paint uses the same
 /// object shape as `fill`; a gradient may set `"units": "bbox"` with 0–1 coords
