@@ -84,9 +84,16 @@ async fn create_source_path_snapshot(
 ) -> ToolResult {
     let parsed = match read_app_directory(args) {
         Ok(parsed) => parsed,
-        Err(d) => {
+        Err(mut d) => {
+            if let Some(object) = d.as_object_mut() {
+                object.insert("source_path".into(), serde_json::json!(args.source_path));
+                object.insert(
+                    "span".into(),
+                    serde_json::json!({"byte_start":0,"byte_end":1,"line_start":1,"line_end":1}),
+                );
+            }
             return ToolResult::error("React source import rejected")
-                .with_data(serde_json::json!({"diagnostics":[d],"contract_version":2}))
+                .with_data(serde_json::json!({"diagnostics":[d],"contract_version":2}));
         }
     };
     let props = args.props.as_ref().and_then(|v| v.as_object());
@@ -158,6 +165,13 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
             "className={…}",
         ));
     }
+    if text.contains("onClick={") || text.contains("onChange={") || text.contains("onSubmit={") {
+        return Err(diag(
+            "JSX_UNSUPPORTED_EXPRESSION",
+            "event handler expressions are not supported",
+            "onEvent={…}",
+        ));
+    }
     let required = [
         "from '@bgch/waffle'",
         "export function AppDirectory",
@@ -209,7 +223,9 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
 }
 
 fn parse_grid_layout(source: &str) -> Result<LayoutSpec, serde_json::Value> {
-    let start = source.find("className=\"grid ").ok_or_else(|| {
+    // The non-loading branch is the last grid in AppDirectory; earlier grids
+    // belong to the loading skeleton and are not selected by these props.
+    let start = source.rfind("className=\"grid ").ok_or_else(|| {
         diag(
             "TAILWIND_UNSUPPORTED",
             "AppDirectory requires a literal grid className",
@@ -275,6 +291,7 @@ fn source_fingerprint(source: &str, catalog: &str) -> String {
 /// description:'' }, ...]`. Bracket tracking handles optional literal arrays
 /// such as requiredCapabilities, while every emitted field must be a literal.
 fn parse_suite_apps(source: &str) -> Result<Vec<ImportedTile>, serde_json::Value> {
+    let origin = literal_binding(source, "ICON_ORIGIN")?;
     let start = source.find("const SUITE_APPS = [").ok_or_else(|| {
         diag(
             "CATALOG_UNSUPPORTED",
@@ -331,11 +348,35 @@ fn parse_suite_apps(source: &str) -> Result<Vec<ImportedTile>, serde_json::Value
             Ok(ImportedTile {
                 name: literal_field(object, "name")?,
                 description: literal_field(object, "description")?,
-                icon: icon_field(object)?,
+                icon: icon_field(object, &origin)?,
                 url: literal_field(object, "url")?,
             })
         })
         .collect()
+}
+
+fn literal_binding(source: &str, name: &str) -> Result<String, serde_json::Value> {
+    let marker = format!("const {name} =");
+    let rest = source
+        .find(&marker)
+        .map(|i| &source[i + marker.len()..])
+        .ok_or_else(|| {
+            diag(
+                "CATALOG_UNSUPPORTED",
+                "missing required literal binding",
+                name,
+            )
+        })?
+        .trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| *c == '\'' || *c == '"')
+        .ok_or_else(|| diag("CATALOG_DYNAMIC", "binding must be a string literal", name))?;
+    let end = rest[1..]
+        .find(quote)
+        .ok_or_else(|| diag("CATALOG_UNSUPPORTED", "unterminated binding literal", name))?;
+    Ok(rest[1..end + 1].to_string())
 }
 
 fn literal_field(object: &str, field: &str) -> Result<String, serde_json::Value> {
@@ -368,7 +409,7 @@ fn literal_field(object: &str, field: &str) -> Result<String, serde_json::Value>
     Ok(rest[1..end + 1].to_string())
 }
 
-fn icon_field(object: &str) -> Result<String, serde_json::Value> {
+fn icon_field(object: &str, origin: &str) -> Result<String, serde_json::Value> {
     let marker = "icon:";
     let rest = object
         .find(marker)
@@ -395,7 +436,7 @@ fn icon_field(object: &str) -> Result<String, serde_json::Value> {
             "icon",
         ));
     }
-    Ok(format!("https://people.bgcharlem.org/{suffix}"))
+    Ok(format!("{}/{}", origin.trim_end_matches('/'), suffix))
 }
 
 async fn create_snapshot_nodes(
@@ -855,12 +896,12 @@ mod tests {
 
     #[test]
     fn catalog_literals_drive_imported_tile_content() {
-        let source = "const SUITE_APPS = [\n{ id: 'x', name: 'ALPHA', icon: `${ICON_ORIGIN}/alpha-icon.svg`, url: 'https://alpha.example', description: 'First literal' },\n];\n";
+        let source = "const ICON_ORIGIN = 'https://icons.example';\nconst SUITE_APPS = [\n{ id: 'x', name: 'ALPHA', icon: `${ICON_ORIGIN}/alpha-icon.svg`, url: 'https://alpha.example', description: 'First literal' },\n];\n";
         let mut tiles = parse_suite_apps(source).unwrap();
         assert_eq!(tiles[0].name, "ALPHA");
         assert_eq!(tiles[0].description, "First literal");
         assert_eq!(tiles[0].url, "https://alpha.example");
-        assert_eq!(tiles[0].icon, "https://people.bgcharlem.org/alpha-icon.svg");
+        assert_eq!(tiles[0].icon, "https://icons.example/alpha-icon.svg");
         // Simulates a copied catalog literal changed after the importer was built:
         // the parsed plan changes without any importer code change.
         let changed = source.replace("First literal", "Changed literal");
@@ -870,7 +911,7 @@ mod tests {
 
     #[test]
     fn catalog_dynamic_field_is_a_diagnostic() {
-        let source = "const SUITE_APPS = [\n{ name: app.name, icon: `${ICON_ORIGIN}/x.svg`, url: 'https://x.example', description: 'x' },\n];\n";
+        let source = "const ICON_ORIGIN = 'https://icons.example';\nconst SUITE_APPS = [\n{ name: app.name, icon: `${ICON_ORIGIN}/x.svg`, url: 'https://x.example', description: 'x' },\n];\n";
         assert_eq!(
             parse_suite_apps(source).unwrap_err()["code"],
             "CATALOG_DYNAMIC"
@@ -884,5 +925,20 @@ mod tests {
         assert_eq!(parse_grid_layout(baseline).unwrap().gap, 16.0);
         assert_eq!(parse_grid_layout(&changed).unwrap().gap, 32.0);
         assert_eq!(parse_grid_layout(&changed).unwrap().desktop_columns, 3);
+    }
+
+    #[test]
+    fn last_grid_is_the_active_non_loading_grid() {
+        let source = r#"<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"><div className="grid grid-cols-1 gap-8 sm:grid-cols-2 lg:grid-cols-3">"#;
+        assert_eq!(parse_grid_layout(source).unwrap().gap, 32.0);
+    }
+
+    #[test]
+    fn icon_origin_literal_drives_url() {
+        let source = "const ICON_ORIGIN = 'https://new-icons.example';\nconst SUITE_APPS = [{ name: 'A', icon: `${ICON_ORIGIN}/a.svg`, url: 'https://a.example', description: 'A' },\n];\n";
+        assert_eq!(
+            parse_suite_apps(source).unwrap()[0].icon,
+            "https://new-icons.example/a.svg"
+        );
     }
 }
