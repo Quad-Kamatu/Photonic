@@ -14,8 +14,9 @@ use photonic_core::{
     path::PathData,
     style::Fill,
     transform::Transform,
+    Document,
 };
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 const MAX_JSX_BYTES: usize = 256 * 1024;
 const MAX_ELEMENTS: usize = 512;
@@ -60,6 +61,12 @@ struct ImportedTile {
     description: String,
     icon: String,
     url: String,
+    asset: Option<ImportedSvgAsset>,
+}
+#[derive(Debug, Clone)]
+struct ImportedSvgAsset {
+    path: PathBuf,
+    document: Document,
 }
 #[derive(Debug, Clone)]
 struct LayoutSpec {
@@ -268,11 +275,35 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
     })?;
     let layout = parse_grid_layout(&text)?;
     let tile_style = parse_tile_style(&text)?;
-    let tiles = parse_suite_apps(&catalog_text)?;
+    let mut tiles = parse_suite_apps(&catalog_text)?;
+    let asset_root = std::fs::canonicalize(root.join("apps/core/public")).map_err(|_| {
+        diag(
+            "ASSET_ROOT_NOT_FOUND",
+            "allowlisted SVG asset root apps/core/public was not found",
+            "apps/core/public",
+        )
+    })?;
+    if !asset_root.starts_with(root) {
+        return Err(diag(
+            "ASSET_ROOT_OUTSIDE_ROOT",
+            "allowlisted SVG asset root resolves outside module_roots",
+            &asset_root.display().to_string(),
+        ));
+    }
+    for tile in &mut tiles {
+        tile.asset = Some(resolve_svg_asset(&tile.icon, &asset_root)?);
+    }
+    let mut resolved_files = vec![source.display().to_string(), catalog.display().to_string()];
+    resolved_files.extend(
+        tiles
+            .iter()
+            .filter_map(|tile| tile.asset.as_ref())
+            .map(|asset| asset.path.display().to_string()),
+    );
     Ok(ParsedPage {
         tiles,
         layout,
-        resolved_files: vec![source.display().to_string(), catalog.display().to_string()],
+        resolved_files,
         fingerprint: source_fingerprint(&text, &catalog_text),
         tile_style,
     })
@@ -350,6 +381,87 @@ fn parse_tile_style(source: &str) -> Result<TileStyle, serde_json::Value> {
         title_weight,
         description_size,
     })
+}
+
+fn resolve_svg_asset(
+    icon_url: &str,
+    asset_root: &std::path::Path,
+) -> Result<ImportedSvgAsset, serde_json::Value> {
+    const ORIGIN: &str = "https://people.bgcharlem.org/";
+    let basename = icon_url.strip_prefix(ORIGIN).ok_or_else(|| {
+        diag(
+            "ASSET_URL_UNSUPPORTED",
+            "icon URL must use the allowlisted people.bgcharlem.org origin",
+            icon_url,
+        )
+    })?;
+    if basename.is_empty()
+        || basename.contains('/')
+        || basename.contains('\\')
+        || basename.contains('?')
+        || basename.contains('#')
+        || basename == "."
+        || basename == ".."
+        || !basename.ends_with("-icon.svg")
+    {
+        return Err(diag(
+            "ASSET_BASENAME_UNSAFE",
+            "icon URL path must be one literal *-icon.svg basename",
+            basename,
+        ));
+    }
+    let candidate = asset_root.join(basename);
+    let path = std::fs::canonicalize(&candidate).map_err(|_| {
+        diag(
+            "ASSET_NOT_FOUND",
+            "local SVG matching the icon URL basename was not found",
+            basename,
+        )
+    })?;
+    if !path.starts_with(asset_root) || path.parent() != Some(asset_root) {
+        return Err(diag(
+            "ASSET_OUTSIDE_ROOT",
+            "resolved SVG asset is outside the allowlisted asset root",
+            &path.display().to_string(),
+        ));
+    }
+    let svg = std::fs::read_to_string(&path).map_err(|_| {
+        diag(
+            "ASSET_READ",
+            "local SVG asset is not readable UTF-8",
+            &path.display().to_string(),
+        )
+    })?;
+    let document = photonic_core::import_svg(&svg).map_err(|error| {
+        diag(
+            "ASSET_SVG_INVALID",
+            &format!("local SVG could not be imported: {error}"),
+            &path.display().to_string(),
+        )
+    })?;
+    if !document
+        .nodes
+        .values()
+        .all(|node| matches!(node.kind, SceneNodeKind::Path(_) | SceneNodeKind::Group(_)))
+    {
+        return Err(diag(
+            "ASSET_SVG_UNSUPPORTED",
+            "local SVG must contain editable path/group geometry only",
+            &path.display().to_string(),
+        ));
+    }
+    if !document.width.is_finite()
+        || !document.height.is_finite()
+        || document.width <= 0.0
+        || document.height <= 0.0
+    {
+        return Err(diag(
+            "ASSET_SVG_VIEWPORT",
+            "local SVG must have a finite positive viewport",
+            &path.display().to_string(),
+        ));
+    }
+    Ok(ImportedSvgAsset { path, document })
 }
 
 fn strip_unreachable_branches(source: &str) -> String {
@@ -529,6 +641,7 @@ fn parse_suite_apps(source: &str) -> Result<Vec<ImportedTile>, serde_json::Value
                 description: literal_field(object, "description")?,
                 icon: icon_field(object, &origin)?,
                 url: literal_field(object, "url")?,
+                asset: None,
             })
         })
         .collect()
@@ -672,7 +785,7 @@ async fn create_snapshot_nodes(
     let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
     let text_count = parsed.tiles.len() * 2 + 1;
     let semantic_tree: Vec<_> = parsed.tiles.iter().map(|tile| serde_json::json!({"kind":"link","href":tile.url,"children":[{"kind":"image","src":tile.icon},{"kind":"text","value":tile.name},{"kind":"text","value":tile.description}]})).collect();
-    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"text":text_count},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"theme":{"card":theme.card,"foreground":theme.foreground,"muted_foreground":theme.muted},"semantic_tree":semantic_tree,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
+    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"theme":{"card":theme.card,"foreground":theme.foreground,"muted_foreground":theme.muted},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
     if args.dry_run {
         return ToolResult::text("React source import plan").with_data(data);
     }
@@ -716,34 +829,29 @@ fn layout_app_directory(
         let row = i / cols;
         let x = origin.0 + padding + col as f64 * (card_w + gap);
         let y = origin.1 + padding + row as f64 * (card_h + gap);
-        let mut card_children = vec![
-            rect_node(
-                "Card surface",
-                x,
-                y,
-                card_w,
-                card_h,
-                style.radius,
-                &theme.card,
-                layer,
-                out,
-            ),
-            rect_node(
-                "App badge",
-                x + style.padding,
-                y + style.padding,
-                style.badge,
-                style.badge,
-                style.radius,
-                badge_color(&tile.icon),
-                layer,
-                out,
-            ),
-        ];
-        if let Some(badge) = out.iter_mut().find(|n| n.id == card_children[1]) {
-            badge.tags.push("react-role:image".into());
-            badge.tags.push(format!("source:{}", tile.icon));
-        }
+        let mut card_children = vec![rect_node(
+            "Card surface",
+            x,
+            y,
+            card_w,
+            card_h,
+            style.radius,
+            &theme.card,
+            layer,
+            out,
+        )];
+        let icon = append_svg_asset(
+            tile.asset
+                .as_ref()
+                .expect("assets are preflighted before layout"),
+            &tile.name,
+            &tile.icon,
+            (x + style.padding, y + style.padding),
+            style.badge,
+            layer,
+            out,
+        );
+        card_children.push(icon);
         card_children.push(text_node(
             &tile.name,
             x + style.padding + style.badge + style.content_gap,
@@ -791,15 +899,60 @@ fn layout_app_directory(
     group_node("BGCH Hub AppDirectory snapshot", children, layer, out)
 }
 
-fn badge_color(source: &str) -> &'static str {
-    const PALETTE: [&str; 7] = [
-        "#2563eb", "#7c3aed", "#dc2626", "#0891b2", "#16a34a", "#ea580c", "#4f46e5",
-    ];
-    let index = source
-        .bytes()
-        .fold(0usize, |value, byte| value.wrapping_add(byte as usize))
-        % PALETTE.len();
-    PALETTE[index]
+fn append_svg_asset(
+    asset: &ImportedSvgAsset,
+    app_name: &str,
+    source_url: &str,
+    origin: (f64, f64),
+    size: f64,
+    layer: uuid::Uuid,
+    out: &mut Vec<SceneNode>,
+) -> uuid::Uuid {
+    let mut id_map = HashMap::new();
+    for old_id in asset.document.nodes.keys() {
+        id_map.insert(*old_id, uuid::Uuid::new_v4());
+    }
+    for old_node in asset.document.nodes.values() {
+        let mut node = old_node.clone();
+        node.id = id_map[&old_node.id];
+        node.layer_id = layer;
+        if let SceneNodeKind::Group(group) = &mut node.kind {
+            group.children = group
+                .children
+                .iter()
+                .filter_map(|child| id_map.get(child).copied())
+                .collect();
+            group.clip_node_id = group.clip_node_id.and_then(|id| id_map.get(&id).copied());
+            group.blend_spine_id = group.blend_spine_id.and_then(|id| id_map.get(&id).copied());
+        }
+        out.push(node);
+    }
+    let roots: Vec<_> = asset
+        .document
+        .layer_order
+        .iter()
+        .filter_map(|layer_id| asset.document.layers.get(layer_id))
+        .flat_map(|source_layer| source_layer.node_ids.iter())
+        .filter_map(|id| id_map.get(id).copied())
+        .collect();
+    let scale = (size / asset.document.width).min(size / asset.document.height);
+    let tx = origin.0 + (size - asset.document.width * scale) / 2.0;
+    let ty = origin.1 + (size - asset.document.height * scale) / 2.0;
+    let mut group = GroupNode::new();
+    group.children = roots;
+    let mut node = SceneNode::new(
+        format!("App icon: {app_name}"),
+        layer,
+        SceneNodeKind::Group(group),
+    );
+    node.transform = Transform::new(scale, 0.0, 0.0, scale, tx, ty);
+    node.tags.push("react-role:image".into());
+    node.tags.push(format!("source:{source_url}"));
+    node.tags
+        .push(format!("source-file:{}", asset.path.display()));
+    let id = node.id;
+    out.push(node);
+    id
 }
 
 fn rect_node(
@@ -1089,10 +1242,21 @@ mod tests {
             std::env::temp_dir().join(format!("photonic-react-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("apps/hub/src/components")).unwrap();
         std::fs::create_dir_all(root.join("packages/waffle/src")).unwrap();
+        std::fs::create_dir_all(root.join("apps/core/public")).unwrap();
         let app = "import { SUITE_APPS, filterApps } from '@bgch/waffle';\nfunction AppTile(){return <CardContent className=\"flex items-center gap-4 p-5\"><img className=\"h-12 w-12 rounded-lg\"/><span className=\"font-semibold\"/><p className=\"text-sm\"/></CardContent>}\nexport function AppDirectory(){ const tiles = filterApps(apps); return <section><div className=\"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3\">{tiles.map((app) => (<AppTile key={app.id} app={app} />))}</div></section> }\n";
-        let catalog = "const ICON_ORIGIN = 'https://icons.example';\nconst SUITE_APPS = [{ id: 'a', name: 'ONE', icon: `${ICON_ORIGIN}/one.svg`, url: 'https://one.example', description: 'One' }, { id: 'b', name: 'TWO', icon: `${ICON_ORIGIN}/two.svg`, url: 'https://two.example', description: 'Two' }];\n";
+        let catalog = "const ICON_ORIGIN = 'https://people.bgcharlem.org';\nconst SUITE_APPS = [{ id: 'a', name: 'ONE', icon: `${ICON_ORIGIN}/one-icon.svg`, url: 'https://one.example', description: 'One' }, { id: 'b', name: 'TWO', icon: `${ICON_ORIGIN}/two-icon.svg`, url: 'https://two.example', description: 'Two' }];\n";
         std::fs::write(root.join("apps/hub/src/components/AppDirectory.jsx"), app).unwrap();
         std::fs::write(root.join("packages/waffle/src/suiteApps.js"), catalog).unwrap();
+        std::fs::write(
+            root.join("apps/core/public/one-icon.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0 L10 0 L10 10 Z" fill="#ff0000"/></svg>"##,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/core/public/two-icon.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"><g><path d="M0 0 L20 0 L20 10 Z" fill="#00ff00"/></g></svg>"##,
+        )
+        .unwrap();
         root
     }
     fn source_args(root: &std::path::Path, dry_run: bool) -> CreateVectorsFromReactArgs {
@@ -1252,7 +1416,7 @@ mod tests {
         assert_eq!(baseline_json["layout"]["gap_px"], 16.0, "{baseline_json}");
         assert!(baseline_json
             .to_string()
-            .contains("https://icons.example/one.svg"));
+            .contains("https://people.bgcharlem.org/one-icon.svg"));
         let app_path = root.join("apps/hub/src/components/AppDirectory.jsx");
         let app = std::fs::read_to_string(&app_path)
             .unwrap()
@@ -1263,12 +1427,18 @@ mod tests {
         let cat = root.join("packages/waffle/src/suiteApps.js");
         let content = std::fs::read_to_string(&cat)
             .unwrap()
-            .replace("https://icons.example", "https://changed.example");
+            .replace("/one-icon.svg", "/two-icon.svg");
         std::fs::write(&cat, content).unwrap();
         let icon_result = create_vectors_from_react(&state, source_args(&root, true)).await;
-        assert!(plan_json(&icon_result)
+        let icon_plan = plan_json(&icon_result);
+        assert!(icon_plan
             .to_string()
-            .contains("https://changed.example/one.svg"));
+            .contains("https://people.bgcharlem.org/two-icon.svg"));
+        assert!(!icon_plan["resolved_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path.as_str().unwrap().ends_with("one-icon.svg")));
         let bad = std::fs::read_to_string(&app_path)
             .unwrap()
             .replace("<section>", "<section onClick={recordClick}>");
@@ -1279,6 +1449,48 @@ mod tests {
         assert_eq!(rejected.is_error, Some(true));
         assert_eq!(state.document.lock().await.nodes.len(), before);
         assert_eq!(state.history.lock().await.undo_depth(), undo);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn local_svg_assets_become_editable_geometry_without_badges() {
+        let root = copied_root();
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, source_args(&root, false)).await;
+        assert_ne!(result.is_error, Some(true));
+        let doc = state.document.lock().await;
+        assert!(doc.nodes.values().any(|node| {
+            node.name == "App icon: ONE" && matches!(node.kind, SceneNodeKind::Group(_))
+        }));
+        assert!(
+            doc.nodes
+                .values()
+                .filter(|node| matches!(node.kind, SceneNodeKind::Path(_)))
+                .count()
+                >= 4
+        );
+        assert!(!doc.nodes.values().any(|node| node.name == "App badge"));
+        drop(doc);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn missing_local_svg_rejects_with_zero_mutation() {
+        let root = copied_root();
+        let catalog = root.join("packages/waffle/src/suiteApps.js");
+        let changed = std::fs::read_to_string(&catalog)
+            .unwrap()
+            .replace("/one-icon.svg", "/missing-icon.svg");
+        std::fs::write(&catalog, changed).unwrap();
+        let state = source_test_state();
+        let before_nodes = state.document.lock().await.nodes.len();
+        let before_undo = state.history.lock().await.undo_depth();
+        let result = create_vectors_from_react(&state, source_args(&root, false)).await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(state.document.lock().await.nodes.len(), before_nodes);
+        assert_eq!(state.history.lock().await.undo_depth(), before_undo);
+        let debug = format!("{result:?}");
+        assert!(debug.contains("ASSET_NOT_FOUND"), "{debug}");
         let _ = std::fs::remove_dir_all(root);
     }
 }
