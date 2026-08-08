@@ -108,6 +108,8 @@ pub fn tool_list() -> Value {
                     "props": { "type": "object", "description": "JSON-only static props snapshot." },
                     "module_roots": { "type": "array", "items": {"type":"string"}, "description": "Approved local roots for source and bounded imports." },
                     "theme_tokens": { "type": "object", "description": "Optional hex overrides for source-resolved light theme tokens.", "properties": { "card": {"type":"string"}, "foreground": {"type":"string"}, "muted_foreground": {"type":"string"}, "border": {"type":"string"} } },
+                    "interaction_policy": { "type": "string", "enum": ["reject", "strip"], "default": "reject", "description": "Reject rendered event handlers, or strip them with warnings/provenance. JavaScript is never executed." },
+                    "dynamic_content": { "type": "object", "description": "Pinned bounded wrapper branches, such as backgroundImage:null and enableInactivity:false." },
                     "origin": { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } },
                     "viewport": { "type": "object", "properties": { "width": {"type":"number"}, "height": {"type":"number"} } },
                     "layer_id": { "type": "string" }, "group_name": { "type": "string" },

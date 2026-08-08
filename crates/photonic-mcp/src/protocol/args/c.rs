@@ -66,6 +66,16 @@ pub struct CreateVectorsFromReactArgs {
     pub module_roots: Vec<String>,
     #[serde(default)]
     pub theme_tokens: Option<ReactThemeTokensArg>,
+    /// Event-handler policy for file-backed snapshots. By default any rendered
+    /// handler is rejected. `strip` removes handlers without executing them and
+    /// records each removed interaction in diagnostics and provenance.
+    #[serde(default)]
+    pub interaction_policy: Option<String>,
+    /// Explicit values for bounded conditional content in resolved wrappers.
+    /// For the kiosk slice, backgroundImage must be null and
+    /// enableInactivity must be false.
+    #[serde(default)]
+    pub dynamic_content: Option<Value>,
     #[serde(default)]
     pub origin: Option<CssPointArg>,
     #[serde(default)]

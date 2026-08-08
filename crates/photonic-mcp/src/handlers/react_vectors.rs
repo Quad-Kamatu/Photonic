@@ -5,6 +5,9 @@
 //! utility subset, then delegates all geometry lowering to the core compiler.
 
 use crate::handlers::css_vectors::create_vectors_from_css;
+use crate::handlers::lucide_assets::{
+    append_lucide_icon, resolve_lucide_icon_set, LucideAsset, LucideDiagnostic,
+};
 use crate::protocol::{CreateVectorsFromCssArgs, CreateVectorsFromReactArgs, ToolResult};
 use crate::server::AppState;
 use photonic_core::{
@@ -127,6 +130,9 @@ async fn create_source_path_snapshot(
     state: &AppState,
     args: &CreateVectorsFromReactArgs,
 ) -> ToolResult {
+    if args.export_name.as_deref() == Some("ModeSelector") {
+        return create_checkin_mode_selector(state, args).await;
+    }
     let parsed = match read_app_directory(args) {
         Ok(parsed) => parsed,
         Err(mut d) => {
@@ -171,6 +177,811 @@ fn actual_span(path: &str, needle: &str) -> serde_json::Value {
     let column =
         |offset: usize| offset - text[..offset].rfind('\n').map(|n| n + 1).unwrap_or(0) + 1;
     serde_json::json!({"byte_start":start,"byte_end":end,"line_start":line(start),"column_start":column(start),"line_end":line(end),"column_end":column(end)})
+}
+
+#[derive(Debug, Clone)]
+struct CheckinPage {
+    texts: Vec<String>,
+    source_files: Vec<PathBuf>,
+    fingerprint: String,
+    blue: String,
+    gold: String,
+    primary_blue: String,
+    card_width: f64,
+    card_padding: f64,
+    outer_padding: f64,
+    card_radius: f64,
+    section_gap: f64,
+    button_height: f64,
+    warnings: Vec<serde_json::Value>,
+    interactions: Vec<String>,
+    icons: Vec<LucideAsset>,
+}
+
+fn lucide_diag(error: LucideDiagnostic) -> serde_json::Value {
+    diag(error.code, &error.message, &error.value)
+}
+
+/// Bounded second vertical slice: the Check-In kiosk mode selector. This is
+/// deliberately a static resolver, not React execution. It resolves the local
+/// `@/` modules used by the rendered tree, evaluates the two pinned KioskLayout
+/// branches, reads literal text/classes/tokens, and lowers that model directly
+/// into editable Photonic nodes.
+async fn create_checkin_mode_selector(
+    state: &AppState,
+    args: &CreateVectorsFromReactArgs,
+) -> ToolResult {
+    let page = match read_checkin_mode_selector(args) {
+        Ok(page) => page,
+        Err(diagnostic) => {
+            let path = args.source_path.as_deref().unwrap_or("");
+            let needle = diagnostic
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut diagnostic = diagnostic;
+            if let Some(object) = diagnostic.as_object_mut() {
+                object.insert("source_path".into(), serde_json::json!(path));
+                object.insert("span".into(), actual_span(path, &needle));
+            }
+            return ToolResult::error("React source import rejected")
+                .with_data(serde_json::json!({"diagnostics":[diagnostic],"contract_version":2}));
+        }
+    };
+    create_checkin_nodes(state, args, &page).await
+}
+
+fn read_checkin_mode_selector(
+    args: &CreateVectorsFromReactArgs,
+) -> Result<CheckinPage, serde_json::Value> {
+    if let Some(dynamic) = args
+        .dynamic_content
+        .as_ref()
+        .and_then(|value| value.as_object())
+    {
+        if dynamic
+            .get("backgroundImage")
+            .is_some_and(|value| !value.is_null())
+            || dynamic
+                .get("enableInactivity")
+                .and_then(|value| value.as_bool())
+                != Some(false)
+        {
+            return Err(diag(
+                "DYNAMIC_CONTENT_UNSUPPORTED",
+                "ModeSelector requires backgroundImage=null and enableInactivity=false",
+                "dynamic_content",
+            ));
+        }
+    }
+    if !matches!(
+        args.interaction_policy.as_deref().unwrap_or("reject"),
+        "reject" | "strict" | "strip"
+    ) {
+        return Err(diag(
+            "INTERACTION_POLICY",
+            "interaction_policy must be reject or strip",
+            args.interaction_policy.as_deref().unwrap_or(""),
+        ));
+    }
+    let source_name = args
+        .source_path
+        .as_deref()
+        .ok_or_else(|| diag("SOURCE_PATH", "source_path is required", ""))?;
+    let roots: Vec<_> = args
+        .module_roots
+        .iter()
+        .map(std::fs::canonicalize)
+        .collect::<Result<_, _>>()
+        .map_err(|_| {
+            diag(
+                "MODULE_ROOTS",
+                "a module root does not exist",
+                "module_roots",
+            )
+        })?;
+    if roots.is_empty() {
+        return Err(diag(
+            "MODULE_ROOTS",
+            "module_roots is required",
+            "module_roots",
+        ));
+    }
+    let source = std::fs::canonicalize(source_name).map_err(|_| {
+        diag(
+            "SOURCE_NOT_FOUND",
+            "source_path does not exist",
+            source_name,
+        )
+    })?;
+    let root = roots
+        .iter()
+        .find(|root| source.starts_with(root))
+        .ok_or_else(|| {
+            diag(
+                "SOURCE_OUTSIDE_ROOT",
+                "source_path must be inside module_roots",
+                source_name,
+            )
+        })?;
+    let app_root = bounded_file(root, "apps/checkin/src", "CHECKIN_SOURCE_ROOT")?;
+    if !source.starts_with(&app_root) {
+        return Err(diag(
+            "SOURCE_UNSUPPORTED",
+            "ModeSelector must resolve beneath apps/checkin/src",
+            source_name,
+        ));
+    }
+    let mode = std::fs::read_to_string(&source)
+        .map_err(|_| diag("SOURCE_READ", "source is not readable UTF-8", source_name))?;
+    for required in [
+        "export function ModeSelector",
+        "<KioskLayout enableInactivity={false}>",
+        "from '@/components/ui/button'",
+        "from '@/components/layout'",
+        "from 'lucide-react'",
+    ] {
+        if !mode.contains(required) {
+            return Err(diag(
+                "SOURCE_UNSUPPORTED",
+                "source is outside the bounded ModeSelector form",
+                required,
+            ));
+        }
+    }
+
+    let rendered = return_jsx(&mode)?;
+    if rendered.contains("{activeBackground") || rendered.contains("{enableInactivity") {
+        return Err(diag(
+            "JSX_UNSUPPORTED_EXPRESSION",
+            "ModeSelector contains an unsupported rendered expression",
+            "{activeBackground",
+        ));
+    }
+    let handlers = event_handlers(rendered);
+    if !handlers.is_empty() && args.interaction_policy.as_deref().unwrap_or("reject") != "strip" {
+        return Err(diag(
+            "JSX_INTERACTION_UNSUPPORTED",
+            "rendered event handlers require interaction_policy=strip",
+            &handlers[0],
+        ));
+    }
+    let stripped = strip_jsx_comments_and_handlers(rendered);
+    if let Some(token) = first_unsupported_rendered_expression(&stripped) {
+        return Err(diag(
+            "JSX_UNSUPPORTED_EXPRESSION",
+            "rendered expression is outside the bounded static snapshot",
+            &token,
+        ));
+    }
+    let texts = literal_jsx_text(&stripped);
+    if texts.is_empty() {
+        return Err(diag(
+            "JSX_EMPTY",
+            "ModeSelector has no literal visible text",
+            "ModeSelector",
+        ));
+    }
+
+    let layout_index = resolve_checkin_import(root, "apps/checkin/src/components/layout/index.js")?;
+    let layout =
+        resolve_checkin_import(root, "apps/checkin/src/components/layout/KioskLayout.jsx")?;
+    let button = resolve_checkin_import(root, "apps/checkin/src/components/ui/button.jsx")?;
+    let card = resolve_checkin_import(root, "apps/checkin/src/components/ui/card.jsx")?;
+    let css = resolve_checkin_import(root, "apps/checkin/src/index.css")?;
+    let layout_index_text = std::fs::read_to_string(&layout_index).unwrap_or_default();
+    if !layout_index_text.contains("export { KioskLayout } from './KioskLayout'") {
+        return Err(diag(
+            "IMPORT_UNRESOLVED",
+            "KioskLayout re-export is unsupported",
+            "KioskLayout",
+        ));
+    }
+    let layout_text = std::fs::read_to_string(&layout).unwrap_or_default();
+    if !layout_text.contains("{activeBackground && (")
+        || !layout_text.contains("{enableInactivity && (")
+        || !layout_text.contains("{children}")
+    {
+        return Err(diag(
+            "KIOSK_LAYOUT_UNSUPPORTED",
+            "KioskLayout branch structure changed",
+            "KioskLayout",
+        ));
+    }
+    // enableInactivity=false and absent backgroundImage make these branches
+    // statically unreachable in the accepted snapshot. No hook is invoked.
+    let layout_visible = layout_text
+        .split("{/* Background layer 2")
+        .next()
+        .unwrap_or(&layout_text)
+        .to_string()
+        + layout_text
+            .split("{/* Exit button */}")
+            .nth(1)
+            .unwrap_or("")
+            .split("{/* Inactivity monitor */}")
+            .next()
+            .unwrap_or("");
+    let layout_texts = literal_jsx_text(&strip_jsx_comments_and_handlers(&layout_visible));
+    let exit_text = layout_texts
+        .into_iter()
+        .find(|text| text == "Exit Kiosk")
+        .ok_or_else(|| {
+            diag(
+                "KIOSK_LAYOUT_UNSUPPORTED",
+                "visible exit label is missing",
+                "Exit Kiosk",
+            )
+        })?;
+
+    let button_text = std::fs::read_to_string(&button).unwrap_or_default();
+    let button_base = string_after(&button_text, "const buttonVariants = cva(")?;
+    for class in ["inline-flex", "rounded-lg"] {
+        if !button_base.split_whitespace().any(|value| value == class) {
+            return Err(diag(
+                "BUTTON_PRIMITIVE_UNSUPPORTED",
+                "button base class is missing",
+                class,
+            ));
+        }
+    }
+    let default_classes = object_string(&button_text, "default:")?;
+    let large_classes = object_string(&button_text, "lg:")?;
+    let primary_token = default_classes
+        .split_whitespace()
+        .find_map(|class| class.strip_prefix("bg-"))
+        .ok_or_else(|| {
+            diag(
+                "BUTTON_PRIMITIVE_UNSUPPORTED",
+                "default button background is missing",
+                "default",
+            )
+        })?;
+    let button_height = class_px(large_classes, "h-")?;
+
+    let css_text = std::fs::read_to_string(&css).unwrap_or_default();
+    let blue = css_hex_token(&css_text, "bgch-blue")?;
+    let gold = css_hex_token(&css_text, "bgch-gold")?;
+    let primary_blue = css_hex_token(&css_text, primary_token)?;
+    let card_width = arbitrary_px(&layout_text, "max-w-[")?;
+    let card_classes = literal_class_containing(&layout_text, "bg-white p-")?;
+    let card_padding = class_px(card_classes, "p-")?;
+    let outer_classes = literal_class_containing(&layout_text, "justify-center p-")?;
+    let outer_padding = class_px(outer_classes, "p-")?;
+    let card_radius = radius_px(card_classes)?;
+    let section_gap = largest_space_class(&mode, "mb-")?;
+
+    let mut all_texts = vec![exit_text];
+    all_texts.extend(texts);
+    let icons = resolve_lucide_icon_set(&args.module_roots, &["Calendar", "Users", "LogOut"])
+        .map_err(lucide_diag)?;
+    let mut source_files = vec![source, layout_index, layout, button, card, css];
+    source_files.extend(icons.iter().map(|asset| asset.source_path.clone()));
+    source_files.sort();
+    source_files.dedup();
+    let fingerprint = source_fingerprint(&source_files)?;
+    let warnings = handlers
+        .iter()
+        .map(|handler| serde_json::json!({"severity":"warning","code":"JSX_EVENT_STRIPPED","message":"event handler was removed; JavaScript was not executed","value":handler}))
+        .collect();
+    Ok(CheckinPage {
+        texts: all_texts,
+        source_files,
+        fingerprint,
+        blue,
+        gold,
+        primary_blue,
+        card_width,
+        card_padding,
+        outer_padding,
+        card_radius,
+        section_gap,
+        button_height,
+        warnings,
+        interactions: handlers,
+        icons,
+    })
+}
+
+fn resolve_checkin_import(
+    root: &std::path::Path,
+    relative: &str,
+) -> Result<PathBuf, serde_json::Value> {
+    let unresolved = root.join(relative);
+    let path = std::fs::canonicalize(&unresolved).map_err(|_| {
+        diag(
+            "IMPORT_UNRESOLVED",
+            "required local import was not found",
+            relative,
+        )
+    })?;
+    if !path.starts_with(root) {
+        return Err(diag(
+            "IMPORT_OUTSIDE_ROOT",
+            "resolved import is outside module_roots",
+            relative,
+        ));
+    }
+    Ok(path)
+}
+
+fn return_jsx(source: &str) -> Result<&str, serde_json::Value> {
+    let export = source.find("export function ModeSelector").ok_or_else(|| {
+        diag(
+            "EXPORT_UNSUPPORTED",
+            "ModeSelector export is missing",
+            "ModeSelector",
+        )
+    })?;
+    let body = &source[export..];
+    let start = body.find("return (").ok_or_else(|| {
+        diag(
+            "SOURCE_UNSUPPORTED",
+            "ModeSelector return is missing",
+            "return (",
+        )
+    })?;
+    let rendered = &body[start + "return (".len()..];
+    let end = rendered.rfind(");").ok_or_else(|| {
+        diag(
+            "SOURCE_UNSUPPORTED",
+            "ModeSelector return is unterminated",
+            ");",
+        )
+    })?;
+    Ok(&rendered[..end])
+}
+
+fn event_handlers(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(pos) = rest.find("onClick={") {
+        let tail = &rest[pos..];
+        if let Some(end) = tail.find('}') {
+            out.push(tail[..=end].to_string());
+            rest = &tail[end + 1..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn strip_jsx_comments_and_handlers(source: &str) -> String {
+    let mut result = source.to_string();
+    while let Some(start) = result.find("{/*") {
+        let Some(end) = result[start + 3..].find("*/}") else {
+            break;
+        };
+        result.replace_range(start..start + 3 + end + 3, "");
+    }
+    while let Some(start) = result.find("onClick={") {
+        let Some(end) = result[start..].find('}') else {
+            break;
+        };
+        result.replace_range(start..=start + end, "");
+    }
+    result
+}
+
+fn first_unsupported_rendered_expression(source: &str) -> Option<String> {
+    let mut rest = source;
+    while let Some(start) = rest.find('{') {
+        let tail = &rest[start..];
+        let end = tail.find('}')?;
+        let token = &tail[..=end];
+        if token != "{false}" {
+            return Some(token.to_string());
+        }
+        rest = &tail[end + 1..];
+    }
+    None
+}
+
+fn literal_jsx_text(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(close) = rest.find('>') {
+        rest = &rest[close + 1..];
+        let Some(open) = rest.find('<') else {
+            break;
+        };
+        let value = rest[..open]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !value.is_empty() && !value.contains('{') && !value.contains('}') {
+            out.push(value);
+        }
+        rest = &rest[open..];
+    }
+    out
+}
+
+fn string_after<'a>(source: &'a str, marker: &str) -> Result<&'a str, serde_json::Value> {
+    let rest = source
+        .find(marker)
+        .map(|i| &source[i + marker.len()..])
+        .ok_or_else(|| diag("SOURCE_UNSUPPORTED", "required literal is missing", marker))?
+        .trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| *c == '\'' || *c == '"')
+        .ok_or_else(|| {
+            diag(
+                "SOURCE_UNSUPPORTED",
+                "required value must be a string literal",
+                marker,
+            )
+        })?;
+    let end = rest[1..].find(quote).ok_or_else(|| {
+        diag(
+            "SOURCE_UNSUPPORTED",
+            "string literal is unterminated",
+            marker,
+        )
+    })?;
+    Ok(&rest[1..end + 1])
+}
+
+fn object_string<'a>(source: &'a str, marker: &str) -> Result<&'a str, serde_json::Value> {
+    let rest = source
+        .find(marker)
+        .map(|i| &source[i + marker.len()..])
+        .ok_or_else(|| diag("SOURCE_UNSUPPORTED", "variant literal is missing", marker))?
+        .trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| *c == '\'' || *c == '"')
+        .ok_or_else(|| {
+            diag(
+                "SOURCE_UNSUPPORTED",
+                "variant must be a string literal",
+                marker,
+            )
+        })?;
+    let end = rest[1..].find(quote).ok_or_else(|| {
+        diag(
+            "SOURCE_UNSUPPORTED",
+            "variant literal is unterminated",
+            marker,
+        )
+    })?;
+    Ok(&rest[1..end + 1])
+}
+
+fn class_px(classes: &str, prefix: &str) -> Result<f64, serde_json::Value> {
+    classes
+        .split_whitespace()
+        .find_map(|class| class.strip_prefix(prefix))
+        .and_then(|n| n.parse::<f64>().ok())
+        .map(|n| n * 4.0)
+        .ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "numeric spacing class is required",
+                prefix,
+            )
+        })
+}
+
+fn radius_px(classes: &str) -> Result<f64, serde_json::Value> {
+    for (class, px) in [
+        ("rounded-lg", 8.),
+        ("rounded-xl", 12.),
+        ("rounded-2xl", 16.),
+    ] {
+        if classes.split_whitespace().any(|value| value == class) {
+            return Ok(px);
+        }
+    }
+    Err(diag(
+        "TAILWIND_UNSUPPORTED",
+        "bounded card radius is required",
+        classes,
+    ))
+}
+
+fn largest_space_class(source: &str, prefix: &str) -> Result<f64, serde_json::Value> {
+    source
+        .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .filter_map(|class| class.strip_prefix(prefix))
+        .filter_map(|value| value.parse::<f64>().ok())
+        .map(|value| value * 4.)
+        .reduce(f64::max)
+        .ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "required spacing class is missing",
+                prefix,
+            )
+        })
+}
+
+fn arbitrary_px(source: &str, marker: &str) -> Result<f64, serde_json::Value> {
+    let rest = source
+        .find(marker)
+        .map(|i| &source[i + marker.len()..])
+        .ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "arbitrary pixel class is missing",
+                marker,
+            )
+        })?;
+    rest.split("px]")
+        .next()
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "arbitrary size must use px", marker))
+}
+
+fn literal_class_containing<'a>(
+    source: &'a str,
+    needle: &str,
+) -> Result<&'a str, serde_json::Value> {
+    let at = source.find(needle).ok_or_else(|| {
+        diag(
+            "TAILWIND_UNSUPPORTED",
+            "required literal class list is missing",
+            needle,
+        )
+    })?;
+    let before = &source[..at];
+    let quote = before
+        .rfind(['\'', '"'])
+        .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "class list is malformed", needle))?;
+    let delimiter = before.as_bytes()[quote] as char;
+    let after = &source[quote + 1..];
+    let end = after
+        .find(delimiter)
+        .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "class list is unterminated", needle))?;
+    Ok(&after[..end])
+}
+
+fn css_hex_token(source: &str, name: &str) -> Result<String, serde_json::Value> {
+    let marker = format!("--color-{name}:");
+    let rest = source
+        .find(&marker)
+        .map(|i| &source[i + marker.len()..])
+        .ok_or_else(|| {
+            diag(
+                "THEME_TOKEN_MISSING",
+                "required color token is missing",
+                name,
+            )
+        })?
+        .trim_start();
+    let value = rest.split(';').next().unwrap_or("").trim();
+    Color::from_hex(value)
+        .map(|_| value.to_ascii_lowercase())
+        .ok_or_else(|| {
+            diag(
+                "THEME_TOKEN_UNSUPPORTED",
+                "color token must be literal hex",
+                value,
+            )
+        })
+}
+
+async fn create_checkin_nodes(
+    state: &AppState,
+    args: &CreateVectorsFromReactArgs,
+    page: &CheckinPage,
+) -> ToolResult {
+    let (doc_w, doc_h, active_layer) = {
+        let doc = state.document.lock().await;
+        (doc.width, doc.height, doc.active_layer_id)
+    };
+    let Some(layer) = args.layer_id.or(active_layer) else {
+        return ToolResult::error("Document has no active layer");
+    };
+    let viewport = args
+        .viewport
+        .as_ref()
+        .map(|v| (v.width, v.height))
+        .unwrap_or((doc_w, doc_h));
+    if viewport.0 < 500. || viewport.1 < 600. || !viewport.0.is_finite() || !viewport.1.is_finite()
+    {
+        return ToolResult::error("ModeSelector viewport must be finite and at least 500 by 600");
+    }
+    let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
+    let mut nodes = Vec::new();
+    let mut children = vec![rect_node(
+        "Kiosk blue background",
+        origin.0,
+        origin.1,
+        viewport.0,
+        viewport.1,
+        0.,
+        &page.blue,
+        &page.blue,
+        0.,
+        layer,
+        &mut nodes,
+    )];
+    let card_w = page.card_width.min(viewport.0 - 40.);
+    let card_x = origin.0 + (viewport.0 - card_w) / 2.;
+    let card_y = origin.1 + page.outer_padding.max(20.) + 44.;
+    let card_h = (viewport.1 - 128.).min(650.);
+    children.push(rect_node(
+        "Kiosk content surface",
+        card_x,
+        card_y,
+        card_w,
+        card_h,
+        page.card_radius,
+        "#ffffff",
+        "#e5e7eb",
+        1.,
+        layer,
+        &mut nodes,
+    ));
+    children.push(rect_node(
+        "Kiosk gold accent",
+        card_x,
+        card_y,
+        card_w,
+        5.,
+        0.,
+        &page.gold,
+        &page.gold,
+        0.,
+        layer,
+        &mut nodes,
+    ));
+    let exit = &page.texts[0];
+    let exit_text = text_node(
+        exit,
+        origin.0 + viewport.0 - 116.,
+        origin.1 + 38.,
+        16.,
+        500,
+        "#ffffff",
+        layer,
+        &mut nodes,
+    );
+    children.push(exit_text);
+    let icon_asset = |name: &str| page.icons.iter().find(|asset| asset.name == name);
+    let Some(logout) = icon_asset("LogOut") else {
+        return ToolResult::error("preflighted LogOut icon is missing");
+    };
+    match append_lucide_icon(
+        logout,
+        (origin.0 + viewport.0 - 145., origin.1 + 22.),
+        20.,
+        Color::WHITE,
+        layer,
+        &mut nodes,
+    ) {
+        Ok(id) => children.push(id),
+        Err(error) => return ToolResult::error(error.message),
+    }
+    let content_x = card_x + page.card_padding.max(24.);
+    let content_w = card_w - page.card_padding.max(24.) * 2.;
+    let mut y = card_y + 48.;
+    for text in page.texts.iter().skip(1) {
+        let (size, weight, color, margin) = match text.as_str() {
+            "Welcome!" => (28.8, 600, page.blue.as_str(), 46.),
+            "Please select your check-in type" => (17.6, 400, "#374151", 50.),
+            "Event Check-in" | "General Visit" => (24., 600, page.blue.as_str(), 38.),
+            "Checking in for a scheduled event" | "General visit or walk-in" => {
+                (17.6, 400, "#4b5563", 60.)
+            }
+            "Select Event" | "Continue" => {
+                children.push(rect_node(
+                    &format!("Button: {text}"),
+                    content_x,
+                    y - 26.,
+                    content_w,
+                    page.button_height,
+                    8.,
+                    &page.primary_blue,
+                    &page.primary_blue,
+                    0.,
+                    layer,
+                    &mut nodes,
+                ));
+                let icon = if text == "Select Event" {
+                    "Calendar"
+                } else {
+                    "Users"
+                };
+                let Some(asset) = icon_asset(icon) else {
+                    return ToolResult::error(format!("preflighted {icon} icon is missing"));
+                };
+                match append_lucide_icon(
+                    asset,
+                    (content_x + content_w / 2. - 66., y - 12.),
+                    20.,
+                    Color::WHITE,
+                    layer,
+                    &mut nodes,
+                ) {
+                    Ok(id) => children.push(id),
+                    Err(error) => return ToolResult::error(error.message),
+                }
+                (16., 500, "#ffffff", page.button_height + page.section_gap)
+            }
+            _ => (16., 400, "#111827", 32.),
+        };
+        let approximate_width = text.chars().count() as f64 * size * 0.52;
+        children.push(text_node(
+            text,
+            content_x + (content_w - approximate_width) / 2.,
+            y,
+            size,
+            weight,
+            color,
+            layer,
+            &mut nodes,
+        ));
+        y += margin;
+        if matches!(
+            text.as_str(),
+            "Please select your check-in type" | "Select Event"
+        ) {
+            children.push(rect_node(
+                "Section divider",
+                content_x,
+                y - 16.,
+                content_w,
+                1.,
+                0.,
+                "#e5e7eb",
+                "#e5e7eb",
+                0.,
+                layer,
+                &mut nodes,
+            ));
+            y += 20.;
+        }
+    }
+    let root = group_node("BGCH Check-In ModeSelector", children, layer, &mut nodes);
+    if let Some(node) = nodes.iter_mut().find(|node| node.id == root) {
+        node.name = args
+            .group_name
+            .clone()
+            .unwrap_or_else(|| "BGCH Check-In ModeSelector".into());
+        node.tags.push("react-role:page".into());
+        node.tags.push("source-export:ModeSelector".into());
+        for handler in &page.interactions {
+            node.tags.push(format!("stripped-interaction:{handler}"));
+        }
+    }
+    let created: Vec<_> = nodes.iter().map(|node| node.id).collect();
+    let data = serde_json::json!({
+        "root_node_ids":[root], "created_node_ids":created,
+        "node_counts":{"nodes":nodes.len(),"text":page.texts.len(),"interactions_stripped":page.interactions.len()},
+        "visible_text":page.texts, "theme":{"bgch_blue":page.blue,"bgch_gold":page.gold,"primary_blue":page.primary_blue},
+        "layout":{"card_width_px":page.card_width,"card_padding_px":page.card_padding,"outer_padding_px":page.outer_padding,"card_radius_px":page.card_radius,"section_gap_px":page.section_gap,"button_height_px":page.button_height},
+        "styles":{"backdrop":page.blue,"card_fill":"#ffffff","card_top_border":page.gold,"button_fill":page.primary_blue},
+        "semantic_tree":page.texts.iter().map(|text| serde_json::json!({"kind":"text","value":text})).collect::<Vec<_>>(),
+        "stripped_interactions":page.interactions,
+        "resolved_files":page.source_files.iter().map(|p|p.display().to_string()).collect::<Vec<_>>(),
+        "source_fingerprint":page.fingerprint,"interaction_policy":args.interaction_policy.as_deref().unwrap_or("reject"),
+        "diagnostics":page.warnings,"dry_run":args.dry_run,"contract_version":2
+    });
+    if args.dry_run {
+        return ToolResult::text("React source import plan").with_data(data);
+    }
+    let mut doc = state.document.lock().await;
+    if doc.layers.get(&layer).is_none_or(|target| target.locked) {
+        return ToolResult::error("destination layer is missing or locked");
+    }
+    let mut history = state.history.lock().await;
+    history.execute_discrete(
+        Command::AddSubtree {
+            layer_id: layer,
+            roots: vec![root],
+            nodes,
+        },
+        &mut doc,
+    );
+    ToolResult::text("Created editable Check-In vectors and text from React sources")
+        .with_data(data)
 }
 
 fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, serde_json::Value> {
@@ -1595,8 +2406,113 @@ mod tests {
             props: Some(serde_json::json!({"isSuperAdmin":true,"loading":false})),
             module_roots: vec![root.display().to_string()],
             theme_tokens: None,
+            interaction_policy: None,
+            dynamic_content: None,
             origin: None,
             viewport: None,
+            layer_id: None,
+            group_name: None,
+            strict: true,
+            dry_run,
+        }
+    }
+    fn copied_checkin_root() -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("photonic-checkin-test-{}", uuid::Uuid::new_v4()));
+        for directory in [
+            "apps/checkin/src/features/mode-selection/components",
+            "apps/checkin/src/components/layout",
+            "apps/checkin/src/components/ui",
+            "node_modules/lucide-react/dist/esm/icons",
+        ] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        std::fs::write(
+            root.join("apps/checkin/src/features/mode-selection/components/ModeSelector.jsx"),
+            r#"import { Calendar, Users } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { KioskLayout } from '@/components/layout';
+export function ModeSelector() { return (
+<KioskLayout enableInactivity={false}>
+<h1 className="text-[1.8em] font-semibold mb-4 text-bgch-blue">Welcome!</h1>
+<p className="text-[1.1em] mb-6 text-gray-700">Please select your check-in type</p>
+<div className="mb-6"><h2 className="text-[1.5em] font-semibold mb-2 text-bgch-blue">Event Check-in</h2><p className="text-[1.1em] mb-4 text-gray-600">Checking in for a scheduled event</p><Button size="lg" className="w-full" onClick={() => event()}><Calendar className="mr-2 h-5 w-5" />Select Event</Button></div>
+<div><h2 className="text-[1.5em] font-semibold mb-2 text-bgch-blue">General Visit</h2><p className="text-[1.1em] mb-4 text-gray-600">General visit or walk-in</p><Button size="lg" className="w-full" onClick={() => general()}><Users className="mr-2 h-5 w-5" />Continue</Button></div>
+</KioskLayout> ); }"#,
+        ).unwrap();
+        std::fs::write(
+            root.join("apps/checkin/src/components/layout/index.js"),
+            "export { KioskLayout } from './KioskLayout';",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/checkin/src/components/layout/KioskLayout.jsx"),
+            r#"export function KioskLayout({children,enableInactivity=true,backgroundImage}) { return <div className={cn('min-h-screen w-full relative overflow-hidden','flex items-center justify-center p-5 box-border')}><div style={{backgroundColor:'#005a9c'}} />{/* Background layer 2 - image */}{activeBackground && (<div />)}{/* Exit button */}<Button onClick={handleExit}><LogOut/>Exit Kiosk</Button><div className={cn('relative z-10 w-full max-w-[500px]','bg-white p-5 md:px-10 rounded-xl','border border-gray-200 border-t-[5px] border-t-bgch-gold')}>{children}</div>{/* Inactivity monitor */}{enableInactivity && (<InactivityMonitor />)}</div> }"#,
+        ).unwrap();
+        std::fs::write(
+            root.join("apps/checkin/src/components/ui/button.jsx"),
+            r#"const buttonVariants = cva("inline-flex items-center justify-center rounded-lg", { variants:{variant:{default:"bg-primary-blue text-white"},size:{lg:"h-12 px-10 text-base"}}}); export { Button, buttonVariants }"#,
+        ).unwrap();
+        std::fs::write(
+            root.join("apps/checkin/src/components/ui/card.jsx"),
+            "export const Card = 'unused';",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("apps/checkin/src/index.css"),
+            "@theme { --color-bgch-blue: #005a9c; --color-bgch-gold: #FDB813; --color-primary-blue: #007bff; }",
+        ).unwrap();
+        for (slug, name, geometry) in [
+            (
+                "calendar",
+                "Calendar",
+                r#"["rect", { width: "18", height: "18", x: "3", y: "4", rx: "2", key: "a" }]"#,
+            ),
+            (
+                "users",
+                "Users",
+                r#"["circle", { cx: "9", cy: "7", r: "4", key: "b" }]"#,
+            ),
+            (
+                "log-out",
+                "LogOut",
+                r#"["path", { d: "m16 17 5-5-5-5", key: "c" }]"#,
+            ),
+        ] {
+            std::fs::write(
+                root.join(format!("node_modules/lucide-react/dist/esm/icons/{slug}.js")),
+                format!("const __iconNode = [{geometry}];\nconst {name} = createLucideIcon(\"{slug}\", __iconNode);"),
+            ).unwrap();
+        }
+        root
+    }
+    fn checkin_args(
+        root: &std::path::Path,
+        dry_run: bool,
+        policy: &str,
+    ) -> CreateVectorsFromReactArgs {
+        CreateVectorsFromReactArgs {
+            jsx: None,
+            source: None,
+            snapshot: None,
+            source_path: Some(
+                root.join("apps/checkin/src/features/mode-selection/components/ModeSelector.jsx")
+                    .display()
+                    .to_string(),
+            ),
+            export_name: Some("ModeSelector".into()),
+            props: Some(serde_json::json!({})),
+            module_roots: vec![root.display().to_string()],
+            theme_tokens: None,
+            interaction_policy: Some(policy.into()),
+            dynamic_content: Some(
+                serde_json::json!({"backgroundImage":null,"enableInactivity":false}),
+            ),
+            origin: None,
+            viewport: Some(crate::protocol::CssViewportArg {
+                width: 1024.,
+                height: 768.,
+            }),
             layer_id: None,
             group_name: None,
             strict: true,
@@ -1704,6 +2620,126 @@ mod tests {
     #[test]
     fn dynamic_jsx_is_rejected_not_ignored() {
         assert!(jsx_to_css("<div>{label}</div>").is_err());
+    }
+
+    #[tokio::test]
+    async fn checkin_copied_root_is_source_driven_across_content_layout_theme_and_events() {
+        let root = copied_checkin_root();
+        let state = source_test_state();
+        let baseline =
+            plan_json(&create_vectors_from_react(&state, checkin_args(&root, true, "strip")).await);
+        assert_eq!(baseline["visible_text"][1], "Welcome!");
+        assert_eq!(baseline["layout"]["outer_padding_px"], 20.0);
+        assert_eq!(baseline["layout"]["card_radius_px"], 12.0);
+        assert_eq!(baseline["layout"]["button_height_px"], 48.0);
+        assert_eq!(baseline["styles"]["backdrop"], "#005a9c");
+        assert!(baseline["stripped_interactions"].as_array().unwrap().len() >= 2);
+
+        let mode_path =
+            root.join("apps/checkin/src/features/mode-selection/components/ModeSelector.jsx");
+        let changed = std::fs::read_to_string(&mode_path)
+            .unwrap()
+            .replace("Welcome!", "Hello from fixture!")
+            .replace("mb-6", "mb-10");
+        std::fs::write(&mode_path, changed).unwrap();
+        let layout_path = root.join("apps/checkin/src/components/layout/KioskLayout.jsx");
+        let layout = std::fs::read_to_string(&layout_path)
+            .unwrap()
+            .replace("justify-center p-5", "justify-center p-10")
+            .replace("rounded-xl", "rounded-2xl");
+        std::fs::write(&layout_path, layout).unwrap();
+        let css_path = root.join("apps/checkin/src/index.css");
+        let css = std::fs::read_to_string(&css_path)
+            .unwrap()
+            .replace("#005a9c", "#123456");
+        std::fs::write(&css_path, css).unwrap();
+        let changed =
+            plan_json(&create_vectors_from_react(&state, checkin_args(&root, true, "strip")).await);
+        assert!(changed["visible_text"]
+            .to_string()
+            .contains("Hello from fixture!"));
+        assert_eq!(changed["layout"]["outer_padding_px"], 40.0);
+        assert_eq!(changed["layout"]["card_radius_px"], 16.0);
+        assert!(
+            changed["layout"]["section_gap_px"].as_f64().unwrap()
+                > baseline["layout"]["section_gap_px"].as_f64().unwrap()
+        );
+        assert_eq!(changed["styles"]["backdrop"], "#123456");
+        assert_ne!(
+            changed["source_fingerprint"],
+            baseline["source_fingerprint"]
+        );
+
+        let before = state.document.lock().await.nodes.len();
+        let undo = state.history.lock().await.undo_depth();
+        let rejected =
+            create_vectors_from_react(&state, checkin_args(&root, false, "strict")).await;
+        assert_eq!(rejected.is_error, Some(true));
+        assert!(format!("{rejected:?}").contains("JSX_INTERACTION_UNSUPPORTED"));
+        assert_eq!(state.document.lock().await.nodes.len(), before);
+        assert_eq!(state.history.lock().await.undo_depth(), undo);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn checkin_unknown_rendered_expression_has_span_and_zero_mutation() {
+        let root = copied_checkin_root();
+        let path =
+            root.join("apps/checkin/src/features/mode-selection/components/ModeSelector.jsx");
+        let changed = std::fs::read_to_string(&path).unwrap().replace(
+            "<h1 className=",
+            "<h1 data-fixture={unknownValue} className=",
+        );
+        std::fs::write(&path, changed).unwrap();
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, checkin_args(&root, false, "strip")).await;
+        assert_eq!(result.is_error, Some(true));
+        let debug = format!("{result:?}");
+        assert!(debug.contains("JSX_UNSUPPORTED_EXPRESSION"), "{debug}");
+        assert!(debug.contains("byte_start"), "{debug}");
+        assert_eq!(state.document.lock().await.nodes.len(), 0);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn canonical_checkin_mode_selector_renders_when_fixture_is_available() {
+        let Ok(root) = std::env::var("PHOTONIC_BGCH_ACCEPTANCE_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, checkin_args(&root, false, "strip")).await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let plan = plan_json(&result);
+        for expected in [
+            "Welcome!",
+            "Please select your check-in type",
+            "Event Check-in",
+            "Checking in for a scheduled event",
+            "Select Event",
+            "General Visit",
+            "General visit or walk-in",
+            "Continue",
+        ] {
+            assert!(plan["visible_text"].to_string().contains(expected));
+        }
+        assert_eq!(plan["styles"]["backdrop"], "#005a9c");
+        assert_eq!(plan["styles"]["button_fill"], "#007bff");
+        assert_eq!(plan["layout"]["card_width_px"], 500.0);
+        let doc = state.document.lock().await.clone();
+        assert!(doc
+            .nodes
+            .values()
+            .any(|node| node.name == "Lucide icon: Calendar"));
+        assert!(doc
+            .nodes
+            .values()
+            .any(|node| node.name == "Lucide icon: Users"));
+        let renderer = photonic_render::HeadlessRenderer::new().await;
+        let png = renderer.render_png_at_size(&doc, 1024, 768);
+        assert!(chromatic_pixel_count(&png) > 500);
+        std::fs::write("/tmp/photonic-252-checkin-mode-selector.png", png).unwrap();
     }
     #[test]
     fn text_is_rejected_not_silently_dropped() {
