@@ -33,3 +33,19 @@ Minimum verification sequence:
 Also test the source-security boundary separately: a source outside
 `module_roots`, a changed hash, dynamic `onClick`, or an unresolved imported
 component must return structured diagnostics before document mutation.
+
+## Metamorphic (anti-template) suite
+
+`hub_app_directory_metamorphic.json` is an additional required acceptance
+suite. Its runner copies the actual component and canonical catalog to a fresh
+temporary directory, uses that directory as the sole allowed root, and makes
+one source-only change per case. The importer binary is not rebuilt or edited
+between cases. In every successful dry run, the returned plan must include a
+machine-readable `semantic_tree` (or equivalent source-mapped node list) so a
+test can prove that the changed value is present before committing artwork.
+
+The final case deliberately introduces unsupported syntax. It must produce a
+specific structured diagnostic and leave the pre-import document state byte-for-
+byte equivalent. A generic successful rendering or an image alone does not
+pass this suite: it would permit an implementation that recognizes the Hub
+filename and draws a hard-coded seven-tile template.

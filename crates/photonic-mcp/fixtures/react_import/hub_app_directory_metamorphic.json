@@ -1,0 +1,120 @@
+{
+  "fixture_version": 1,
+  "issue": 252,
+  "name": "BGCH Hub AppDirectory — source-driven metamorphic suite",
+  "setup": {
+    "copy_to_temporary_root": true,
+    "temporary_root_layout": {
+      "apps/hub/src/components/AppDirectory.jsx": "/home/josephh/Code Bases/BGCH/bgch-suite/apps/hub/src/components/AppDirectory.jsx",
+      "packages/waffle/src/suiteApps.js": "/home/josephh/Code Bases/BGCH/bgch-suite/packages/waffle/src/suiteApps.js",
+      "packages/waffle/src/filterApps.js": "/home/josephh/Code Bases/BGCH/bgch-suite/packages/waffle/src/filterApps.js",
+      "packages/waffle/src/index.js": "/home/josephh/Code Bases/BGCH/bgch-suite/packages/waffle/src/index.js"
+    },
+    "allowed_module_roots": ["<temporary_root>"],
+    "forbid_original_bgch_root": true,
+    "entry": "<temporary_root>/apps/hub/src/components/AppDirectory.jsx",
+    "export_name": "AppDirectory",
+    "props": {
+      "capabilities": [],
+      "isSuperAdmin": true,
+      "loading": false,
+      "hasAccessRecord": true
+    },
+    "viewport": { "width": 1120, "height": 720 },
+    "strict": true,
+    "dry_run_must_include": ["semantic_tree", "source_fingerprint", "resolved_files"]
+  },
+  "protocol_requirements": {
+    "preflight": "dry_run must not mutate document or history",
+    "success": "A non-dry import must be one undoable subtree operation",
+    "diagnostic": "Errors must include code, message, source_path, and a non-empty source span",
+    "semantic_tree": "Each text, image, link, and layout group reports kind, value or href/src, bounds, and source span."
+  },
+  "cases": [
+    {
+      "id": "catalog_name_description_are_not_hard_coded",
+      "mutate": {
+        "path": "packages/waffle/src/suiteApps.js",
+        "replace_once": {
+          "from": "name: 'PEOPLE',",
+          "to": "name: 'PEOPLE QA',"
+        },
+        "replace_once_2": {
+          "from": "description: 'HR & Operations',",
+          "to": "description: 'HR & Operations (fixture)',"
+        }
+      },
+      "expect_dry_run": {
+        "contains_text": ["PEOPLE QA", "HR & Operations (fixture)"],
+        "exact_text_absent": ["PEOPLE"],
+        "tile_count": 7
+      },
+      "expect_commit": {
+        "editable_text_contains": ["PEOPLE QA", "HR & Operations (fixture)"],
+        "exactly_one_undo_removes_import": true
+      }
+    },
+    {
+      "id": "catalog_order_drives_visual_order",
+      "mutate": {
+        "path": "packages/waffle/src/suiteApps.js",
+        "operation": "move_object_with_id",
+        "id": "checkin",
+        "to_index": 0
+      },
+      "expect_dry_run": {
+        "tile_names_in_paint_order": ["CHECK-IN", "PEOPLE", "VIMS", "FIRM", "LESSON", "GRANT", "PROG"],
+        "tile_count": 7
+      },
+      "expect_commit": {
+        "first_tile_text": "CHECK-IN",
+        "first_tile_href": "https://checkin.bgcharlem.org"
+      }
+    },
+    {
+      "id": "tailwind_gap_changes_layout_not_a_fixed_template",
+      "mutate": {
+        "path": "apps/hub/src/components/AppDirectory.jsx",
+        "replace_once": {
+          "from": "grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3",
+          "to": "grid grid-cols-1 gap-8 sm:grid-cols-2 lg:grid-cols-3"
+        }
+      },
+      "expect_dry_run": {
+        "layout": {
+          "columns": 3,
+          "gap_px": 32,
+          "tile_count": 7
+        },
+        "assert_vs_baseline": {
+          "gap_px_delta": 16,
+          "second_column_x_increases": true,
+          "second_row_y_increases": true
+        }
+      },
+      "expect_commit": {
+        "all_tiles_editable": true
+      }
+    },
+    {
+      "id": "unknown_syntax_is_reported_before_mutation",
+      "mutate": {
+        "path": "apps/hub/src/components/AppDirectory.jsx",
+        "replace_once": {
+          "from": "<section aria-label=\"Your apps\" className=\"space-y-6\">",
+          "to": "<section aria-label=\"Your apps\" className={buildDirectoryClass()} >"
+        }
+      },
+      "expect_dry_run": {
+        "error_code": "JSX_UNSUPPORTED_EXPRESSION",
+        "diagnostic_source_path_suffix": "apps/hub/src/components/AppDirectory.jsx",
+        "diagnostic_span_non_empty": true
+      },
+      "expect_commit": {
+        "rejected": true,
+        "document_state_equals_before": true,
+        "history_state_equals_before": true
+      }
+    }
+  ]
+}
