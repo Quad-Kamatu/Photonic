@@ -14,7 +14,7 @@ use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight};
 use photonic_core::{
     color::Color,
     history::Command,
-    node::{DropShadow, GroupNode, PathNode, SceneNode, SceneNodeKind, TextNode},
+    node::{GroupNode, PathNode, SceneNode, SceneNodeKind, TextNode},
     path::PathData,
     style::{Fill, Stroke},
     transform::Transform,
@@ -1152,14 +1152,8 @@ async fn create_checkin_nodes(
         &mut nodes,
     );
     if let Some(card) = nodes.iter_mut().find(|node| node.id == card_id) {
-        card.drop_shadow = DropShadow {
-            color: Color::BLACK,
-            opacity: 0.08,
-            dx: 0.,
-            dy: 6.,
-            blur: 24.,
-            enabled: true,
-        };
+        card.tags
+            .push("react-css:box-shadow=0_6px_24px_rgba(0,0,0,0.08)".into());
     }
     children.push(card_id);
     children.push(rounded_top_border_node(
