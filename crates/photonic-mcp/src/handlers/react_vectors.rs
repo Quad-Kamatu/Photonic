@@ -895,6 +895,61 @@ fn diag(code: &str, message: &str, value: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::McpServerConfig;
+    use photonic_core::{history::CommandHistory, AuditLog, Document};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn source_test_state() -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("t", 1120.0, 720.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+    fn copied_root() -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("photonic-react-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("apps/hub/src/components")).unwrap();
+        std::fs::create_dir_all(root.join("packages/waffle/src")).unwrap();
+        let app = "import { SUITE_APPS, filterApps } from '@bgch/waffle';\nexport function AppDirectory(){ const tiles = filterApps(apps); return <section><div className=\"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3\">{tiles.map((app) => (<AppTile key={app.id} app={app} />))}</div></section> }\n";
+        let catalog = "const ICON_ORIGIN = 'https://icons.example';\nconst SUITE_APPS = [{ id: 'a', name: 'ONE', icon: `${ICON_ORIGIN}/one.svg`, url: 'https://one.example', description: 'One' }, { id: 'b', name: 'TWO', icon: `${ICON_ORIGIN}/two.svg`, url: 'https://two.example', description: 'Two' }];\n";
+        std::fs::write(root.join("apps/hub/src/components/AppDirectory.jsx"), app).unwrap();
+        std::fs::write(root.join("packages/waffle/src/suiteApps.js"), catalog).unwrap();
+        root
+    }
+    fn source_args(root: &std::path::Path, dry_run: bool) -> CreateVectorsFromReactArgs {
+        CreateVectorsFromReactArgs {
+            jsx: None,
+            source: None,
+            snapshot: None,
+            source_path: Some(
+                root.join("apps/hub/src/components/AppDirectory.jsx")
+                    .display()
+                    .to_string(),
+            ),
+            export_name: Some("AppDirectory".into()),
+            props: Some(serde_json::json!({"isSuperAdmin":true,"loading":false})),
+            module_roots: vec![root.display().to_string()],
+            origin: None,
+            viewport: None,
+            layer_id: None,
+            group_name: None,
+            strict: true,
+            dry_run,
+        }
+    }
+    fn plan_json(result: &ToolResult) -> serde_json::Value {
+        let crate::protocol::ContentItem::Text { text } = &result.content[1] else {
+            panic!("missing JSON plan")
+        };
+        serde_json::from_str(text).unwrap()
+    }
     #[test]
     fn static_tailwind_component_becomes_css_tree() {
         let css = jsx_to_css(r#"<div className="w-[320px] h-[160px] bg-slate-900 rounded-xl"><button className="w-[120px] h-[40px] bg-blue-500 rounded" /></div>"#).unwrap();
@@ -957,5 +1012,44 @@ mod tests {
             parse_suite_apps(source).unwrap()[0].icon,
             "https://new-icons.example/a.svg"
         );
+    }
+
+    #[tokio::test]
+    async fn copied_root_source_import_is_metamorphic_and_rejection_does_not_mutate() {
+        let root = copied_root();
+        let state = source_test_state();
+        let baseline = create_vectors_from_react(&state, source_args(&root, true)).await;
+        let baseline_json = plan_json(&baseline);
+        assert_eq!(baseline_json["layout"]["gap_px"], 16.0);
+        assert!(baseline_json
+            .to_string()
+            .contains("https://icons.example/one.svg"));
+        let app_path = root.join("apps/hub/src/components/AppDirectory.jsx");
+        let app = std::fs::read_to_string(&app_path)
+            .unwrap()
+            .replace("gap-4", "gap-8");
+        std::fs::write(&app_path, app).unwrap();
+        let gap_result = create_vectors_from_react(&state, source_args(&root, true)).await;
+        assert_eq!(plan_json(&gap_result)["layout"]["gap_px"], 32.0);
+        let cat = root.join("packages/waffle/src/suiteApps.js");
+        let content = std::fs::read_to_string(&cat)
+            .unwrap()
+            .replace("https://icons.example", "https://changed.example");
+        std::fs::write(&cat, content).unwrap();
+        let icon_result = create_vectors_from_react(&state, source_args(&root, true)).await;
+        assert!(plan_json(&icon_result)
+            .to_string()
+            .contains("https://changed.example/one.svg"));
+        let bad = std::fs::read_to_string(&app_path)
+            .unwrap()
+            .replace("<section>", "<section onClick={recordClick}>");
+        std::fs::write(&app_path, bad).unwrap();
+        let before = state.document.lock().await.nodes.len();
+        let undo = state.history.lock().await.undo_depth();
+        let rejected = create_vectors_from_react(&state, source_args(&root, false)).await;
+        assert_eq!(rejected.is_error, Some(true));
+        assert_eq!(state.document.lock().await.nodes.len(), before);
+        assert_eq!(state.history.lock().await.undo_depth(), undo);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
