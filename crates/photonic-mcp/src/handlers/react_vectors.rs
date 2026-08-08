@@ -312,7 +312,9 @@ fn parse_tile_style(source: &str) -> Result<TileStyle, serde_json::Value> {
             "img",
         ));
     };
-    let title_weight = if source.contains("font-semibold") {
+    let title_weight = if source.contains("font-bold") {
+        700
+    } else if source.contains("font-semibold") {
         600
     } else {
         400
@@ -668,7 +670,9 @@ fn layout_app_directory(
     layer: uuid::Uuid,
     out: &mut Vec<SceneNode>,
 ) -> uuid::Uuid {
-    let padding = style.padding * 2.0;
+    // The section has vertical `space-y-*`, not horizontal padding; imported
+    // page bounds come directly from origin + viewport.
+    let padding = 0.0;
     let gap = layout.gap;
     let cols = if viewport.0 >= 900.0 {
         layout.desktop_columns
@@ -1169,6 +1173,32 @@ mod tests {
                 .as_deref(),
             Some("data-fixture={unknownStaticValue}")
         );
+    }
+
+    #[test]
+    fn tile_tailwind_literals_drive_style_model() {
+        let baseline = r#"<CardContent className="flex items-center gap-4 p-5"><img className="h-12 w-12 rounded-lg"/><span className="font-semibold"/><p className="text-sm"/>"#;
+        let changed = baseline
+            .replace("gap-4", "gap-8")
+            .replace("p-5", "p-8")
+            .replace("h-12 w-12", "h-16 w-16")
+            .replace("rounded-lg", "rounded-xl")
+            .replace("text-sm", "text-base")
+            .replace("font-semibold", "font-bold");
+        let a = parse_tile_style(baseline).unwrap();
+        let b = parse_tile_style(&changed).unwrap();
+        assert_eq!(a.padding, 20.);
+        assert_eq!(b.padding, 32.);
+        assert_eq!(a.content_gap, 16.);
+        assert_eq!(b.content_gap, 32.);
+        assert_eq!(a.badge, 48.);
+        assert_eq!(b.badge, 64.);
+        assert_eq!(a.radius, 8.);
+        assert_eq!(b.radius, 12.);
+        assert_eq!(a.description_size, 14.);
+        assert_eq!(b.description_size, 16.);
+        assert_eq!(a.title_weight, 600);
+        assert_eq!(b.title_weight, 700);
     }
 
     #[tokio::test]
