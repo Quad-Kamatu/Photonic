@@ -32,6 +32,16 @@ pub async fn create_vectors_from_react(
     if args.source_path.is_some() {
         return create_source_path_snapshot(state, &args).await;
     }
+    if args.source.is_some() || args.snapshot.is_some() {
+        return ToolResult::error("React source import rejected").with_data(serde_json::json!({
+            "diagnostics":[diag(
+                "SOURCE_PATH_REQUIRED",
+                "static React snapshots must name a local source_path and module_roots; inline source/snapshot input is not executable",
+                "source_path"
+            )],
+            "contract_version":2
+        }));
+    }
     let Some(jsx) = &args.jsx else {
         return ToolResult::error("provide either jsx or source plus snapshot");
     };
@@ -1045,8 +1055,8 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
         .ok_or_else(|| diag("SOURCE_PATH", "source_path is required", ""))?;
     if args.export_name.as_deref() != Some("AppDirectory") {
         return Err(diag(
-            "EXPORT_UNSUPPORTED",
-            "only the AppDirectory export is supported by this bounded parser",
+            "STATIC_BRANCH_REQUIRED",
+            "this bounded importer supports the static AppDirectory branch only; application roots with hooks, auth, or Firebase require a separately supplied static component branch",
             args.export_name.as_deref().unwrap_or(""),
         ));
     }
@@ -3244,6 +3254,49 @@ export function ModeSelector() { return (
             "imported page rendered blank ({non_white} chromatic content pixels)"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn application_root_requires_a_static_component_branch_without_mutation() {
+        let root = copied_root();
+        let app_root = root.join("apps/hub/src/App.jsx");
+        std::fs::write(
+            &app_root,
+            "import { useAuth } from './auth';\nexport function App() { const auth = useAuth(); return <main>{auth.user}</main>; }",
+        )
+        .unwrap();
+        let mut args = source_args(&root, false);
+        args.source_path = Some(app_root.display().to_string());
+        args.export_name = Some("App".into());
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, args).await;
+        assert_eq!(result.is_error, Some(true));
+        let plan = plan_json(&result);
+        let diagnostic = &plan["diagnostics"][0];
+        assert_eq!(diagnostic["code"], "STATIC_BRANCH_REQUIRED");
+        assert_eq!(diagnostic["source_path"], app_root.display().to_string());
+        assert!(diagnostic["span"]["byte_end"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(state.document.lock().await.nodes.len(), 0);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn legacy_inline_snapshot_input_is_a_structured_preflight_error() {
+        let state = source_test_state();
+        let mut args = source_args(std::path::Path::new("/tmp"), false);
+        args.source_path = None;
+        args.source = Some("export function AppDirectory() { return null; }".into());
+        args.snapshot = Some(crate::protocol::ReactSnapshotArg {
+            template: "bgch-hub-app-directory-v1".into(),
+            tiles: vec![],
+        });
+        let result = create_vectors_from_react(&state, args).await;
+        assert_eq!(result.is_error, Some(true));
+        let plan = plan_json(&result);
+        assert_eq!(plan["diagnostics"][0]["code"], "SOURCE_PATH_REQUIRED");
+        assert_eq!(state.document.lock().await.nodes.len(), 0);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
     }
 
     #[tokio::test]

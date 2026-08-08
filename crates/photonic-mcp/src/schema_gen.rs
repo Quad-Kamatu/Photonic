@@ -96,14 +96,12 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_vectors_from_react",
-            "description": "Import a bounded, static local JSX fragment using the built-in Tailwind utility subset into editable Photonic groups and vector paths. It never executes JavaScript, follows imports, or loads external Tailwind configuration. Unsupported or dynamic input is rejected before the document changes.",
+            "description": "Import a bounded, static local JSX fragment or an allowlisted local React snapshot into editable Photonic groups and vector paths. The snapshot resolver reads only explicitly bounded local modules and assets; it never executes JavaScript, fetches network resources, follows arbitrary imports, or loads external Tailwind configuration. Unsupported or dynamic input is rejected before the document changes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "jsx": { "type": "string", "description": "Static JSX fragment of intrinsic layout elements." },
-                    "source": { "type": "string", "description": "Untouched source for a supported static snapshot; parsed as text only, never executed." },
-                    "snapshot": { "type": "object", "description": "Pinned literal context. Supported template: bgch-hub-app-directory-v1; requires tiles [{name,description,color?}]." },
-                    "source_path": { "type": "string", "description": "Local module path; must be beneath module_roots." },
+                    "source_path": { "type": "string", "description": "Allowlisted local module path; it and every resolved module/asset must be beneath module_roots." },
                     "export_name": { "type": "string", "description": "Named React export to import." },
                     "props": { "type": "object", "description": "JSON-only static props snapshot." },
                     "module_roots": { "type": "array", "items": {"type":"string"}, "description": "Approved local roots for source and bounded imports." },
@@ -115,7 +113,7 @@ pub fn tool_list() -> Value {
                     "layer_id": { "type": "string" }, "group_name": { "type": "string" },
                     "strict": { "type": "boolean", "default": true }, "dry_run": { "type": "boolean", "default": false }
                 },
-                "anyOf": [{"required":["jsx"]},{"required":["source","snapshot"]},{"required":["source_path","export_name","props","module_roots"]}]
+                "anyOf": [{"required":["jsx"]},{"required":["source_path","export_name","props","module_roots"]}]
             }
         },
         {
