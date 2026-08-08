@@ -182,11 +182,11 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
             "className={…}",
         ));
     }
-    if text.contains("onClick={") || text.contains("onChange={") || text.contains("onSubmit={") {
+    if let Some(token) = unsupported_attribute_expression(&text) {
         return Err(diag(
             "JSX_UNSUPPORTED_EXPRESSION",
-            "event handler expressions are not supported",
-            "onEvent={…}",
+            "JSX attribute expressions are not supported by this static importer",
+            &token,
         ));
     }
     let required = [
@@ -240,9 +240,16 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
 }
 
 fn parse_grid_layout(source: &str) -> Result<LayoutSpec, serde_json::Value> {
-    // The non-loading branch is the last grid in AppDirectory; earlier grids
-    // belong to the loading skeleton and are not selected by these props.
-    let start = source.rfind("className=\"grid ").ok_or_else(|| {
+    // Bind to the grid in the successful `tiles.map` branch rather than any
+    // loading/skeleton or later unrelated grid in the module.
+    let branch = source.rfind("tiles.map").ok_or_else(|| {
+        diag(
+            "JSX_UNSUPPORTED",
+            "missing tiles.map success branch",
+            "tiles.map",
+        )
+    })?;
+    let start = source[..branch].rfind("className=\"grid ").ok_or_else(|| {
         diag(
             "TAILWIND_UNSUPPORTED",
             "AppDirectory requires a literal grid className",
@@ -278,6 +285,34 @@ fn parse_grid_layout(source: &str) -> Result<LayoutSpec, serde_json::Value> {
             )
         })?,
     })
+}
+
+fn unsupported_attribute_expression(source: &str) -> Option<String> {
+    let mut rest = source;
+    while let Some(offset) = rest.find("={") {
+        let before = &rest[..offset];
+        let name_start = before
+            .rfind(|c: char| c.is_whitespace() || c == '<')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let name = &before[name_start..];
+        let after = &rest[offset + 2..];
+        let close = after.find('}')?;
+        // These three references are the exact values consumed by the
+        // catalog-to-tile lowering; every other attribute expression fails.
+        if matches!(
+            (name, &after[..close]),
+            ("href", "app.url") | ("src", "app.icon") | ("key", "app.id") | ("app", "app")
+        ) {
+            rest = &after[close + 1..];
+            continue;
+        }
+        if !name.is_empty() {
+            return Some(format!("{}={{{}}}", name, &after[..close]));
+        }
+        rest = &after[close + 1..];
+    }
+    None
 }
 fn tailwind_space(token: &str) -> Result<f64, serde_json::Value> {
     token
@@ -992,7 +1027,8 @@ mod tests {
 
     #[test]
     fn literal_tailwind_gap_drives_layout_spec() {
-        let baseline = r#"<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">"#;
+        let baseline =
+            r#"<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">{tiles.map("#;
         let changed = baseline.replace("gap-4", "gap-8");
         assert_eq!(parse_grid_layout(baseline).unwrap().gap, 16.0);
         assert_eq!(parse_grid_layout(&changed).unwrap().gap, 32.0);
@@ -1001,7 +1037,7 @@ mod tests {
 
     #[test]
     fn last_grid_is_the_active_non_loading_grid() {
-        let source = r#"<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"><div className="grid grid-cols-1 gap-8 sm:grid-cols-2 lg:grid-cols-3">"#;
+        let source = r#"<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"><div className="grid grid-cols-1 gap-8 sm:grid-cols-2 lg:grid-cols-3">{tiles.map("#;
         assert_eq!(parse_grid_layout(source).unwrap().gap, 32.0);
     }
 
@@ -1020,7 +1056,7 @@ mod tests {
         let state = source_test_state();
         let baseline = create_vectors_from_react(&state, source_args(&root, true)).await;
         let baseline_json = plan_json(&baseline);
-        assert_eq!(baseline_json["layout"]["gap_px"], 16.0);
+        assert_eq!(baseline_json["layout"]["gap_px"], 16.0, "{baseline_json}");
         assert!(baseline_json
             .to_string()
             .contains("https://icons.example/one.svg"));
