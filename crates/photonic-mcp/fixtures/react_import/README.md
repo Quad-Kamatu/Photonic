@@ -49,3 +49,19 @@ specific structured diagnostic and leave the pre-import document state byte-for-
 byte equivalent. A generic successful rendering or an image alone does not
 pass this suite: it would permit an implementation that recognizes the Hub
 filename and draws a hard-coded seven-tile template.
+
+## Second-app gate: CHECK-IN ModeSelector
+
+`checkin_mode_selector.json` and its metamorphic companion extend acceptance to
+an unrelated app and component shape. The untouched entry must resolve
+`KioskLayout`, `Button`, Lucide icons, and CHECK-IN theme tokens under a bounded
+local root. Interactions use the explicit `strip` policy; dynamic backgrounds
+and inactivity behavior are absent from the snapshot.
+
+The metamorphic cases copy sources to a fresh temporary root, then alter text,
+section order, Tailwind spacing/radius, component classes, and CSS variables.
+The plan and editable document must follow every change without rebuilding the
+importer. `strict` interaction handling, rendered unknown expressions, missing
+imports, and outside-root imports must diagnose before document/history
+mutation. This second-app gate is mandatory specifically to catch a
+component-name switch that returns prebuilt ModeSelector artwork.

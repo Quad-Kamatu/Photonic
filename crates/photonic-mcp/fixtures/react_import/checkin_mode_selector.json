@@ -1,0 +1,66 @@
+{
+  "fixture_version": 1,
+  "issue": 252,
+  "name": "CHECK-IN ModeSelector static snapshot",
+  "source": {
+    "path": "/home/josephh/Code Bases/BGCH/bgch-suite/apps/checkin/src/features/mode-selection/components/ModeSelector.jsx",
+    "sha256": "a85830caf0a265e5b05a2723d731ecdfedc76e87b8aa612eb322809ab20ee458",
+    "export": "ModeSelector"
+  },
+  "dependency_hashes": {
+    "apps/checkin/src/components/layout/KioskLayout.jsx": "024a7a3f4ba332085496831684d3c097b45614897bad5afb9d3928c9a91873eb",
+    "apps/checkin/src/components/ui/button.jsx": "8f803a9ccf9edb510b97d5cadd3b1e1d55de9c487ae3a6ef96ccacaa1df91ee7",
+    "apps/checkin/src/components/ui/card.jsx": "912ed70f54d43838b23d314268bda72bea4a580725e36dae461cd9dea6754b73",
+    "apps/checkin/src/index.css": "2050465651b6ba5dbd74ce43475a9241f8334dc3cdd5c666a6371392f231e69d"
+  },
+  "request": {
+    "tool": "create_vectors_from_react",
+    "arguments": {
+      "source_path": "/home/josephh/Code Bases/BGCH/bgch-suite/apps/checkin/src/features/mode-selection/components/ModeSelector.jsx",
+      "export_name": "ModeSelector",
+      "props": {},
+      "module_roots": ["/home/josephh/Code Bases/BGCH/bgch-suite"],
+      "viewport": { "width": 1024, "height": 768 },
+      "interaction_policy": "strip",
+      "dynamic_content": { "backgroundImage": null, "enableInactivity": false },
+      "strict": true,
+      "dry_run": false
+    }
+  },
+  "assertions": {
+    "visual": {
+      "full_viewport_background": "#005a9c",
+      "centered_card": true,
+      "card_max_width_px": 500,
+      "card_fill": "#ffffff",
+      "card_radius_px": 12,
+      "card_top_border_px": 5,
+      "card_top_border_color": "#FDB813",
+      "section_count": 2,
+      "full_width_button_count": 2,
+      "button_fill": "#007bff",
+      "exit_control": "present_if_emitted_by_KioskLayout"
+    },
+    "required_text_in_order": [
+      "Welcome!",
+      "Please select your check-in type",
+      "Event Check-in",
+      "Checking in for a scheduled event",
+      "Select Event",
+      "General Visit",
+      "General visit or walk-in",
+      "Continue"
+    ],
+    "required_icons": ["Calendar", "Users"],
+    "forbidden_dynamic_content": ["backgroundImage", "InactivityMonitor"],
+    "all_visible_nodes_editable": true,
+    "single_undo_removes_entire_import": true,
+    "dry_run_must_include": ["semantic_tree", "source_fingerprint", "resolved_files", "layout", "styles", "stripped_interactions"]
+  },
+  "safety": {
+    "no_javascript_execution": true,
+    "no_network_fetch": true,
+    "resolved_files_under_module_roots": true,
+    "preflight_failure_zero_document_and_history_mutation": true
+  }
+}
