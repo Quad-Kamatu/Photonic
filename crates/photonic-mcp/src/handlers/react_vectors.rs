@@ -908,15 +908,40 @@ fn append_svg_asset(
     layer: uuid::Uuid,
     out: &mut Vec<SceneNode>,
 ) -> uuid::Uuid {
+    let scale = (size / asset.document.width).min(size / asset.document.height);
+    let tx = origin.0 + (size - asset.document.width * scale) / 2.0;
+    let ty = origin.1 + (size - asset.document.height * scale) / 2.0;
+    let placement = Transform::new(scale, 0.0, 0.0, scale, tx, ty);
     let mut id_map = HashMap::new();
     for old_id in asset.document.nodes.keys() {
         id_map.insert(*old_id, uuid::Uuid::new_v4());
     }
-    for old_node in asset.document.nodes.values() {
+    let source_roots: Vec<_> = asset
+        .document
+        .layer_order
+        .iter()
+        .filter_map(|layer_id| asset.document.layers.get(layer_id))
+        .flat_map(|source_layer| source_layer.node_ids.iter().copied())
+        .collect();
+    let mut transforms = HashMap::new();
+    let mut import_order = Vec::new();
+    for root in &source_roots {
+        collect_svg_transforms(
+            &asset.document,
+            *root,
+            placement,
+            &mut transforms,
+            &mut import_order,
+        );
+    }
+    for old_id in import_order {
+        let old_node = &asset.document.nodes[&old_id];
         let mut node = old_node.clone();
         node.id = id_map[&old_node.id];
         node.layer_id = layer;
+        node.transform = transforms[&old_node.id];
         if let SceneNodeKind::Group(group) = &mut node.kind {
+            node.transform = Transform::IDENTITY;
             group.children = group
                 .children
                 .iter()
@@ -927,17 +952,10 @@ fn append_svg_asset(
         }
         out.push(node);
     }
-    let roots: Vec<_> = asset
-        .document
-        .layer_order
+    let roots: Vec<_> = source_roots
         .iter()
-        .filter_map(|layer_id| asset.document.layers.get(layer_id))
-        .flat_map(|source_layer| source_layer.node_ids.iter())
         .filter_map(|id| id_map.get(id).copied())
         .collect();
-    let scale = (size / asset.document.width).min(size / asset.document.height);
-    let tx = origin.0 + (size - asset.document.width * scale) / 2.0;
-    let ty = origin.1 + (size - asset.document.height * scale) / 2.0;
     let mut group = GroupNode::new();
     group.children = roots;
     let mut node = SceneNode::new(
@@ -945,7 +963,6 @@ fn append_svg_asset(
         layer,
         SceneNodeKind::Group(group),
     );
-    node.transform = Transform::new(scale, 0.0, 0.0, scale, tx, ty);
     node.tags.push("react-role:image".into());
     node.tags.push(format!("source:{source_url}"));
     node.tags
@@ -953,6 +970,33 @@ fn append_svg_asset(
     let id = node.id;
     out.push(node);
     id
+}
+
+/// Photonic currently flattens groups for draw order without composing parent
+/// transforms. Bake every SVG ancestor transform plus the icon placement into
+/// each imported leaf while leaving all imported groups at identity. If native
+/// group-transform rendering is added later, descendants will not be doubled.
+fn collect_svg_transforms(
+    document: &Document,
+    node_id: uuid::Uuid,
+    parent: Transform,
+    transforms: &mut HashMap<uuid::Uuid, Transform>,
+    order: &mut Vec<uuid::Uuid>,
+) {
+    if transforms.contains_key(&node_id) {
+        return;
+    }
+    let Some(node) = document.nodes.get(&node_id) else {
+        return;
+    };
+    let world = parent.then(&node.transform);
+    transforms.insert(node_id, world);
+    order.push(node_id);
+    if let SceneNodeKind::Group(group) = &node.kind {
+        for child in &group.children {
+            collect_svg_transforms(document, *child, world, transforms, order);
+        }
+    }
 }
 
 fn rect_node(
@@ -1470,7 +1514,35 @@ mod tests {
                 >= 4
         );
         assert!(!doc.nodes.values().any(|node| node.name == "App badge"));
+        let icon = doc
+            .nodes
+            .values()
+            .find(|node| node.name == "App icon: ONE")
+            .unwrap();
+        let SceneNodeKind::Group(icon_group) = &icon.kind else {
+            unreachable!()
+        };
+        let icon_path = &doc.nodes[&icon_group.children[0]];
+        let bounds = icon_path.local_bounds().unwrap();
+        let corners = [
+            icon_path.transform.apply(bounds.x0, bounds.y0),
+            icon_path.transform.apply(bounds.x1, bounds.y1),
+        ];
+        assert!(corners[0].0 >= 20.0 && corners[0].1 >= 20.0, "{corners:?}");
+        assert!(corners[1].0 <= 68.0 && corners[1].1 <= 68.0, "{corners:?}");
+        let rendered_doc = doc.clone();
         drop(doc);
+        let renderer = photonic_render::HeadlessRenderer::new().await;
+        let png = renderer.render_png_at_size(&rendered_doc, 560, 360);
+        let pixels = image::load_from_memory(&png).unwrap().to_rgba8();
+        let non_white = pixels
+            .pixels()
+            .filter(|pixel| pixel[3] > 200 && pixel.0[..3].iter().any(|channel| *channel < 240))
+            .count();
+        assert!(
+            non_white > 100,
+            "imported page rendered blank ({non_white} opaque content pixels)"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
