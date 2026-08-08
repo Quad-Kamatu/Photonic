@@ -95,6 +95,21 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "create_vectors_from_react",
+            "description": "Import a bounded, static local JSX fragment using the built-in Tailwind utility subset into editable Photonic groups and vector paths. It never executes JavaScript, follows imports, or loads external Tailwind configuration. Unsupported or dynamic input is rejected before the document changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "jsx": { "type": "string", "description": "Static JSX fragment of intrinsic layout elements. Supported Tailwind utilities: w-[Npx], h-[Npx], w-full, h-full, bg-{white,black,slate-900,slate-100,blue-500,indigo-600,emerald-500,red-500}, rounded variants, border, opacity." },
+                    "origin": { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } },
+                    "viewport": { "type": "object", "properties": { "width": {"type":"number"}, "height": {"type":"number"} } },
+                    "layer_id": { "type": "string" }, "group_name": { "type": "string" },
+                    "strict": { "type": "boolean", "default": true }, "dry_run": { "type": "boolean", "default": false }
+                },
+                "required": ["jsx"]
+            }
+        },
+        {
             "name": "create_flare",
             "description": "Create a procedural lens flare vector effect at the specified position. Generates a grouped set of paths: a semi-transparent halo circle, radiating ray triangles, and concentric stroke rings.\n\nAll parts are grouped as 'Lens Flare'. Useful for light effects, sparkle decorations, and sci-fi/fantasy illustrations.",
             "inputSchema": {

@@ -37,6 +37,27 @@ fn default_css_strict() -> bool {
     true
 }
 
+/// Arguments for the bounded JSX + Tailwind component importer (#252).
+/// This is deliberately source-only: it never evaluates JavaScript, follows
+/// imports, or loads a Tailwind configuration from the host machine.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateVectorsFromReactArgs {
+    /// A static JSX fragment containing intrinsic HTML elements only.
+    pub jsx: String,
+    #[serde(default)]
+    pub origin: Option<CssPointArg>,
+    #[serde(default)]
+    pub viewport: Option<CssViewportArg>,
+    #[serde(default)]
+    pub layer_id: Option<Uuid>,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default = "default_css_strict")]
+    pub strict: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 /// Arguments for the `set_paint` tool — apply one paint to many nodes at once,
 /// each re-fit to its own bounding box (issue #202). The paint uses the same
 /// object shape as `fill`; a gradient may set `"units": "bbox"` with 0–1 coords

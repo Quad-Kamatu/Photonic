@@ -20,6 +20,7 @@ pub mod layers;
 pub mod nodes;
 pub mod pathfinder;
 pub mod raster;
+pub mod react_vectors;
 pub mod selection;
 pub mod shapes;
 pub(crate) mod shared;
