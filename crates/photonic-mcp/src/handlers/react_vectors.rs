@@ -1229,6 +1229,20 @@ mod tests {
         assert_eq!(b.title_weight, 700);
     }
 
+    #[test]
+    fn explicit_theme_tokens_drive_paints() {
+        let mut args = source_args(std::path::Path::new("/tmp"), true);
+        args.theme_tokens = Some(crate::protocol::ReactThemeTokensArg {
+            card: Some("#112233".into()),
+            foreground: Some("#445566".into()),
+            muted_foreground: Some("#778899".into()),
+        });
+        let parsed = theme(&args).unwrap();
+        assert_eq!(parsed.card, "#112233");
+        assert_eq!(parsed.foreground, "#445566");
+        assert_eq!(parsed.muted, "#778899");
+    }
+
     #[tokio::test]
     async fn copied_root_source_import_is_metamorphic_and_rejection_does_not_mutate() {
         let root = copied_root();

@@ -82,11 +82,7 @@ pub struct CreateVectorsFromReactArgs {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReactThemeTokensArg {
     #[serde(default)]
-    pub background: Option<String>,
-    #[serde(default)]
     pub card: Option<String>,
-    #[serde(default)]
-    pub border: Option<String>,
     #[serde(default)]
     pub foreground: Option<String>,
     #[serde(default)]
