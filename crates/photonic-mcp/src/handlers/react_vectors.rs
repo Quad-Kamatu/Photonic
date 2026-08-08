@@ -182,7 +182,12 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
             "className={…}",
         ));
     }
-    if let Some(token) = unsupported_attribute_expression(&text) {
+    // This supplied snapshot has loading=false, super-admin=true and a
+    // non-empty literal catalog. The Alert/EmptyState branches are therefore
+    // statically unreachable; remove only their known component tags before
+    // validating rendered attribute expressions.
+    let rendered = strip_unreachable_branches(&text);
+    if let Some(token) = unsupported_attribute_expression(&rendered) {
         return Err(diag(
             "JSX_UNSUPPORTED_EXPRESSION",
             "JSX attribute expressions are not supported by this static importer",
@@ -237,6 +242,20 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
         resolved_files: vec![source.display().to_string(), catalog.display().to_string()],
         fingerprint: source_fingerprint(&text, &catalog_text),
     })
+}
+
+fn strip_unreachable_branches(source: &str) -> String {
+    let mut out = source.to_string();
+    // EmptyState is a self-closing component in the bounded AppDirectory
+    // grammar. Keep this narrowly scoped: arbitrary component expressions are
+    // not silently accepted elsewhere.
+    while let Some(start) = out.find("<EmptyState") {
+        let Some(end) = out[start..].find("/>") else {
+            break;
+        };
+        out.replace_range(start..start + end + 2, "");
+    }
+    out
 }
 
 fn parse_grid_layout(source: &str) -> Result<LayoutSpec, serde_json::Value> {
@@ -1047,6 +1066,21 @@ mod tests {
         assert_eq!(
             parse_suite_apps(source).unwrap()[0].icon,
             "https://new-icons.example/a.svg"
+        );
+    }
+
+    #[test]
+    fn unreachable_empty_state_expression_is_not_scanned() {
+        let source = "<section><EmptyState icon={AlertCircle} title=\"none\" /><div className=\"grid\">{tiles.map(";
+        assert!(unsupported_attribute_expression(&strip_unreachable_branches(source)).is_none());
+    }
+
+    #[test]
+    fn rendered_unknown_attribute_expression_is_scanned() {
+        assert_eq!(
+            unsupported_attribute_expression("<section data-fixture={unknownStaticValue}>")
+                .as_deref(),
+            Some("data-fixture={unknownStaticValue}")
         );
     }
 
