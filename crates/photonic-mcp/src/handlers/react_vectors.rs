@@ -86,11 +86,14 @@ async fn create_source_path_snapshot(
         Ok(parsed) => parsed,
         Err(mut d) => {
             if let Some(object) = d.as_object_mut() {
-                object.insert("source_path".into(), serde_json::json!(args.source_path));
-                object.insert(
-                    "span".into(),
-                    serde_json::json!({"byte_start":0,"byte_end":1,"line_start":1,"line_end":1}),
-                );
+                let path = args.source_path.as_deref().unwrap_or("");
+                let needle = object
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                object.insert("source_path".into(), serde_json::json!(path));
+                object.insert("span".into(), actual_span(path, &needle));
             }
             return ToolResult::error("React source import rejected")
                 .with_data(serde_json::json!({"diagnostics":[d],"contract_version":2}));
@@ -109,6 +112,20 @@ async fn create_source_path_snapshot(
         return ToolResult::error("React source import rejected").with_data(serde_json::json!({"diagnostics":[diag("SNAPSHOT_PROPS", "only the pinned AppDirectory super-admin non-loading snapshot is supported", "props")],"contract_version":2}));
     }
     create_snapshot_nodes(state, args, &parsed, "React source snapshot").await
+}
+
+fn actual_span(path: &str, needle: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let start = if needle.is_empty() {
+        0
+    } else {
+        text.find(needle).unwrap_or(0)
+    };
+    let end = (start + needle.len().max(1)).min(text.len());
+    let line = |offset: usize| text[..offset].bytes().filter(|b| *b == b'\n').count() + 1;
+    let column =
+        |offset: usize| offset - text[..offset].rfind('\n').map(|n| n + 1).unwrap_or(0) + 1;
+    serde_json::json!({"byte_start":start,"byte_end":end,"line_start":line(start),"column_start":column(start),"line_end":line(end),"column_end":column(end)})
 }
 
 fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, serde_json::Value> {
