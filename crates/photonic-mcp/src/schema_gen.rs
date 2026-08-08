@@ -77,6 +77,24 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "create_vectors_from_css",
+            "description": "Compile a bounded CSS snippet into editable Photonic groups and vector paths. Strict mode (the default) rejects unsupported/lossy CSS without mutation; dry_run returns the deterministic plan without changing the document.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "css": { "type": "string", "description": "Inline declaration block or supported selector tree." },
+                    "selector": { "type": "string", "description": "Optional virtual root selector." },
+                    "origin": { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } },
+                    "viewport": { "type": "object", "properties": { "width": {"type":"number"}, "height": {"type":"number"} } },
+                    "layer_id": { "type": "string" },
+                    "group_name": { "type": "string" },
+                    "strict": { "type": "boolean", "default": true },
+                    "dry_run": { "type": "boolean", "default": false }
+                },
+                "required": ["css"]
+            }
+        },
+        {
             "name": "create_flare",
             "description": "Create a procedural lens flare vector effect at the specified position. Generates a grouped set of paths: a semi-transparent halo circle, radiating ray triangles, and concentric stroke rings.\n\nAll parts are grouped as 'Lens Flare'. Useful for light effects, sparkle decorations, and sci-fi/fantasy illustrations.",
             "inputSchema": {

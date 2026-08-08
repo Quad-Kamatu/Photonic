@@ -180,6 +180,13 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::nodes::create_path(state, a).await,
             ))
         }
+        "create_vectors_from_css" => {
+            let a: CreateVectorsFromCssArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::css_vectors::create_vectors_from_css(state, a).await,
+            ))
+        }
         "create_curvature_path" => {
             let a: CreateCurvaturePathArgs =
                 serde_json::from_value(args).map_err(|e| e.to_string())?;
