@@ -72,6 +72,17 @@ struct ParsedPage {
     layout: LayoutSpec,
     resolved_files: Vec<String>,
     fingerprint: String,
+    tile_style: TileStyle,
+}
+#[derive(Debug, Clone)]
+struct TileStyle {
+    padding: f64,
+    content_gap: f64,
+    badge: f64,
+    radius: f64,
+    title_size: f64,
+    title_weight: u16,
+    description_size: f64,
 }
 
 /// Safe, source-driven entry point for the first bounded static React page.
@@ -235,12 +246,86 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
         )
     })?;
     let layout = parse_grid_layout(&text)?;
+    let tile_style = parse_tile_style(&text)?;
     let tiles = parse_suite_apps(&catalog_text)?;
     Ok(ParsedPage {
         tiles,
         layout,
         resolved_files: vec![source.display().to_string(), catalog.display().to_string()],
         fingerprint: source_fingerprint(&text, &catalog_text),
+        tile_style,
+    })
+}
+
+fn parse_tile_style(source: &str) -> Result<TileStyle, serde_json::Value> {
+    let content = source
+        .find("className=\"flex items-center")
+        .map(|i| &source[i..])
+        .ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "missing literal CardContent layout classes",
+                "CardContent",
+            )
+        })?;
+    let end = content
+        .find('"')
+        .and_then(|i| content[i + 11..].find('"').map(|j| i + 11 + j))
+        .ok_or_else(|| {
+            diag(
+                "JSX_UNSUPPORTED",
+                "unterminated CardContent className",
+                "CardContent",
+            )
+        })?;
+    let classes = &content[11..end];
+    let space = |prefix: &str| {
+        classes
+            .split_whitespace()
+            .find_map(|c| c.strip_prefix(prefix))
+            .map(tailwind_space)
+            .transpose()
+    };
+    let padding = space("p-")?
+        .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "CardContent requires p-N", "p"))?;
+    let content_gap = space("gap-")?
+        .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "CardContent requires gap-N", "gap"))?;
+    let badge = source
+        .contains("h-12 w-12")
+        .then_some(48.)
+        .or_else(|| source.contains("h-16 w-16").then_some(64.))
+        .ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "icon requires matching h-N w-N",
+                "img",
+            )
+        })?;
+    let radius = if source.contains("rounded-lg") {
+        8.
+    } else if source.contains("rounded-xl") {
+        12.
+    } else {
+        return Err(diag(
+            "TAILWIND_UNSUPPORTED",
+            "icon requires rounded-lg/xl",
+            "img",
+        ));
+    };
+    let title_weight = if source.contains("font-semibold") {
+        600
+    } else {
+        400
+    };
+    let description_size = if source.contains("text-sm") { 14. } else { 16. };
+    Ok(TileStyle {
+        padding,
+        content_gap,
+        badge,
+        radius,
+        title_size: 16.,
+        title_weight,
+        description_size,
     })
 }
 
@@ -546,6 +631,7 @@ async fn create_snapshot_nodes(
     let root = layout_app_directory(
         &parsed.tiles,
         &parsed.layout,
+        &parsed.tile_style,
         origin,
         viewport,
         layer_id,
@@ -558,7 +644,7 @@ async fn create_snapshot_nodes(
     let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
     let text_count = parsed.tiles.len() * 2 + 1;
     let semantic_tree: Vec<_> = parsed.tiles.iter().map(|tile| serde_json::json!({"kind":"link","href":tile.url,"children":[{"kind":"image","src":tile.icon},{"kind":"text","value":tile.name},{"kind":"text","value":tile.description}]})).collect();
-    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
+    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap,"tile_padding":parsed.tile_style.padding,"badge_px":parsed.tile_style.badge,"radius_px":parsed.tile_style.radius},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
     if args.dry_run {
         return ToolResult::text("React source import plan").with_data(data);
     }
@@ -576,12 +662,13 @@ async fn create_snapshot_nodes(
 fn layout_app_directory(
     tiles: &[ImportedTile],
     layout: &LayoutSpec,
+    style: &TileStyle,
     origin: (f64, f64),
     viewport: (f64, f64),
     layer: uuid::Uuid,
     out: &mut Vec<SceneNode>,
 ) -> uuid::Uuid {
-    let padding = 28.0;
+    let padding = style.padding * 2.0;
     let gap = layout.gap;
     let cols = if viewport.0 >= 900.0 {
         layout.desktop_columns
@@ -591,7 +678,7 @@ fn layout_app_directory(
         1
     };
     let card_w = (viewport.0 - padding * 2.0 - gap * (cols - 1) as f64) / cols as f64;
-    let card_h = 104.0;
+    let card_h = style.badge + style.padding * 2.0;
     let mut children = Vec::new();
     for (i, tile) in tiles.iter().enumerate() {
         let col = i % cols;
@@ -605,18 +692,18 @@ fn layout_app_directory(
                 y,
                 card_w,
                 card_h,
-                12.0,
+                style.radius,
                 "#ffffff",
                 layer,
                 out,
             ),
             rect_node(
                 "App badge",
-                x + 20.0,
-                y + 28.0,
-                48.0,
-                48.0,
-                8.0,
+                x + style.padding,
+                y + style.padding,
+                style.badge,
+                style.badge,
+                style.radius,
                 badge_color(&tile.icon),
                 layer,
                 out,
@@ -628,19 +715,19 @@ fn layout_app_directory(
         }
         card_children.push(text_node(
             &tile.name,
-            x + 84.0,
-            y + 42.0,
-            16.0,
-            600,
+            x + style.padding + style.badge + style.content_gap,
+            y + style.padding + 14.0,
+            style.title_size,
+            style.title_weight,
             "#172033",
             layer,
             out,
         ));
         card_children.push(text_node(
             &tile.description,
-            x + 84.0,
-            y + 67.0,
-            12.0,
+            x + style.padding + style.badge + style.content_gap,
+            y + style.padding + 14.0 + style.title_size + 5.0,
+            style.description_size,
             400,
             "#64748b",
             layer,
@@ -971,7 +1058,7 @@ mod tests {
             std::env::temp_dir().join(format!("photonic-react-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("apps/hub/src/components")).unwrap();
         std::fs::create_dir_all(root.join("packages/waffle/src")).unwrap();
-        let app = "import { SUITE_APPS, filterApps } from '@bgch/waffle';\nexport function AppDirectory(){ const tiles = filterApps(apps); return <section><div className=\"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3\">{tiles.map((app) => (<AppTile key={app.id} app={app} />))}</div></section> }\n";
+        let app = "import { SUITE_APPS, filterApps } from '@bgch/waffle';\nfunction AppTile(){return <CardContent className=\"flex items-center gap-4 p-5\"><img className=\"h-12 w-12 rounded-lg\"/><span className=\"font-semibold\"/><p className=\"text-sm\"/></CardContent>}\nexport function AppDirectory(){ const tiles = filterApps(apps); return <section><div className=\"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3\">{tiles.map((app) => (<AppTile key={app.id} app={app} />))}</div></section> }\n";
         let catalog = "const ICON_ORIGIN = 'https://icons.example';\nconst SUITE_APPS = [{ id: 'a', name: 'ONE', icon: `${ICON_ORIGIN}/one.svg`, url: 'https://one.example', description: 'One' }, { id: 'b', name: 'TWO', icon: `${ICON_ORIGIN}/two.svg`, url: 'https://two.example', description: 'Two' }];\n";
         std::fs::write(root.join("apps/hub/src/components/AppDirectory.jsx"), app).unwrap();
         std::fs::write(root.join("packages/waffle/src/suiteApps.js"), catalog).unwrap();
