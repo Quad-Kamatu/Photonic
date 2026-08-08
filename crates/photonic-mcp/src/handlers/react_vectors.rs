@@ -939,7 +939,23 @@ fn append_svg_asset(
         let mut node = old_node.clone();
         node.id = id_map[&old_node.id];
         node.layer_id = layer;
-        node.transform = transforms[&old_node.id];
+        let world = transforms[&old_node.id];
+        node.transform = world;
+        node.transform_user_space_gradients(&world);
+        if let SceneNodeKind::Path(path) = &mut node.kind {
+            // Photonic strokes are intentionally non-scaling: the renderer
+            // cancels the node transform's determinant. SVG strokes scale with
+            // their element/viewBox, so bake that scale into stroke metrics.
+            let [a, b, c, d, _, _] = world.matrix;
+            let stroke_scale = (a * d - b * c).abs().sqrt();
+            if path.stroke.enabled && stroke_scale.is_finite() {
+                path.stroke.width *= stroke_scale;
+                path.stroke.dash_offset *= stroke_scale;
+                for dash in &mut path.stroke.dash_array {
+                    *dash *= stroke_scale;
+                }
+            }
+        }
         if let SceneNodeKind::Group(group) = &mut node.kind {
             node.transform = Transform::IDENTITY;
             group.children = group
@@ -965,6 +981,8 @@ fn append_svg_asset(
     );
     node.tags.push("react-role:image".into());
     node.tags.push(format!("source:{source_url}"));
+    node.tags
+        .push(format!("react-icon-box:{},{},{}", origin.0, origin.1, size));
     node.tags
         .push(format!("source-file:{}", asset.path.display()));
     let id = node.id;
@@ -1298,7 +1316,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("apps/core/public/two-icon.svg"),
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"><g><path d="M0 0 L20 0 L20 10 Z" fill="#00ff00"/></g></svg>"##,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"><g transform="translate(2 1)"><path d="M0 4 L16 4" fill="none" stroke="#00ff00" stroke-width="4"/></g></svg>"##,
         )
         .unwrap();
         root
@@ -1330,6 +1348,80 @@ mod tests {
             panic!("missing JSON plan")
         };
         serde_json::from_str(text).unwrap()
+    }
+    fn assert_all_icon_leaves_fit(doc: &Document) {
+        fn leaves(doc: &Document, id: uuid::Uuid, out: &mut Vec<uuid::Uuid>) {
+            let node = &doc.nodes[&id];
+            if let SceneNodeKind::Group(group) = &node.kind {
+                for child in &group.children {
+                    leaves(doc, *child, out);
+                }
+            } else {
+                out.push(id);
+            }
+        }
+        let icons: Vec<_> = doc
+            .nodes
+            .values()
+            .filter(|node| node.name.starts_with("App icon: "))
+            .collect();
+        assert!(!icons.is_empty());
+        for icon in icons {
+            let encoded = icon
+                .tags
+                .iter()
+                .find_map(|tag| tag.strip_prefix("react-icon-box:"))
+                .unwrap();
+            let values: Vec<f64> = encoded
+                .split(',')
+                .map(|value| value.parse().unwrap())
+                .collect();
+            let (box_x, box_y, size) = (values[0], values[1], values[2]);
+            let mut ids = Vec::new();
+            leaves(doc, icon.id, &mut ids);
+            assert!(!ids.is_empty(), "{} has no leaves", icon.name);
+            for id in ids {
+                let node = &doc.nodes[&id];
+                let Some(bounds) = node.local_bounds() else {
+                    continue;
+                };
+                let corners = [
+                    node.transform.apply(bounds.x0, bounds.y0),
+                    node.transform.apply(bounds.x1, bounds.y0),
+                    node.transform.apply(bounds.x0, bounds.y1),
+                    node.transform.apply(bounds.x1, bounds.y1),
+                ];
+                let mut min_x = corners.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+                let mut min_y = corners.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+                let mut max_x = corners
+                    .iter()
+                    .map(|p| p.0)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let mut max_y = corners
+                    .iter()
+                    .map(|p| p.1)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if let SceneNodeKind::Path(path) = &node.kind {
+                    if path.stroke.enabled {
+                        let half = path.stroke.width / 2.0;
+                        min_x -= half;
+                        min_y -= half;
+                        max_x += half;
+                        max_y += half;
+                    }
+                }
+                let tolerance = 0.5;
+                assert!(
+                    min_x >= box_x - tolerance
+                        && min_y >= box_y - tolerance
+                        && max_x <= box_x + size + tolerance
+                        && max_y <= box_y + size + tolerance,
+                    "{} leaf {} bounds ({min_x},{min_y})-({max_x},{max_y}) exceed icon box ({box_x},{box_y}) size {size}",
+                    icon.name,
+                    node.name
+                );
+            }
+        }
     }
     #[test]
     fn static_tailwind_component_becomes_css_tree() {
@@ -1514,22 +1606,7 @@ mod tests {
                 >= 4
         );
         assert!(!doc.nodes.values().any(|node| node.name == "App badge"));
-        let icon = doc
-            .nodes
-            .values()
-            .find(|node| node.name == "App icon: ONE")
-            .unwrap();
-        let SceneNodeKind::Group(icon_group) = &icon.kind else {
-            unreachable!()
-        };
-        let icon_path = &doc.nodes[&icon_group.children[0]];
-        let bounds = icon_path.local_bounds().unwrap();
-        let corners = [
-            icon_path.transform.apply(bounds.x0, bounds.y0),
-            icon_path.transform.apply(bounds.x1, bounds.y1),
-        ];
-        assert!(corners[0].0 >= 20.0 && corners[0].1 >= 20.0, "{corners:?}");
-        assert!(corners[1].0 <= 68.0 && corners[1].1 <= 68.0, "{corners:?}");
+        assert_all_icon_leaves_fit(&doc);
         let rendered_doc = doc.clone();
         drop(doc);
         let renderer = photonic_render::HeadlessRenderer::new().await;
@@ -1544,6 +1621,29 @@ mod tests {
             "imported page rendered blank ({non_white} opaque content pixels)"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn canonical_bgch_icon_leaves_fit_their_tiles_when_fixture_is_available() {
+        let Ok(root) = std::env::var("PHOTONIC_BGCH_ACCEPTANCE_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, source_args(&root, false)).await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let doc = state.document.lock().await.clone();
+        assert_eq!(
+            doc.nodes
+                .values()
+                .filter(|node| node.name.starts_with("App icon: "))
+                .count(),
+            7
+        );
+        assert_all_icon_leaves_fit(&doc);
+        let renderer = photonic_render::HeadlessRenderer::new().await;
+        let png = renderer.render_png_at_size(&doc, 560, 360);
+        std::fs::write("/tmp/photonic-252-canonical-test.png", png).unwrap();
     }
 
     #[tokio::test]
