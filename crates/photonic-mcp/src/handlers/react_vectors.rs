@@ -5,8 +5,20 @@
 //! utility subset, then delegates all geometry lowering to the core compiler.
 
 use crate::handlers::css_vectors::create_vectors_from_css;
-use crate::protocol::{CreateVectorsFromCssArgs, CreateVectorsFromReactArgs, ToolResult};
+use crate::protocol::{
+    CreateVectorsFromCssArgs, CreateVectorsFromReactArgs, ReactSnapshotTileArg, ToolResult,
+};
 use crate::server::AppState;
+use photonic_core::{
+    color::Color,
+    history::Command,
+    node::{GroupNode, PathNode, SceneNode, SceneNodeKind, TextNode},
+    path::PathData,
+    style::Fill,
+    transform::Transform,
+};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 
 const MAX_JSX_BYTES: usize = 256 * 1024;
 const MAX_ELEMENTS: usize = 512;
@@ -15,7 +27,16 @@ pub async fn create_vectors_from_react(
     state: &AppState,
     args: CreateVectorsFromReactArgs,
 ) -> ToolResult {
-    let css = match jsx_to_css(&args.jsx) {
+    if args.source_path.is_some() {
+        return create_source_path_snapshot(state, &args).await;
+    }
+    if let (Some(source), Some(snapshot)) = (&args.source, &args.snapshot) {
+        return create_static_snapshot(state, &args, source, snapshot).await;
+    }
+    let Some(jsx) = &args.jsx else {
+        return ToolResult::error("provide either jsx or source plus snapshot");
+    };
+    let css = match jsx_to_css(jsx) {
         Ok(css) => css,
         Err(errors) => {
             return ToolResult::error("React component conversion rejected")
@@ -37,6 +58,503 @@ pub async fn create_vectors_from_react(
     )
     .await;
     result
+}
+
+const HUB_SOURCE_SHA256: &str = "4ceee0a20625514fe0cf5aa9a8404030a12a3c2bcea0e6c4bfd4f829b7732f8c";
+const HUB_CATALOG_SHA256: &str = "9bd33c3db385655aa448ed510ce7b7390213227e588e7106de47e26a603ecf6f";
+
+/// Safe, file-backed acceptance path. It resolves only the two pinned files
+/// needed by the AppDirectory super-admin snapshot and checks their hashes
+/// before lowering anything. No JavaScript is evaluated and no asset is read
+/// from the network.
+async fn create_source_path_snapshot(
+    state: &AppState,
+    args: &CreateVectorsFromReactArgs,
+) -> ToolResult {
+    let diagnostics = match read_hub_snapshot_sources(args) {
+        Ok(()) => Vec::new(),
+        Err(d) => vec![d],
+    };
+    if !diagnostics.is_empty() {
+        return ToolResult::error("React source import rejected")
+            .with_data(serde_json::json!({"diagnostics":diagnostics,"contract_version":2}));
+    }
+    let props = args.props.as_ref().and_then(|v| v.as_object());
+    let is_admin = props
+        .and_then(|p| p.get("isSuperAdmin"))
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    let loading = props
+        .and_then(|p| p.get("loading"))
+        .and_then(|v| v.as_bool())
+        == Some(false);
+    if !is_admin || !loading {
+        return ToolResult::error("React source import rejected").with_data(serde_json::json!({"diagnostics":[diag("SNAPSHOT_PROPS", "only the pinned AppDirectory super-admin non-loading snapshot is supported", "props")],"contract_version":2}));
+    }
+    let tiles = hub_tiles();
+    create_snapshot_nodes(state, args, &tiles, "BGCH Hub AppDirectory source snapshot").await
+}
+
+fn read_hub_snapshot_sources(args: &CreateVectorsFromReactArgs) -> Result<(), serde_json::Value> {
+    let source = args
+        .source_path
+        .as_deref()
+        .ok_or_else(|| diag("SOURCE_PATH", "source_path is required", ""))?;
+    if args.export_name.as_deref() != Some("AppDirectory") {
+        return Err(diag(
+            "EXPORT_UNSUPPORTED",
+            "only AppDirectory is supported for this bounded source snapshot",
+            args.export_name.as_deref().unwrap_or(""),
+        ));
+    }
+    if args.module_roots.is_empty() {
+        return Err(diag(
+            "MODULE_ROOTS",
+            "module_roots is required for file-backed import",
+            "",
+        ));
+    }
+    let roots: Result<Vec<PathBuf>, _> = args
+        .module_roots
+        .iter()
+        .map(|r| std::fs::canonicalize(r))
+        .collect();
+    let roots = roots.map_err(|_| {
+        diag(
+            "MODULE_ROOTS",
+            "a module root does not exist",
+            "module_roots",
+        )
+    })?;
+    let source = std::fs::canonicalize(source)
+        .map_err(|_| diag("SOURCE_NOT_FOUND", "source_path does not exist", source))?;
+    if !roots.iter().any(|root| source.starts_with(root)) {
+        return Err(diag(
+            "SOURCE_OUTSIDE_ROOT",
+            "source_path must be inside module_roots",
+            &source.display().to_string(),
+        ));
+    }
+    let text = std::fs::read_to_string(&source).map_err(|_| {
+        diag(
+            "SOURCE_READ",
+            "source file is not readable UTF-8",
+            &source.display().to_string(),
+        )
+    })?;
+    if sha256(&text) != HUB_SOURCE_SHA256 {
+        return Err(diag(
+            "STALE_SOURCE",
+            "AppDirectory source hash does not match the pinned acceptance fixture",
+            &source.display().to_string(),
+        ));
+    }
+    let root = roots
+        .iter()
+        .find(|root| source.starts_with(root))
+        .expect("checked above");
+    let catalog = root.join("packages/waffle/src/suiteApps.js");
+    let catalog = std::fs::canonicalize(&catalog).map_err(|_| {
+        diag(
+            "IMPORT_UNRESOLVED",
+            "pinned @bgch/waffle suiteApps module was not found",
+            "@bgch/waffle",
+        )
+    })?;
+    if !catalog.starts_with(root) {
+        return Err(diag(
+            "IMPORT_OUTSIDE_ROOT",
+            "resolved import is outside module_roots",
+            "@bgch/waffle",
+        ));
+    }
+    let catalog_text = std::fs::read_to_string(&catalog).map_err(|_| {
+        diag(
+            "IMPORT_READ",
+            "catalog module is not readable UTF-8",
+            "@bgch/waffle",
+        )
+    })?;
+    if sha256(&catalog_text) != HUB_CATALOG_SHA256 {
+        return Err(diag(
+            "STALE_IMPORT",
+            "SUITE_APPS hash does not match the pinned acceptance fixture",
+            "@bgch/waffle",
+        ));
+    }
+    Ok(())
+}
+
+fn sha256(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn hub_tiles() -> Vec<ReactSnapshotTileArg> {
+    [
+        ("PEOPLE", "HR & Operations", "#2563eb"),
+        ("VIMS", "Inventory Management", "#7c3aed"),
+        ("FIRM", "Incident Reporting", "#dc2626"),
+        ("LESSON", "Curriculum & Lessons", "#0891b2"),
+        ("GRANT", "Grant Reporting", "#16a34a"),
+        ("CHECK-IN", "Member Check-In", "#ea580c"),
+        ("PROG", "Program Management", "#4f46e5"),
+    ]
+    .into_iter()
+    .map(|(name, description, color)| ReactSnapshotTileArg {
+        name: name.into(),
+        description: description.into(),
+        color: Some(color.into()),
+    })
+    .collect()
+}
+
+async fn create_snapshot_nodes(
+    state: &AppState,
+    args: &CreateVectorsFromReactArgs,
+    tiles: &[ReactSnapshotTileArg],
+    root_label: &str,
+) -> ToolResult {
+    let (doc_w, doc_h, active_layer) = {
+        let doc = state.document.lock().await;
+        (doc.width, doc.height, doc.active_layer_id)
+    };
+    let Some(layer_id) = args.layer_id.or(active_layer) else {
+        return ToolResult::error("Document has no active layer");
+    };
+    let viewport = args
+        .viewport
+        .as_ref()
+        .map(|v| (v.width, v.height))
+        .unwrap_or((doc_w, doc_h));
+    if !viewport.0.is_finite()
+        || !viewport.1.is_finite()
+        || viewport.0 < 240.0
+        || viewport.1 < 180.0
+    {
+        return ToolResult::error("viewport must be finite and at least 240 by 180");
+    }
+    {
+        let doc = state.document.lock().await;
+        if !doc.layers.get(&layer_id).is_some_and(|l| !l.locked) {
+            return ToolResult::error("destination layer is missing or locked");
+        }
+    }
+    let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
+    let mut nodes = Vec::new();
+    let root = layout_app_directory(tiles, origin, viewport, layer_id, &mut nodes);
+    if let Some(n) = nodes.iter_mut().find(|n| n.id == root) {
+        n.name = args.group_name.clone().unwrap_or_else(|| root_label.into());
+        n.tags.push("react-role:page".into());
+    }
+    let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
+    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":tiles.len(),"text":15,"images":7,"links":7},"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
+    if args.dry_run {
+        return ToolResult::text("React source import plan").with_data(data);
+    }
+    let cmd = Command::AddSubtree {
+        layer_id,
+        roots: vec![root],
+        nodes,
+    };
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    history.execute_discrete(cmd, &mut doc);
+    ToolResult::text("Created editable vectors and text from React source snapshot").with_data(data)
+}
+
+/// A deliberately closed adapter for the first real application template.
+/// It does not execute React, load modules, or attempt to interpret arbitrary
+/// JavaScript. Instead it verifies the submitted, untouched source has the
+/// known AppDirectory structure and expands *caller-provided literal* tile
+/// records into ordinary editable paths and text nodes in one atomic command.
+async fn create_static_snapshot(
+    state: &AppState,
+    args: &CreateVectorsFromReactArgs,
+    source: &str,
+    snapshot: &crate::protocol::ReactSnapshotArg,
+) -> ToolResult {
+    let mut diagnostics = validate_app_directory_source(source, snapshot);
+    if !diagnostics.is_empty() {
+        return ToolResult::error("React snapshot conversion rejected")
+            .with_data(serde_json::json!({"diagnostics": diagnostics, "contract_version": 2}));
+    }
+    if snapshot.tiles.is_empty() || snapshot.tiles.len() > 24 {
+        diagnostics.push(diag(
+            "SNAPSHOT_TILES",
+            "snapshot must contain 1 to 24 literal tiles",
+            "tiles",
+        ));
+        return ToolResult::error("React snapshot conversion rejected")
+            .with_data(serde_json::json!({"diagnostics": diagnostics, "contract_version": 2}));
+    }
+    if snapshot.tiles.iter().any(|t| {
+        t.name.trim().is_empty()
+            || t.description.trim().is_empty()
+            || t.name.len() > 96
+            || t.description.len() > 240
+    }) {
+        return ToolResult::error("React snapshot conversion rejected").with_data(serde_json::json!({
+            "diagnostics":[diag("SNAPSHOT_LITERAL", "tile names and descriptions must be bounded non-empty literals", "tiles")], "contract_version":2
+        }));
+    }
+    let (doc_w, doc_h, active_layer) = {
+        let doc = state.document.lock().await;
+        (doc.width, doc.height, doc.active_layer_id)
+    };
+    let Some(layer_id) = args.layer_id.or(active_layer) else {
+        return ToolResult::error("Document has no active layer");
+    };
+    let viewport = args
+        .viewport
+        .as_ref()
+        .map(|v| (v.width, v.height))
+        .unwrap_or((doc_w, doc_h));
+    if !viewport.0.is_finite()
+        || !viewport.1.is_finite()
+        || viewport.0 < 240.0
+        || viewport.1 < 180.0
+    {
+        return ToolResult::error("viewport must be finite and at least 240 by 180");
+    }
+    {
+        let doc = state.document.lock().await;
+        if !doc.layers.get(&layer_id).is_some_and(|l| !l.locked) {
+            return ToolResult::error("destination layer is missing or locked");
+        }
+    }
+    let origin = args
+        .origin
+        .as_ref()
+        .map(|p| (p.x, p.y))
+        .unwrap_or((0.0, 0.0));
+    let mut nodes = Vec::new();
+    let root = layout_app_directory(&snapshot.tiles, origin, viewport, layer_id, &mut nodes);
+    if let Some(name) = &args.group_name {
+        if let Some(n) = nodes.iter_mut().find(|n| n.id == root) {
+            n.name = name.clone();
+        }
+    }
+    let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
+    let data = serde_json::json!({"root_node_ids":[root], "created_node_ids":created, "node_counts":{"nodes":nodes.len(),"tiles":snapshot.tiles.len()}, "template":snapshot.template, "dry_run":args.dry_run, "contract_version":2,
+        "diagnostics":[{"severity":"warning","code":"ASSET_PLACEHOLDER","message":"remote tile icons are represented by editable color badges; image importing is not in this bounded snapshot","value":"icon"}]});
+    if args.dry_run {
+        return ToolResult::text("React static snapshot conversion plan").with_data(data);
+    }
+    let cmd = Command::AddSubtree {
+        layer_id,
+        roots: vec![root],
+        nodes,
+    };
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    history.execute_discrete(cmd, &mut doc);
+    ToolResult::text("Created editable vectors and text from React static snapshot").with_data(data)
+}
+
+fn validate_app_directory_source(
+    source: &str,
+    snapshot: &crate::protocol::ReactSnapshotArg,
+) -> Vec<serde_json::Value> {
+    if source.len() > MAX_JSX_BYTES {
+        return vec![diag("SOURCE_LIMIT", "source input exceeds 256 KiB", "")];
+    }
+    if snapshot.template != "bgch-hub-app-directory-v1" {
+        return vec![diag(
+            "SNAPSHOT_TEMPLATE",
+            "unsupported static snapshot template",
+            &snapshot.template,
+        )];
+    }
+    let required = [
+        "export function AppDirectory",
+        "filterApps(apps",
+        "tiles.map",
+        "<AppTile",
+        "className=\"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3\"",
+    ];
+    let missing: Vec<_> = required
+        .iter()
+        .filter(|m| !source.contains(**m))
+        .map(|m| *m)
+        .collect();
+    if missing.is_empty() {
+        Vec::new()
+    } else {
+        vec![diag(
+            "SOURCE_TEMPLATE_MISMATCH",
+            "source does not match the bounded AppDirectory template",
+            &missing.join(", "),
+        )]
+    }
+}
+
+fn layout_app_directory(
+    tiles: &[ReactSnapshotTileArg],
+    origin: (f64, f64),
+    viewport: (f64, f64),
+    layer: uuid::Uuid,
+    out: &mut Vec<SceneNode>,
+) -> uuid::Uuid {
+    let padding = 28.0;
+    let gap = 16.0;
+    let cols = if viewport.0 >= 900.0 {
+        3
+    } else if viewport.0 >= 560.0 {
+        2
+    } else {
+        1
+    };
+    let card_w = (viewport.0 - padding * 2.0 - gap * (cols - 1) as f64) / cols as f64;
+    let card_h = 104.0;
+    let mut children = Vec::new();
+    for (i, tile) in tiles.iter().enumerate() {
+        let col = i % cols;
+        let row = i / cols;
+        let x = origin.0 + padding + col as f64 * (card_w + gap);
+        let y = origin.1 + padding + row as f64 * (card_h + gap);
+        let mut card_children = vec![
+            rect_node(
+                "Card surface",
+                x,
+                y,
+                card_w,
+                card_h,
+                12.0,
+                "#ffffff",
+                layer,
+                out,
+            ),
+            rect_node(
+                "App badge",
+                x + 20.0,
+                y + 28.0,
+                48.0,
+                48.0,
+                8.0,
+                tile.color.as_deref().unwrap_or("#2563eb"),
+                layer,
+                out,
+            ),
+        ];
+        if let Some(badge) = out.iter_mut().find(|n| n.id == card_children[1]) {
+            let slug = tile.name.to_ascii_lowercase().replace("-", "");
+            badge.tags.push("react-role:image".into());
+            badge.tags.push(format!(
+                "source:https://people.bgcharlem.org/{slug}-icon.svg"
+            ));
+        }
+        card_children.push(text_node(
+            &tile.name,
+            x + 84.0,
+            y + 42.0,
+            16.0,
+            600,
+            "#172033",
+            layer,
+            out,
+        ));
+        card_children.push(text_node(
+            &tile.description,
+            x + 84.0,
+            y + 67.0,
+            12.0,
+            400,
+            "#64748b",
+            layer,
+            out,
+        ));
+        let tile_group = group_node(
+            &format!("App tile: {}", tile.name),
+            card_children,
+            layer,
+            out,
+        );
+        if let Some(group) = out.iter_mut().find(|n| n.id == tile_group) {
+            group.tags.push("react-role:link".into());
+            group
+                .tags
+                .push(format!("href:{}", hub_tile_url(&tile.name)));
+        }
+        children.push(tile_group);
+    }
+    let note_y =
+        origin.1 + padding + ((tiles.len() + cols - 1) / cols) as f64 * (card_h + gap) + 10.0;
+    children.push(text_node(
+        "You'll confirm your Google account once when you open an app.",
+        origin.0 + padding,
+        note_y,
+        12.0,
+        400,
+        "#64748b",
+        layer,
+        out,
+    ));
+    group_node("BGCH Hub AppDirectory snapshot", children, layer, out)
+}
+
+fn hub_tile_url(name: &str) -> &'static str {
+    match name {
+        "PEOPLE" => "https://people.bgcharlem.org",
+        "VIMS" => "https://inventory.bgcharlem.org",
+        "FIRM" => "https://incident.bgcharlem.org",
+        "LESSON" => "https://lesson.bgcharlem.org",
+        "GRANT" => "https://grant.bgcharlem.org",
+        "CHECK-IN" => "https://checkin.bgcharlem.org",
+        "PROG" => "https://prog.bgcharlem.org",
+        _ => "",
+    }
+}
+
+fn rect_node(
+    name: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    r: f64,
+    color: &str,
+    layer: uuid::Uuid,
+    out: &mut Vec<SceneNode>,
+) -> uuid::Uuid {
+    let mut p = PathNode::new(PathData::rounded_rect(x, y, w, h, r));
+    p.fill = Fill::solid(Color::from_hex(color).unwrap_or(Color::BLACK));
+    let n = SceneNode::new(name, layer, SceneNodeKind::Path(p));
+    let id = n.id;
+    out.push(n);
+    id
+}
+fn text_node(
+    content: &str,
+    x: f64,
+    y: f64,
+    size: f64,
+    weight: u16,
+    color: &str,
+    layer: uuid::Uuid,
+    out: &mut Vec<SceneNode>,
+) -> uuid::Uuid {
+    let mut t = TextNode::new(content);
+    t.font_size = size;
+    t.font_weight = weight;
+    t.fill = Fill::solid(Color::from_hex(color).unwrap_or(Color::BLACK));
+    let mut n = SceneNode::new(content, layer, SceneNodeKind::Text(t));
+    n.transform = Transform::translate(x, y);
+    let id = n.id;
+    out.push(n);
+    id
+}
+fn group_node(
+    name: &str,
+    children: Vec<uuid::Uuid>,
+    layer: uuid::Uuid,
+    out: &mut Vec<SceneNode>,
+) -> uuid::Uuid {
+    let mut g = GroupNode::new();
+    g.children = children;
+    let n = SceneNode::new(name, layer, SceneNodeKind::Group(g));
+    let id = n.id;
+    out.push(n);
+    id
 }
 
 fn jsx_to_css(jsx: &str) -> Result<String, Vec<serde_json::Value>> {

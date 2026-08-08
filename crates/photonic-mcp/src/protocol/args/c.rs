@@ -43,7 +43,27 @@ fn default_css_strict() -> bool {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateVectorsFromReactArgs {
     /// A static JSX fragment containing intrinsic HTML elements only.
-    pub jsx: String,
+    #[serde(default)]
+    pub jsx: Option<String>,
+    /// Untouched module source for one of the explicitly supported static
+    /// snapshots.  Source is parsed as text only; it is never evaluated.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Pinned literal data used to resolve a bounded dynamic collection (for
+    /// example the catalogue passed to `tiles.map`).
+    #[serde(default)]
+    pub snapshot: Option<ReactSnapshotArg>,
+    /// Local entry module. It and every resolved module must be underneath
+    /// `module_roots`; this importer never fetches network source.
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
+    pub export_name: Option<String>,
+    /// JSON-only static props snapshot. No functions, expressions or hooks.
+    #[serde(default)]
+    pub props: Option<Value>,
+    #[serde(default)]
+    pub module_roots: Vec<String>,
     #[serde(default)]
     pub origin: Option<CssPointArg>,
     #[serde(default)]
@@ -56,6 +76,22 @@ pub struct CreateVectorsFromReactArgs {
     pub strict: bool,
     #[serde(default)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactSnapshotArg {
+    /// The only currently supported template: `bgch-hub-app-directory-v1`.
+    pub template: String,
+    #[serde(default)]
+    pub tiles: Vec<ReactSnapshotTileArg>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactSnapshotTileArg {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// Arguments for the `set_paint` tool — apply one paint to many nodes at once,

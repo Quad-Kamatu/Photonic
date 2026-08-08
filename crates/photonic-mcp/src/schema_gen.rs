@@ -100,13 +100,19 @@ pub fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "jsx": { "type": "string", "description": "Static JSX fragment of intrinsic layout elements. Supported Tailwind utilities: w-[Npx], h-[Npx], w-full, h-full, bg-{white,black,slate-900,slate-100,blue-500,indigo-600,emerald-500,red-500}, rounded variants, border, opacity." },
+                    "jsx": { "type": "string", "description": "Static JSX fragment of intrinsic layout elements." },
+                    "source": { "type": "string", "description": "Untouched source for a supported static snapshot; parsed as text only, never executed." },
+                    "snapshot": { "type": "object", "description": "Pinned literal context. Supported template: bgch-hub-app-directory-v1; requires tiles [{name,description,color?}]." },
+                    "source_path": { "type": "string", "description": "Local module path; must be beneath module_roots." },
+                    "export_name": { "type": "string", "description": "Named React export to import." },
+                    "props": { "type": "object", "description": "JSON-only static props snapshot." },
+                    "module_roots": { "type": "array", "items": {"type":"string"}, "description": "Approved local roots for source and bounded imports." },
                     "origin": { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } },
                     "viewport": { "type": "object", "properties": { "width": {"type":"number"}, "height": {"type":"number"} } },
                     "layer_id": { "type": "string" }, "group_name": { "type": "string" },
                     "strict": { "type": "boolean", "default": true }, "dry_run": { "type": "boolean", "default": false }
                 },
-                "required": ["jsx"]
+                "anyOf": [{"required":["jsx"]},{"required":["source","snapshot"]},{"required":["source_path","export_name","props","module_roots"]}]
             }
         },
         {

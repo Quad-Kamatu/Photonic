@@ -22,6 +22,7 @@ clap = { workspace = true }
 mlua = { workspace = true }
 image = { workspace = true }
 base64 = "0.22"
+sha2 = "0.10"
 regex = "1"
 anyhow = { workspace = true }
 thiserror = { workspace = true }
