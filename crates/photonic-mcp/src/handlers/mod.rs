@@ -17,6 +17,8 @@ pub mod doc_swatches;
 pub mod document;
 pub mod guides;
 pub mod layers;
+#[allow(dead_code)] // Integration seam consumed by the ModeSelector source adapter.
+pub(crate) mod lucide_assets;
 pub mod nodes;
 pub mod pathfinder;
 pub mod raster;
