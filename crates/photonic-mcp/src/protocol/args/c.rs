@@ -65,6 +65,8 @@ pub struct CreateVectorsFromReactArgs {
     #[serde(default)]
     pub module_roots: Vec<String>,
     #[serde(default)]
+    pub theme_tokens: Option<ReactThemeTokensArg>,
+    #[serde(default)]
     pub origin: Option<CssPointArg>,
     #[serde(default)]
     pub viewport: Option<CssViewportArg>,
@@ -76,6 +78,19 @@ pub struct CreateVectorsFromReactArgs {
     pub strict: bool,
     #[serde(default)]
     pub dry_run: bool,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactThemeTokensArg {
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub card: Option<String>,
+    #[serde(default)]
+    pub border: Option<String>,
+    #[serde(default)]
+    pub foreground: Option<String>,
+    #[serde(default)]
+    pub muted_foreground: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

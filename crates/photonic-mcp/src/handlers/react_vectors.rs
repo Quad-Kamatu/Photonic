@@ -84,6 +84,27 @@ struct TileStyle {
     title_weight: u16,
     description_size: f64,
 }
+struct Theme {
+    card: String,
+    foreground: String,
+    muted: String,
+}
+fn theme(args: &CreateVectorsFromReactArgs) -> Result<Theme, String> {
+    let t = args.theme_tokens.as_ref();
+    let val = |v: Option<&String>, d: &str| {
+        let s = v.cloned().unwrap_or_else(|| d.into());
+        if Color::from_hex(&s).is_none() {
+            Err(format!("theme token must be hex: {s}"))
+        } else {
+            Ok(s)
+        }
+    };
+    Ok(Theme {
+        card: val(t.and_then(|x| x.card.as_ref()), "#ffffff")?,
+        foreground: val(t.and_then(|x| x.foreground.as_ref()), "#172033")?,
+        muted: val(t.and_then(|x| x.muted_foreground.as_ref()), "#64748b")?,
+    })
+}
 
 /// Safe, source-driven entry point for the first bounded static React page.
 /// This is a closed parser for AppDirectory's declarative `tiles.map(AppTile)`
@@ -629,11 +650,16 @@ async fn create_snapshot_nodes(
         }
     }
     let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
+    let theme = match theme(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::error(e),
+    };
     let mut nodes = Vec::new();
     let root = layout_app_directory(
         &parsed.tiles,
         &parsed.layout,
         &parsed.tile_style,
+        &theme,
         origin,
         viewport,
         layer_id,
@@ -646,7 +672,7 @@ async fn create_snapshot_nodes(
     let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
     let text_count = parsed.tiles.len() * 2 + 1;
     let semantic_tree: Vec<_> = parsed.tiles.iter().map(|tile| serde_json::json!({"kind":"link","href":tile.url,"children":[{"kind":"image","src":tile.icon},{"kind":"text","value":tile.name},{"kind":"text","value":tile.description}]})).collect();
-    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap,"tile_padding":parsed.tile_style.padding,"badge_px":parsed.tile_style.badge,"radius_px":parsed.tile_style.radius},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
+    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"text":text_count},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"theme":{"card":theme.card,"foreground":theme.foreground,"muted_foreground":theme.muted},"semantic_tree":semantic_tree,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
     if args.dry_run {
         return ToolResult::text("React source import plan").with_data(data);
     }
@@ -665,6 +691,7 @@ fn layout_app_directory(
     tiles: &[ImportedTile],
     layout: &LayoutSpec,
     style: &TileStyle,
+    theme: &Theme,
     origin: (f64, f64),
     viewport: (f64, f64),
     layer: uuid::Uuid,
@@ -697,7 +724,7 @@ fn layout_app_directory(
                 card_w,
                 card_h,
                 style.radius,
-                "#ffffff",
+                &theme.card,
                 layer,
                 out,
             ),
@@ -723,7 +750,7 @@ fn layout_app_directory(
             y + style.padding + 14.0,
             style.title_size,
             style.title_weight,
-            "#172033",
+            &theme.foreground,
             layer,
             out,
         ));
@@ -733,7 +760,7 @@ fn layout_app_directory(
             y + style.padding + 14.0 + style.title_size + 5.0,
             style.description_size,
             400,
-            "#64748b",
+            &theme.muted,
             layer,
             out,
         ));
@@ -1081,6 +1108,7 @@ mod tests {
             export_name: Some("AppDirectory".into()),
             props: Some(serde_json::json!({"isSuperAdmin":true,"loading":false})),
             module_roots: vec![root.display().to_string()],
+            theme_tokens: None,
             origin: None,
             viewport: None,
             layer_id: None,
