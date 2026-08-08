@@ -327,6 +327,8 @@ pub(crate) fn append_lucide_icon(
     );
     node.tags.push("react-role:icon".into());
     node.tags
+        .push(format!("react-icon-box:{},{},{}", origin.0, origin.1, size));
+    node.tags
         .push(format!("source-file:{}", asset.source_path.display()));
     let id = node.id;
     out.push(node);

@@ -10,6 +10,7 @@ use crate::handlers::lucide_assets::{
 };
 use crate::protocol::{CreateVectorsFromCssArgs, CreateVectorsFromReactArgs, ToolResult};
 use crate::server::AppState;
+use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight};
 use photonic_core::{
     color::Color,
     history::Command,
@@ -193,6 +194,10 @@ struct CheckinPage {
     card_radius: f64,
     section_gap: f64,
     button_height: f64,
+    button_gap: f64,
+    button_icon_size: f64,
+    button_icon_margin_right: f64,
+    card_top_border_width: f64,
     warnings: Vec<serde_json::Value>,
     interactions: Vec<String>,
     icons: Vec<LucideAsset>,
@@ -439,6 +444,10 @@ fn read_checkin_mode_selector(
             )
         })?;
     let button_height = class_px(large_classes, "h-")?;
+    let button_gap = class_px(button_base, "gap-")?;
+    let button_icon_size = descendant_size_px(button_base)?;
+    let icon_classes = format!("{mode}\n{layout_text}");
+    let button_icon_margin_right = largest_space_class(&icon_classes, "mr-")?;
 
     let css_text = std::fs::read_to_string(&css).unwrap_or_default();
     let blue = css_hex_token(&css_text, "bgch-blue")?;
@@ -447,9 +456,11 @@ fn read_checkin_mode_selector(
     let card_width = arbitrary_px(&layout_text, "max-w-[")?;
     let card_classes = literal_class_containing(&layout_text, "bg-white p-")?;
     let card_padding = class_px(card_classes, "p-")?;
+    let card_padding = largest_axis_padding_px(card_classes, card_padding);
     let outer_classes = literal_class_containing(&layout_text, "justify-center p-")?;
     let outer_padding = class_px(outer_classes, "p-")?;
     let card_radius = radius_px(card_classes)?;
+    let card_top_border_width = arbitrary_px(&layout_text, "border-t-[")?;
     let section_gap = largest_space_class(&mode, "mb-")?;
 
     let mut all_texts = vec![exit_text];
@@ -478,6 +489,10 @@ fn read_checkin_mode_selector(
         card_radius,
         section_gap,
         button_height,
+        button_gap,
+        button_icon_size,
+        button_icon_margin_right,
+        card_top_border_width,
         warnings,
         interactions: handlers,
         icons,
@@ -668,6 +683,30 @@ fn class_px(classes: &str, prefix: &str) -> Result<f64, serde_json::Value> {
         })
 }
 
+fn descendant_size_px(classes: &str) -> Result<f64, serde_json::Value> {
+    classes
+        .split_whitespace()
+        .find_map(|class| class.rsplit_once(":size-").map(|(_, value)| value))
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value * 4.)
+        .ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "descendant SVG size class is required",
+                "[&_svg]:size-",
+            )
+        })
+}
+
+fn largest_axis_padding_px(classes: &str, base: f64) -> f64 {
+    classes
+        .split_whitespace()
+        .filter_map(|class| class.rsplit_once("px-").map(|(_, value)| value))
+        .filter_map(|value| value.parse::<f64>().ok())
+        .map(|value| value * 4.)
+        .fold(base, f64::max)
+}
+
 fn radius_px(classes: &str) -> Result<f64, serde_json::Value> {
     for (class, px) in [
         ("rounded-lg", 8.),
@@ -788,6 +827,7 @@ async fn create_checkin_nodes(
         return ToolResult::error("ModeSelector viewport must be finite and at least 500 by 600");
     }
     let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
+    let mut font_system = FontSystem::new();
     let mut nodes = Vec::new();
     let mut children = vec![rect_node(
         "Kiosk blue background",
@@ -819,24 +859,27 @@ async fn create_checkin_nodes(
         layer,
         &mut nodes,
     ));
-    children.push(rect_node(
+    children.push(rounded_top_border_node(
         "Kiosk gold accent",
         card_x,
         card_y,
         card_w,
-        5.,
-        0.,
+        page.card_radius,
+        page.card_top_border_width,
         &page.gold,
-        &page.gold,
-        0.,
         layer,
         &mut nodes,
     ));
     let exit = &page.texts[0];
+    let (exit_text_width, exit_text_height) = measure_text(&mut font_system, exit, 16., 500);
+    let exit_top = origin.1 + page.outer_padding;
+    let exit_gap = page.button_gap + page.button_icon_margin_right;
+    let exit_content_width = page.button_icon_size + exit_gap + exit_text_width;
+    let exit_x = origin.0 + viewport.0 - page.outer_padding - exit_content_width;
     let exit_text = text_node(
         exit,
-        origin.0 + viewport.0 - 116.,
-        origin.1 + 38.,
+        exit_x + page.button_icon_size + exit_gap,
+        exit_top + (page.button_height - exit_text_height) / 2.,
         16.,
         500,
         "#ffffff",
@@ -850,8 +893,11 @@ async fn create_checkin_nodes(
     };
     match append_lucide_icon(
         logout,
-        (origin.0 + viewport.0 - 145., origin.1 + 22.),
-        20.,
+        (
+            exit_x,
+            exit_top + (page.button_height - page.button_icon_size) / 2.,
+        ),
+        page.button_icon_size,
         Color::WHITE,
         layer,
         &mut nodes,
@@ -859,10 +905,11 @@ async fn create_checkin_nodes(
         Ok(id) => children.push(id),
         Err(error) => return ToolResult::error(error.message),
     }
-    let content_x = card_x + page.card_padding.max(24.);
-    let content_w = card_w - page.card_padding.max(24.) * 2.;
+    let content_x = card_x + page.card_padding;
+    let content_w = card_w - page.card_padding * 2.;
     let mut y = card_y + 48.;
     for text in page.texts.iter().skip(1) {
+        let mut positioned_text = None;
         let (size, weight, color, margin) = match text.as_str() {
             "Welcome!" => (28.8, 600, page.blue.as_str(), 46.),
             "Please select your check-in type" => (17.6, 400, "#374151", 50.),
@@ -871,10 +918,11 @@ async fn create_checkin_nodes(
                 (17.6, 400, "#4b5563", 60.)
             }
             "Select Event" | "Continue" => {
+                let button_top = y - 26.;
                 children.push(rect_node(
                     &format!("Button: {text}"),
                     content_x,
-                    y - 26.,
+                    button_top,
                     content_w,
                     page.button_height,
                     8.,
@@ -892,10 +940,17 @@ async fn create_checkin_nodes(
                 let Some(asset) = icon_asset(icon) else {
                     return ToolResult::error(format!("preflighted {icon} icon is missing"));
                 };
+                let (label_width, label_height) = measure_text(&mut font_system, text, 16., 500);
+                let inline_gap = page.button_gap + page.button_icon_margin_right;
+                let inline_width = page.button_icon_size + inline_gap + label_width;
+                let inline_x = content_x + (content_w - inline_width) / 2.;
                 match append_lucide_icon(
                     asset,
-                    (content_x + content_w / 2. - 66., y - 12.),
-                    20.,
+                    (
+                        inline_x,
+                        button_top + (page.button_height - page.button_icon_size) / 2.,
+                    ),
+                    page.button_icon_size,
                     Color::WHITE,
                     layer,
                     &mut nodes,
@@ -903,20 +958,19 @@ async fn create_checkin_nodes(
                     Ok(id) => children.push(id),
                     Err(error) => return ToolResult::error(error.message),
                 }
+                positioned_text = Some((
+                    inline_x + page.button_icon_size + inline_gap,
+                    button_top + (page.button_height - label_height) / 2.,
+                ));
                 (16., 500, "#ffffff", page.button_height + page.section_gap)
             }
             _ => (16., 400, "#111827", 32.),
         };
-        let approximate_width = text.chars().count() as f64 * size * 0.52;
+        let (text_width, _) = measure_text(&mut font_system, text, size, weight);
+        let (text_x, text_y) =
+            positioned_text.unwrap_or((content_x + (content_w - text_width) / 2., y));
         children.push(text_node(
-            text,
-            content_x + (content_w - approximate_width) / 2.,
-            y,
-            size,
-            weight,
-            color,
-            layer,
-            &mut nodes,
+            text, text_x, text_y, size, weight, color, layer, &mut nodes,
         ));
         y += margin;
         if matches!(
@@ -956,7 +1010,7 @@ async fn create_checkin_nodes(
         "root_node_ids":[root], "created_node_ids":created,
         "node_counts":{"nodes":nodes.len(),"text":page.texts.len(),"interactions_stripped":page.interactions.len()},
         "visible_text":page.texts, "theme":{"bgch_blue":page.blue,"bgch_gold":page.gold,"primary_blue":page.primary_blue},
-        "layout":{"card_width_px":page.card_width,"card_padding_px":page.card_padding,"outer_padding_px":page.outer_padding,"card_radius_px":page.card_radius,"section_gap_px":page.section_gap,"button_height_px":page.button_height},
+        "layout":{"card_width_px":page.card_width,"card_padding_px":page.card_padding,"outer_padding_px":page.outer_padding,"card_radius_px":page.card_radius,"card_top_border_width_px":page.card_top_border_width,"section_gap_px":page.section_gap,"button_height_px":page.button_height,"button_gap_px":page.button_gap,"button_icon_size_px":page.button_icon_size,"button_icon_margin_right_px":page.button_icon_margin_right},
         "styles":{"backdrop":page.blue,"card_fill":"#ffffff","card_top_border":page.gold,"button_fill":page.primary_blue},
         "semantic_tree":page.texts.iter().map(|text| serde_json::json!({"kind":"text","value":text})).collect::<Vec<_>>(),
         "stripped_interactions":page.interactions,
@@ -2096,6 +2150,72 @@ fn rect_node(
     out.push(n);
     id
 }
+
+fn rounded_top_border_node(
+    name: &str,
+    x: f64,
+    y: f64,
+    width: f64,
+    radius: f64,
+    stroke_width: f64,
+    color: &str,
+    layer: uuid::Uuid,
+    out: &mut Vec<SceneNode>,
+) -> uuid::Uuid {
+    let half_stroke = stroke_width / 2.;
+    let left = x + half_stroke;
+    let right = x + width - half_stroke;
+    let top = y + half_stroke;
+    let inner_radius = (radius - half_stroke).max(0.).min((right - left) / 2.);
+    let path = format!(
+        "M {left} {} Q {left} {top} {} {top} L {} {top} Q {right} {top} {right} {}",
+        top + inner_radius,
+        left + inner_radius,
+        right - inner_radius,
+        top + inner_radius
+    );
+    let mut node = PathNode::new(
+        PathData::from_svg(&path).expect("generated rounded top-border path must be valid"),
+    );
+    node.fill = Fill::none();
+    node.stroke = Stroke::solid(Color::from_hex(color).unwrap_or(Color::BLACK), stroke_width);
+    let mut node = SceneNode::new(name, layer, SceneNodeKind::Path(node));
+    node.tags.push("react-css:border-top".into());
+    node.tags.push("react-css:overflow-clipped".into());
+    let id = node.id;
+    out.push(node);
+    id
+}
+
+fn measure_text(
+    font_system: &mut FontSystem,
+    content: &str,
+    font_size: f64,
+    font_weight: u16,
+) -> (f64, f64) {
+    let font_size = font_size as f32;
+    let line_height = font_size * 1.2;
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    buffer.set_size(font_system, None, None);
+    buffer.set_text(
+        font_system,
+        content,
+        Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(font_weight)),
+        Shaping::Advanced,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let width = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    let height = buffer.layout_runs().map(|run| run.line_height).sum::<f32>();
+    (
+        width as f64,
+        (if height == 0. { line_height } else { height }) as f64,
+    )
+}
 fn text_node(
     content: &str,
     x: f64,
@@ -2451,7 +2571,7 @@ export function ModeSelector() { return (
         ).unwrap();
         std::fs::write(
             root.join("apps/checkin/src/components/ui/button.jsx"),
-            r#"const buttonVariants = cva("inline-flex items-center justify-center rounded-lg", { variants:{variant:{default:"bg-primary-blue text-white"},size:{lg:"h-12 px-10 text-base"}}}); export { Button, buttonVariants }"#,
+            r#"const buttonVariants = cva("inline-flex items-center justify-center gap-2 rounded-lg [&_svg]:size-4", { variants:{variant:{default:"bg-primary-blue text-white"},size:{lg:"h-12 px-10 text-base"}}}); export { Button, buttonVariants }"#,
         ).unwrap();
         std::fs::write(
             root.join("apps/checkin/src/components/ui/card.jsx"),
@@ -2632,6 +2752,10 @@ export function ModeSelector() { return (
         assert_eq!(baseline["layout"]["outer_padding_px"], 20.0);
         assert_eq!(baseline["layout"]["card_radius_px"], 12.0);
         assert_eq!(baseline["layout"]["button_height_px"], 48.0);
+        assert_eq!(baseline["layout"]["button_gap_px"], 8.0);
+        assert_eq!(baseline["layout"]["button_icon_size_px"], 16.0);
+        assert_eq!(baseline["layout"]["button_icon_margin_right_px"], 8.0);
+        assert_eq!(baseline["layout"]["card_top_border_width_px"], 5.0);
         assert_eq!(baseline["styles"]["backdrop"], "#005a9c");
         assert!(baseline["stripped_interactions"].as_array().unwrap().len() >= 2);
 
@@ -2699,6 +2823,81 @@ export function ModeSelector() { return (
         assert!(debug.contains("byte_start"), "{debug}");
         assert_eq!(state.document.lock().await.nodes.len(), 0);
         assert_eq!(state.history.lock().await.undo_depth(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn checkin_inline_flex_and_top_border_lower_to_source_geometry() {
+        let root = copied_checkin_root();
+        let args = checkin_args(&root, false, "strip");
+        let page = read_checkin_mode_selector(&args).unwrap();
+        let state = source_test_state();
+        let result = create_vectors_from_react(&state, args).await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let doc = state.document.lock().await;
+
+        let path = |name: &str| {
+            let node = doc.nodes.values().find(|node| node.name == name).unwrap();
+            let SceneNodeKind::Path(path) = &node.kind else {
+                panic!("{name} is not a path")
+            };
+            path
+        };
+        let card_bounds = path("Kiosk content surface")
+            .path_data
+            .bounding_box()
+            .unwrap();
+        let accent = path("Kiosk gold accent");
+        let accent_bounds = accent.path_data.bounding_box().unwrap();
+        let half_stroke = accent.stroke.width / 2.;
+        let accent_svg = accent.path_data.as_svg().trim_end();
+        assert!(!accent_svg.ends_with('Z') && !accent_svg.ends_with('z'));
+        assert!((accent_bounds.x0 - half_stroke - card_bounds.x0).abs() < 0.01);
+        assert!((accent_bounds.x1 + half_stroke - card_bounds.x1).abs() < 0.01);
+        assert!((accent_bounds.y0 - half_stroke - card_bounds.y0).abs() < 0.01);
+        assert!(accent_bounds.y1 + half_stroke <= card_bounds.y1);
+
+        let button_bounds = path("Button: Select Event")
+            .path_data
+            .bounding_box()
+            .unwrap();
+        let label = doc
+            .nodes
+            .values()
+            .find(|node| node.name == "Select Event")
+            .unwrap();
+        let icon = doc
+            .nodes
+            .values()
+            .find(|node| node.name == "Lucide icon: Calendar")
+            .unwrap();
+        let icon_box: Vec<f64> = icon
+            .tags
+            .iter()
+            .find_map(|tag| tag.strip_prefix("react-icon-box:"))
+            .unwrap()
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        let mut font_system = FontSystem::new();
+        let (label_width, label_height) = measure_text(&mut font_system, "Select Event", 16., 500);
+        let inline_left = icon_box[0];
+        let inline_right = label.transform.matrix[4] + label_width;
+        assert!(((inline_left + inline_right) / 2. - button_bounds.center().x).abs() < 0.01);
+        assert!((icon_box[1] + icon_box[2] / 2. - button_bounds.center().y).abs() < 0.01);
+        assert!(
+            (label.transform.matrix[5] + label_height / 2. - button_bounds.center().y).abs() < 0.01
+        );
+        assert!(
+            (label.transform.matrix[4]
+                - icon_box[0]
+                - icon_box[2]
+                - page.button_gap
+                - page.button_icon_margin_right)
+                .abs()
+                < 0.01
+        );
+        drop(doc);
         let _ = std::fs::remove_dir_all(root);
     }
 
