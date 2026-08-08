@@ -47,9 +47,12 @@ fn icon_slug(name: &str) -> Result<&'static str, LucideDiagnostic> {
         "Calendar" => Ok("calendar"),
         "Users" => Ok("users"),
         "LogOut" => Ok("log-out"),
+        "Instagram" => Ok("instagram"),
+        "Youtube" => Ok("youtube"),
+        "Facebook" => Ok("facebook"),
         _ => Err(diagnostic(
             "LUCIDE_ICON_UNSUPPORTED",
-            "only Calendar, Users, and LogOut are supported by this snapshot",
+            "only the bounded Calendar, Users, LogOut, Instagram, Youtube, and Facebook icons are supported",
             name,
         )),
     }

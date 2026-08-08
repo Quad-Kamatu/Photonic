@@ -138,6 +138,28 @@ struct Theme {
 }
 
 #[derive(Debug, Clone)]
+struct ImportedSocialLink {
+    href: String,
+    label: String,
+    handle: String,
+    icon: String,
+    asset: Option<LucideAsset>,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectPageSnapshot {
+    title: String,
+    subtitle: String,
+    mailing_title: String,
+    mailing_body: String,
+    follow_title: String,
+    follow_body: String,
+    links: Vec<ImportedSocialLink>,
+    resolved_files: Vec<String>,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
 struct ResponsivePx {
     base: f64,
     /// Tailwind min-width rules ordered from narrowest to widest.
@@ -182,6 +204,9 @@ async fn create_source_path_snapshot(
 ) -> ToolResult {
     if args.export_name.as_deref() == Some("ModeSelector") {
         return create_checkin_mode_selector(state, args).await;
+    }
+    if args.export_name.as_deref() == Some("ConnectPage") {
+        return create_connect_page(state, args).await;
     }
     let parsed = match read_app_directory(args) {
         Ok(parsed) => parsed,
@@ -1505,6 +1530,628 @@ fn bounded_file(
         ));
     }
     Ok(path)
+}
+
+fn read_connect_page(
+    args: &CreateVectorsFromReactArgs,
+) -> Result<ConnectPageSnapshot, serde_json::Value> {
+    if !args.module_roots.is_empty() {
+        let roots: Result<Vec<_>, _> = args
+            .module_roots
+            .iter()
+            .map(std::fs::canonicalize)
+            .collect();
+        let roots = roots.map_err(|_| {
+            diag(
+                "MODULE_ROOTS",
+                "a module root does not exist",
+                "module_roots",
+            )
+        })?;
+        let source_path = args
+            .source_path
+            .as_deref()
+            .ok_or_else(|| diag("SOURCE_PATH", "source_path is required", ""))?;
+        let source = std::fs::canonicalize(source_path).map_err(|_| {
+            diag(
+                "SOURCE_NOT_FOUND",
+                "source_path does not exist",
+                source_path,
+            )
+        })?;
+        if !roots.iter().any(|root| source.starts_with(root)) {
+            return Err(diag(
+                "SOURCE_OUTSIDE_ROOT",
+                "source_path must be inside module_roots",
+                &source.display().to_string(),
+            ));
+        }
+        let text = read_bounded_text(&source, "SOURCE_READ", MAX_SOURCE_FILE_BYTES)?;
+        if !text.contains("export function ConnectPage") {
+            return Err(diag(
+                "EXPORT_UNSUPPORTED",
+                "source is outside the bounded One Day Dance ConnectPage form",
+                "ConnectPage",
+            ));
+        }
+        for required in [
+            "const socialLinks = [",
+            "<NewsletterSignupWidget />",
+            "<SlotImage",
+            "Stay in the Loop",
+            "Follow along",
+        ] {
+            if !text.contains(required) {
+                return Err(diag(
+                    "SOURCE_UNSUPPORTED",
+                    "ConnectPage source changed outside the bounded static branch",
+                    required,
+                ));
+            }
+        }
+        if args
+            .props
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .is_some_and(|props| !props.is_empty())
+        {
+            return Err(diag(
+                "SNAPSHOT_PROPS_UNSUPPORTED",
+                "ConnectPage does not accept visible props in this static branch",
+                "props",
+            ));
+        }
+        let array_start =
+            text.find("const socialLinks = [").unwrap() + "const socialLinks = [".len();
+        let array_end = text[array_start..]
+            .find("]")
+            .map(|offset| array_start + offset)
+            .ok_or_else(|| {
+                diag(
+                    "SOURCE_UNSUPPORTED",
+                    "socialLinks array is unterminated",
+                    "socialLinks",
+                )
+            })?;
+        let array = &text[array_start..array_end];
+        let mut links = Vec::new();
+        for object in array.split("  {").skip(1) {
+            let object = object.split("},").next().unwrap_or(object);
+            let href = static_source_field(object, "href")?;
+            let label = static_source_field(object, "label")?;
+            let handle = static_source_field(object, "handle")?;
+            let icon = static_source_identifier(object, "Icon")?;
+            links.push(ImportedSocialLink {
+                href,
+                label,
+                handle,
+                icon,
+                asset: None,
+            });
+        }
+        if links.is_empty() || links.len() > 8 {
+            return Err(diag(
+                "SOURCE_UNSUPPORTED",
+                "ConnectPage requires between one and eight literal social links",
+                "socialLinks",
+            ));
+        }
+        let icon_names = links
+            .iter()
+            .map(|link| link.icon.as_str())
+            .collect::<Vec<_>>();
+        let assets =
+            resolve_lucide_icon_set(&args.module_roots, &icon_names).map_err(lucide_diag)?;
+        for (link, asset) in links.iter_mut().zip(assets) {
+            link.asset = Some(asset);
+        }
+        let title = static_source_field_after(
+            &text,
+            "<h1 className=\"mb-3 text-4xl font-bold tracking-tight\">",
+        )?;
+        let subtitle = static_source_field_after(&text, "<p className=\"text-muted-foreground\">")?;
+        let mailing_title =
+            static_source_field_after(&text, "<h2 className=\"mb-1 text-lg font-semibold\">")?;
+        let follow_title = static_source_field_after_nth(
+            &text,
+            "<h2 className=\"mb-1 text-lg font-semibold\">",
+            1,
+        )?;
+        let mailing_body = static_source_field_after(
+            &text,
+            "<p className=\"mb-4 text-sm text-muted-foreground\">",
+        )?;
+        let follow_body = static_source_field_after_nth(
+            &text,
+            "<p className=\"mb-4 text-sm text-muted-foreground\">",
+            1,
+        )?;
+        let mut resolved_paths = vec![source.clone()];
+        resolved_paths.extend(
+            links
+                .iter()
+                .filter_map(|link| link.asset.as_ref())
+                .map(|asset| asset.source_path.clone()),
+        );
+        let fingerprint = source_fingerprint(&resolved_paths)?;
+        let resolved_files = resolved_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        return Ok(ConnectPageSnapshot {
+            title,
+            subtitle,
+            mailing_title,
+            mailing_body,
+            follow_title,
+            follow_body,
+            links,
+            resolved_files,
+            fingerprint,
+        });
+    }
+    Err(diag(
+        "MODULE_ROOTS",
+        "module_roots is required for file-backed import",
+        "module_roots",
+    ))
+}
+
+fn static_source_field(object: &str, field: &str) -> Result<String, serde_json::Value> {
+    let marker = format!("{field}:");
+    let start = object
+        .find(&marker)
+        .map(|offset| offset + marker.len())
+        .ok_or_else(|| {
+            diag(
+                "SOURCE_UNSUPPORTED",
+                "literal social link field is missing",
+                field,
+            )
+        })?;
+    let value = object[start..].trim_start();
+    let quote = value
+        .chars()
+        .next()
+        .filter(|quote| *quote == '\'' || *quote == '"')
+        .ok_or_else(|| {
+            diag(
+                "SOURCE_DYNAMIC",
+                "social link fields must be string literals",
+                field,
+            )
+        })?;
+    let end = value[1..].find(quote).ok_or_else(|| {
+        diag(
+            "SOURCE_UNSUPPORTED",
+            "social link string literal is unterminated",
+            field,
+        )
+    })?;
+    Ok(value[1..end + 1].to_string())
+}
+
+fn static_source_identifier(object: &str, field: &str) -> Result<String, serde_json::Value> {
+    let marker = format!("{field}:");
+    let start = object
+        .find(&marker)
+        .map(|offset| offset + marker.len())
+        .ok_or_else(|| {
+            diag(
+                "SOURCE_UNSUPPORTED",
+                "social link icon field is missing",
+                field,
+            )
+        })?;
+    let identifier = object[start..]
+        .trim_start()
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .next()
+        .unwrap_or("");
+    if identifier.is_empty() {
+        return Err(diag(
+            "SOURCE_DYNAMIC",
+            "social link icon must be a static identifier",
+            field,
+        ));
+    }
+    Ok(identifier.to_string())
+}
+
+fn static_source_field_after(source: &str, marker: &str) -> Result<String, serde_json::Value> {
+    static_source_field_after_nth(source, marker, 0)
+}
+
+fn static_source_field_after_nth(
+    source: &str,
+    marker: &str,
+    occurrence: usize,
+) -> Result<String, serde_json::Value> {
+    let mut search_from = 0usize;
+    let mut start = None;
+    for _ in 0..=occurrence {
+        let offset = source[search_from..]
+            .find(marker)
+            .map(|offset| search_from + offset)
+            .ok_or_else(|| diag("SOURCE_UNSUPPORTED", "literal page text is missing", marker))?;
+        start = Some(offset + marker.len());
+        search_from = offset + marker.len();
+    }
+    let start = start.expect("occurrence loop always sets start");
+    let end = source[start..]
+        .find("</")
+        .map(|offset| start + offset)
+        .ok_or_else(|| {
+            diag(
+                "SOURCE_UNSUPPORTED",
+                "literal page text is unterminated",
+                marker,
+            )
+        })?;
+    let value = source[start..end].trim();
+    if value.is_empty() || value.contains('<') || value.contains('{') {
+        return Err(diag(
+            "SOURCE_DYNAMIC",
+            "page text must be a non-empty literal",
+            value,
+        ));
+    }
+    Ok(value.replace("&amp;", "&").replace("&apos;", "'"))
+}
+
+async fn create_connect_page(state: &AppState, args: &CreateVectorsFromReactArgs) -> ToolResult {
+    let page = match read_connect_page(args) {
+        Ok(page) => page,
+        Err(diagnostic) => {
+            let path = args.source_path.as_deref().unwrap_or("");
+            let needle = diagnostic
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut diagnostic = diagnostic;
+            if let Some(object) = diagnostic.as_object_mut() {
+                object.insert("source_path".into(), serde_json::json!(path));
+                object.insert("span".into(), actual_span(path, &needle));
+            }
+            return ToolResult::error("React source import rejected")
+                .with_data(serde_json::json!({"diagnostics":[diagnostic],"contract_version":2}));
+        }
+    };
+    create_connect_nodes(state, args, &page).await
+}
+
+async fn create_connect_nodes(
+    state: &AppState,
+    args: &CreateVectorsFromReactArgs,
+    page: &ConnectPageSnapshot,
+) -> ToolResult {
+    let (doc_w, doc_h, board_origin, active_layer) = {
+        let doc = state.document.lock().await;
+        let board = doc.active_artboard();
+        (
+            board.map_or(doc.width, |artboard| artboard.width),
+            board.map_or(doc.height, |artboard| artboard.height),
+            board.map_or((0., 0.), |artboard| (artboard.x, artboard.y)),
+            doc.active_layer_id,
+        )
+    };
+    let Some(layer) = args.layer_id.or(active_layer) else {
+        return ToolResult::error("Document has no active layer");
+    };
+    let viewport = args
+        .viewport
+        .as_ref()
+        .map(|viewport| (viewport.width, viewport.height))
+        .unwrap_or((doc_w, doc_h));
+    if !viewport.0.is_finite()
+        || !viewport.1.is_finite()
+        || viewport.0 < 480.0
+        || viewport.1 < 420.0
+    {
+        return ToolResult::error("viewport must be finite and at least 480 by 420");
+    }
+    {
+        let doc = state.document.lock().await;
+        if !doc.layers.get(&layer).is_some_and(|target| !target.locked) {
+            return ToolResult::error("destination layer is missing or locked");
+        }
+    }
+    let origin = args
+        .origin
+        .as_ref()
+        .map(|point| (point.x, point.y))
+        .unwrap_or(board_origin);
+    if !origin.0.is_finite() || !origin.1.is_finite() {
+        return ToolResult::error("origin must be finite");
+    }
+    let content_w = (viewport.0 - 64.0).min(768.0);
+    let content_x = origin.0 + (viewport.0 - content_w) / 2.0;
+    let gap = 24.0;
+    let card_w = (content_w - gap) / 2.0;
+    let card_y = origin.1 + 188.0;
+    let card_h = (viewport.1 - 236.0).max(360.0);
+    let mut nodes = Vec::new();
+    let mut children = Vec::new();
+    children.push(rect_node(
+        "One Day Dance page background",
+        origin.0,
+        origin.1,
+        viewport.0,
+        viewport.1,
+        0.0,
+        "#f2f2f3",
+        "#f2f2f3",
+        0.0,
+        layer,
+        &mut nodes,
+    ));
+    children.push(text_node(
+        &page.title,
+        content_x,
+        origin.1 + 64.0,
+        36.0,
+        700,
+        "#171717",
+        layer,
+        &mut nodes,
+    ));
+    children.push(text_node(
+        &page.subtitle,
+        content_x,
+        origin.1 + 120.0,
+        16.0,
+        400,
+        "#6b7280",
+        layer,
+        &mut nodes,
+    ));
+    let left_card = rect_node(
+        "Join mailing list card",
+        content_x,
+        card_y,
+        card_w,
+        card_h,
+        12.0,
+        "#ffffff",
+        "#d9d9de",
+        1.0,
+        layer,
+        &mut nodes,
+    );
+    let right_card = rect_node(
+        "Follow along card",
+        content_x + card_w + gap,
+        card_y,
+        card_w,
+        card_h,
+        12.0,
+        "#ffffff",
+        "#d9d9de",
+        1.0,
+        layer,
+        &mut nodes,
+    );
+    children.push(left_card);
+    children.push(right_card);
+    children.push(text_node(
+        &page.mailing_title,
+        content_x + 24.0,
+        card_y + 32.0,
+        18.0,
+        600,
+        "#171717",
+        layer,
+        &mut nodes,
+    ));
+    children.push(text_node(
+        &page.mailing_body,
+        content_x + 24.0,
+        card_y + 68.0,
+        14.0,
+        400,
+        "#6b7280",
+        layer,
+        &mut nodes,
+    ));
+    let input_y = card_y + 126.0;
+    let input = rect_node(
+        "Newsletter email input (static fallback)",
+        content_x + 24.0,
+        input_y,
+        card_w - 48.0,
+        42.0,
+        10.0,
+        "#f2f2f3",
+        "#d9d9de",
+        1.0,
+        layer,
+        &mut nodes,
+    );
+    children.push(input);
+    children.push(text_node(
+        "Email address",
+        content_x + 38.0,
+        input_y + 13.0,
+        14.0,
+        400,
+        "#9b9ba3",
+        layer,
+        &mut nodes,
+    ));
+    let subscribe = rect_node(
+        "Subscribe button (static fallback)",
+        content_x + 24.0,
+        input_y + 62.0,
+        card_w - 48.0,
+        46.0,
+        10.0,
+        "#ff9d76",
+        "#ff9d76",
+        0.0,
+        layer,
+        &mut nodes,
+    );
+    children.push(subscribe);
+    children.push(text_node(
+        "Subscribe",
+        content_x + card_w / 2.0 - 32.0,
+        input_y + 76.0,
+        15.0,
+        600,
+        "#171717",
+        layer,
+        &mut nodes,
+    ));
+    children.push(text_node(
+        &page.follow_title,
+        content_x + card_w + gap + 24.0,
+        card_y + 32.0,
+        18.0,
+        600,
+        "#171717",
+        layer,
+        &mut nodes,
+    ));
+    children.push(text_node(
+        &page.follow_body,
+        content_x + card_w + gap + 24.0,
+        card_y + 68.0,
+        14.0,
+        400,
+        "#6b7280",
+        layer,
+        &mut nodes,
+    ));
+    let social_x = content_x + card_w + gap + 24.0;
+    let social_w = card_w - 48.0;
+    for (index, link) in page.links.iter().enumerate() {
+        let row_y = card_y + 116.0 + index as f64 * 70.0;
+        let row = rect_node(
+            &format!("Social link: {}", link.label),
+            social_x,
+            row_y,
+            social_w,
+            54.0,
+            27.0,
+            "#f2f2f3",
+            "#e4e4e7",
+            1.0,
+            layer,
+            &mut nodes,
+        );
+        children.push(row);
+        let Some(asset) = link.asset.as_ref() else {
+            return ToolResult::error(format!("preflighted {} icon is missing", link.icon));
+        };
+        match append_lucide_icon(
+            asset,
+            (social_x + 9.0, row_y + 9.0),
+            36.0,
+            Color::from_hex("#171717").unwrap_or(Color::BLACK),
+            layer,
+            &mut nodes,
+        ) {
+            Ok(id) => children.push(id),
+            Err(error) => return ToolResult::error(error.message),
+        }
+        children.push(text_node(
+            &link.label,
+            social_x + 58.0,
+            row_y + 13.0,
+            15.0,
+            600,
+            "#171717",
+            layer,
+            &mut nodes,
+        ));
+        children.push(text_node(
+            &link.handle,
+            social_x + 58.0,
+            row_y + 33.0,
+            12.0,
+            400,
+            "#6b7280",
+            layer,
+            &mut nodes,
+        ));
+    }
+    let root = group_node("One Day Dance ConnectPage", children, layer, &mut nodes);
+    if let Some(node) = nodes.iter_mut().find(|node| node.id == root) {
+        node.name = args
+            .group_name
+            .clone()
+            .unwrap_or_else(|| "One Day Dance ConnectPage".into());
+        node.tags.push("react-role:page".into());
+        node.tags.push("source-export:ConnectPage".into());
+        node.tags.push("source-fallback:SlotImage".into());
+        node.tags
+            .push("source-fallback:NewsletterSignupWidget".into());
+        for link in &page.links {
+            node.tags.push(format!("href:{}", link.href));
+        }
+    }
+    let planned_node_count = nodes.len();
+    let created: Vec<_> = if args.dry_run {
+        Vec::new()
+    } else {
+        nodes.iter().map(|node| node.id).collect()
+    };
+    let diagnostics = vec![
+        serde_json::json!({"severity":"warning","code":"STATIC_COMPONENT_FALLBACK","message":"SlotImage has no pinned asset in this source snapshot; the bounded importer used the source fallback background","value":"SlotImage"}),
+        serde_json::json!({"severity":"warning","code":"STATIC_COMPONENT_FALLBACK","message":"NewsletterSignupWidget is interactive; the bounded importer emitted a non-interactive editable field/button preview","value":"NewsletterSignupWidget"}),
+    ];
+    let mut visible_text = vec![
+        page.title.clone(),
+        page.subtitle.clone(),
+        page.mailing_title.clone(),
+        page.mailing_body.clone(),
+        page.follow_title.clone(),
+        page.follow_body.clone(),
+    ];
+    visible_text.extend(
+        page.links
+            .iter()
+            .flat_map(|link| [link.label.clone(), link.handle.clone()]),
+    );
+    let semantic_tree = serde_json::json!([
+        {"kind":"heading","value":page.title},
+        {"kind":"text","value":page.subtitle},
+        {"kind":"section","value":page.mailing_title},
+        {"kind":"section","value":page.follow_title},
+        {"kind":"links","children":page.links.iter().map(|link| serde_json::json!({"kind":"link","href":link.href,"value":link.label,"handle":link.handle})).collect::<Vec<_>>()}
+    ]);
+    let data = serde_json::json!({
+        "root_node_ids":if args.dry_run { serde_json::json!([]) } else { serde_json::json!([root]) },
+        "created_node_ids":created,
+        "planned_node_count":planned_node_count,
+        "node_counts":{"nodes":planned_node_count,"text":5 + page.links.len() * 2,"links":page.links.len(),"interactions_stripped":0},
+        "visible_text":visible_text,
+        "layout":{"container_width_px":content_w,"card_width_px":card_w,"card_gap_px":gap,"card_radius_px":12.0,"card_padding_px":24.0},
+        "styles":{"background":"#f2f2f3","card":"#ffffff","accent":"#ff9d76","foreground":"#171717","muted":"#6b7280"},
+        "semantic_tree":semantic_tree,
+        "resolved_files":page.resolved_files,
+        "source_fingerprint":page.fingerprint,
+        "stripped_interactions":[],
+        "diagnostics":diagnostics,
+        "dry_run":args.dry_run,
+        "contract_version":2
+    });
+    if args.dry_run {
+        return ToolResult::text("React source import plan").with_data(data);
+    }
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    history.execute_discrete(
+        Command::AddSubtree {
+            layer_id: layer,
+            roots: vec![root],
+            nodes,
+        },
+        &mut doc,
+    );
+    ToolResult::text("Created editable One Day Dance ConnectPage vectors from React sources")
+        .with_data(data)
 }
 
 fn primitive_classes<'a>(source: &'a str, primitive: &str) -> Result<&'a str, serde_json::Value> {
