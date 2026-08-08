@@ -1683,6 +1683,17 @@ mod tests {
             }
         }
     }
+    fn chromatic_pixel_count(png: &[u8]) -> usize {
+        image::load_from_memory(png)
+            .unwrap()
+            .to_rgba8()
+            .pixels()
+            .filter(|pixel| {
+                let [r, g, b, a] = pixel.0;
+                a > 200 && r.max(g).max(b) - r.min(g).min(b) > 12
+            })
+            .count()
+    }
     #[test]
     fn static_tailwind_component_becomes_css_tree() {
         let css = jsx_to_css(r#"<div className="w-[320px] h-[160px] bg-slate-900 rounded-xl"><button className="w-[120px] h-[40px] bg-blue-500 rounded" /></div>"#).unwrap();
@@ -1992,14 +2003,10 @@ mod tests {
         drop(doc);
         let renderer = photonic_render::HeadlessRenderer::new().await;
         let png = renderer.render_png_at_size(&rendered_doc, 560, 360);
-        let pixels = image::load_from_memory(&png).unwrap().to_rgba8();
-        let non_white = pixels
-            .pixels()
-            .filter(|pixel| pixel[3] > 200 && pixel.0[..3].iter().any(|channel| *channel < 240))
-            .count();
+        let non_white = chromatic_pixel_count(&png);
         assert!(
             non_white > 100,
-            "imported page rendered blank ({non_white} opaque content pixels)"
+            "imported page rendered blank ({non_white} chromatic content pixels)"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2023,8 +2030,13 @@ mod tests {
         );
         assert_all_icon_leaves_fit(&doc);
         let renderer = photonic_render::HeadlessRenderer::new().await;
-        let png = renderer.render_png_at_size(&doc, 560, 360);
-        std::fs::write("/tmp/photonic-252-canonical-test.png", png).unwrap();
+        let png = renderer.render_png_at_size(&doc, 1120, 720);
+        let chromatic = chromatic_pixel_count(&png);
+        assert!(
+            chromatic > 500,
+            "canonical AppDirectory rendered blank ({chromatic} chromatic content pixels)"
+        );
+        std::fs::write("/tmp/photonic-252-canonical-source-render.png", png).unwrap();
     }
 
     #[tokio::test]
