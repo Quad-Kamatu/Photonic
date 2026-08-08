@@ -87,6 +87,8 @@ pub struct ReactThemeTokensArg {
     pub foreground: Option<String>,
     #[serde(default)]
     pub muted_foreground: Option<String>,
+    #[serde(default)]
+    pub border: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

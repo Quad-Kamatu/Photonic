@@ -12,7 +12,7 @@ use photonic_core::{
     history::Command,
     node::{GroupNode, PathNode, SceneNode, SceneNodeKind, TextNode},
     path::PathData,
-    style::Fill,
+    style::{Fill, Stroke},
     transform::Transform,
     Document,
 };
@@ -80,23 +80,28 @@ struct ParsedPage {
     resolved_files: Vec<String>,
     fingerprint: String,
     tile_style: TileStyle,
+    source_theme: Theme,
 }
 #[derive(Debug, Clone)]
 struct TileStyle {
     padding: f64,
     content_gap: f64,
     badge: f64,
-    radius: f64,
+    icon_radius: f64,
+    card_radius: f64,
+    card_border_width: f64,
     title_size: f64,
     title_weight: u16,
     description_size: f64,
 }
+#[derive(Debug, Clone)]
 struct Theme {
     card: String,
     foreground: String,
     muted: String,
+    border: String,
 }
-fn theme(args: &CreateVectorsFromReactArgs) -> Result<Theme, String> {
+fn theme(args: &CreateVectorsFromReactArgs, source: &Theme) -> Result<Theme, String> {
     let t = args.theme_tokens.as_ref();
     let val = |v: Option<&String>, d: &str| {
         let s = v.cloned().unwrap_or_else(|| d.into());
@@ -107,9 +112,10 @@ fn theme(args: &CreateVectorsFromReactArgs) -> Result<Theme, String> {
         }
     };
     Ok(Theme {
-        card: val(t.and_then(|x| x.card.as_ref()), "#ffffff")?,
-        foreground: val(t.and_then(|x| x.foreground.as_ref()), "#172033")?,
-        muted: val(t.and_then(|x| x.muted_foreground.as_ref()), "#64748b")?,
+        card: val(t.and_then(|x| x.card.as_ref()), &source.card)?,
+        foreground: val(t.and_then(|x| x.foreground.as_ref()), &source.foreground)?,
+        muted: val(t.and_then(|x| x.muted_foreground.as_ref()), &source.muted)?,
+        border: val(t.and_then(|x| x.border.as_ref()), &source.border)?,
     })
 }
 
@@ -273,8 +279,25 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
             "@bgch/waffle",
         )
     })?;
+    let card_module = bounded_file(root, "packages/ui/src/card.jsx", "CARD_PRIMITIVE")?;
+    let card_text = std::fs::read_to_string(&card_module).map_err(|_| {
+        diag(
+            "CARD_PRIMITIVE_READ",
+            "shared Card primitive is not readable UTF-8",
+            "packages/ui/src/card.jsx",
+        )
+    })?;
+    let theme_module = bounded_file(root, "packages/theme/tokens.css", "THEME_TOKENS")?;
+    let theme_text = std::fs::read_to_string(&theme_module).map_err(|_| {
+        diag(
+            "THEME_TOKENS_READ",
+            "shared theme tokens are not readable UTF-8",
+            "packages/theme/tokens.css",
+        )
+    })?;
     let layout = parse_grid_layout(&text)?;
-    let tile_style = parse_tile_style(&text)?;
+    let tile_style = parse_tile_style(&text, &card_text)?;
+    let source_theme = parse_light_theme(&theme_text)?;
     let mut tiles = parse_suite_apps(&catalog_text)?;
     let asset_root = std::fs::canonicalize(root.join("apps/core/public")).map_err(|_| {
         diag(
@@ -293,23 +316,213 @@ fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, s
     for tile in &mut tiles {
         tile.asset = Some(resolve_svg_asset(&tile.icon, &asset_root)?);
     }
-    let mut resolved_files = vec![source.display().to_string(), catalog.display().to_string()];
-    resolved_files.extend(
+    let mut resolved_paths = vec![source, catalog, card_module, theme_module];
+    resolved_paths.extend(
         tiles
             .iter()
             .filter_map(|tile| tile.asset.as_ref())
-            .map(|asset| asset.path.display().to_string()),
+            .map(|asset| asset.path.clone()),
     );
+    let fingerprint = source_fingerprint(&resolved_paths)?;
+    let resolved_files = resolved_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     Ok(ParsedPage {
         tiles,
         layout,
         resolved_files,
-        fingerprint: source_fingerprint(&text, &catalog_text),
+        fingerprint,
         tile_style,
+        source_theme,
     })
 }
 
-fn parse_tile_style(source: &str) -> Result<TileStyle, serde_json::Value> {
+fn bounded_file(
+    root: &std::path::Path,
+    relative: &str,
+    code: &str,
+) -> Result<PathBuf, serde_json::Value> {
+    let path = std::fs::canonicalize(root.join(relative)).map_err(|_| {
+        diag(
+            &format!("{code}_NOT_FOUND"),
+            "required allowlisted source file was not found",
+            relative,
+        )
+    })?;
+    if !path.starts_with(root) {
+        return Err(diag(
+            &format!("{code}_OUTSIDE_ROOT"),
+            "required source file resolves outside module_roots",
+            relative,
+        ));
+    }
+    Ok(path)
+}
+
+fn primitive_classes<'a>(source: &'a str, primitive: &str) -> Result<&'a str, serde_json::Value> {
+    let marker = format!("const {primitive} =");
+    let body = source
+        .find(&marker)
+        .map(|start| &source[start..])
+        .ok_or_else(|| {
+            diag(
+                "CARD_PRIMITIVE_UNSUPPORTED",
+                "shared Card primitive declaration is missing",
+                primitive,
+            )
+        })?;
+    let cn = body
+        .find("className={cn(\"")
+        .map(|start| &body[start + "className={cn(\"".len()..])
+        .ok_or_else(|| {
+            diag(
+                "CARD_PRIMITIVE_UNSUPPORTED",
+                "primitive requires a literal base class merge",
+                primitive,
+            )
+        })?;
+    let end = cn.find('"').ok_or_else(|| {
+        diag(
+            "CARD_PRIMITIVE_UNSUPPORTED",
+            "primitive base class literal is unterminated",
+            primitive,
+        )
+    })?;
+    Ok(&cn[..end])
+}
+
+fn parse_card_primitive(source: &str) -> Result<(f64, f64, &str), serde_json::Value> {
+    let classes = primitive_classes(source, "Card")?;
+    for required in ["bg-card", "text-card-foreground", "shadow"] {
+        if !classes.split_whitespace().any(|class| class == required) {
+            return Err(diag(
+                "CARD_PRIMITIVE_UNSUPPORTED",
+                "Card base classes are outside the bounded primitive",
+                required,
+            ));
+        }
+    }
+    let radius = if classes
+        .split_whitespace()
+        .any(|class| class == "rounded-xl")
+    {
+        12.0
+    } else if classes
+        .split_whitespace()
+        .any(|class| class == "rounded-lg")
+    {
+        8.0
+    } else {
+        return Err(diag(
+            "CARD_PRIMITIVE_UNSUPPORTED",
+            "Card requires rounded-lg or rounded-xl",
+            classes,
+        ));
+    };
+    let border = if classes.split_whitespace().any(|class| class == "border-2") {
+        2.0
+    } else if classes.split_whitespace().any(|class| class == "border") {
+        1.0
+    } else {
+        return Err(diag(
+            "CARD_PRIMITIVE_UNSUPPORTED",
+            "Card requires a bounded border utility",
+            classes,
+        ));
+    };
+    Ok((radius, border, classes))
+}
+
+fn parse_light_theme(source: &str) -> Result<Theme, serde_json::Value> {
+    let start = source.find(":root").ok_or_else(|| {
+        diag(
+            "THEME_TOKENS_UNSUPPORTED",
+            "theme requires a light :root block",
+            ":root",
+        )
+    })?;
+    let body = &source[start..];
+    let open = body.find('{').ok_or_else(|| {
+        diag(
+            "THEME_TOKENS_UNSUPPORTED",
+            "light :root block is malformed",
+            ":root",
+        )
+    })?;
+    let body = &body[open + 1..];
+    let close = body.find('}').ok_or_else(|| {
+        diag(
+            "THEME_TOKENS_UNSUPPORTED",
+            "light :root block is unterminated",
+            ":root",
+        )
+    })?;
+    let body = &body[..close];
+    let token = |name: &str| -> Result<String, serde_json::Value> {
+        let marker = format!("--{name}:");
+        let value = body
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                line.strip_prefix(&marker)
+                    .and_then(|tail| tail.split(';').next())
+            })
+            .ok_or_else(|| {
+                diag(
+                    "THEME_TOKEN_MISSING",
+                    "required light theme token is missing",
+                    name,
+                )
+            })?;
+        hsl_to_hex(value.trim()).ok_or_else(|| {
+            diag(
+                "THEME_TOKEN_UNSUPPORTED",
+                "theme token must be a literal H S% L% value",
+                value.trim(),
+            )
+        })
+    };
+    Ok(Theme {
+        card: token("card")?,
+        foreground: token("foreground")?,
+        muted: token("muted-foreground")?,
+        border: token("border")?,
+    })
+}
+
+fn hsl_to_hex(value: &str) -> Option<String> {
+    let parts: Vec<_> = value.split_whitespace().collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h = parts[0].parse::<f64>().ok()?;
+    let s = parts[1].strip_suffix('%')?.parse::<f64>().ok()? / 100.0;
+    let l = parts[2].strip_suffix('%')?.parse::<f64>().ok()? / 100.0;
+    if !h.is_finite() || !(0.0..=1.0).contains(&s) || !(0.0..=1.0).contains(&l) {
+        return None;
+    }
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = h.rem_euclid(360.0) / 60.0;
+    let x = c * (1.0 - (h_prime.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match h_prime as u8 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    Some(format!(
+        "#{:02x}{:02x}{:02x}",
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8
+    ))
+}
+
+fn parse_tile_style(source: &str, card_source: &str) -> Result<TileStyle, serde_json::Value> {
     let content = source
         .find("className=\"flex items-center")
         .map(|i| &source[i..])
@@ -338,8 +551,28 @@ fn parse_tile_style(source: &str) -> Result<TileStyle, serde_json::Value> {
             .map(tailwind_space)
             .transpose()
     };
-    let padding = space("p-")?
-        .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "CardContent requires p-N", "p"))?;
+    let base_content = primitive_classes(card_source, "CardContent")?;
+    let mut sides = [None; 4];
+    for class in base_content
+        .split_whitespace()
+        .chain(classes.split_whitespace())
+    {
+        if let Some(token) = class.strip_prefix("p-") {
+            let value = tailwind_space(token)?;
+            sides = [Some(value); 4];
+        } else if let Some(token) = class.strip_prefix("pt-") {
+            sides[0] = Some(tailwind_space(token)?);
+        }
+    }
+    let padding = sides[0]
+        .filter(|top| sides.iter().all(|side| *side == Some(*top)))
+        .ok_or_else(|| {
+            diag(
+                "CARD_CONTENT_UNSUPPORTED",
+                "merged CardContent padding must be uniform",
+                base_content,
+            )
+        })?;
     let content_gap = space("gap-")?
         .ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "CardContent requires gap-N", "gap"))?;
     let badge = source
@@ -353,7 +586,7 @@ fn parse_tile_style(source: &str) -> Result<TileStyle, serde_json::Value> {
                 "img",
             )
         })?;
-    let radius = if source.contains("rounded-lg") {
+    let icon_radius = if source.contains("rounded-lg") {
         8.
     } else if source.contains("rounded-xl") {
         12.
@@ -372,11 +605,14 @@ fn parse_tile_style(source: &str) -> Result<TileStyle, serde_json::Value> {
         400
     };
     let description_size = if source.contains("text-sm") { 14. } else { 16. };
+    let (card_radius, card_border_width, _) = parse_card_primitive(card_source)?;
     Ok(TileStyle {
         padding,
         content_gap,
         badge,
-        radius,
+        icon_radius,
+        card_radius,
+        card_border_width,
         title_size: 16.,
         title_weight,
         description_size,
@@ -567,15 +803,21 @@ fn tailwind_space(token: &str) -> Result<f64, serde_json::Value> {
             )
         })
 }
-fn source_fingerprint(source: &str, catalog: &str) -> String {
-    format!(
-        "{:016x}",
-        source
-            .bytes()
-            .chain(catalog.bytes())
-            .fold(14695981039346656037u64, |h, b| (h ^ b as u64)
-                .wrapping_mul(1099511628211))
-    )
+fn source_fingerprint(paths: &[PathBuf]) -> Result<String, serde_json::Value> {
+    let mut hash = 14695981039346656037u64;
+    for path in paths {
+        let bytes = std::fs::read(path).map_err(|_| {
+            diag(
+                "FINGERPRINT_READ",
+                "resolved source file could not be fingerprinted",
+                &path.display().to_string(),
+            )
+        })?;
+        for byte in (bytes.len() as u64).to_le_bytes().into_iter().chain(bytes) {
+            hash = (hash ^ byte as u64).wrapping_mul(1099511628211);
+        }
+    }
+    Ok(format!("{hash:016x}"))
 }
 
 /// Parses only `const SUITE_APPS = [{ id:'', name:'', icon:'', url:'',
@@ -763,7 +1005,7 @@ async fn create_snapshot_nodes(
         }
     }
     let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
-    let theme = match theme(args) {
+    let theme = match theme(args, &parsed.source_theme) {
         Ok(v) => v,
         Err(e) => return ToolResult::error(e),
     };
@@ -785,7 +1027,7 @@ async fn create_snapshot_nodes(
     let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
     let text_count = parsed.tiles.len() * 2 + 1;
     let semantic_tree: Vec<_> = parsed.tiles.iter().map(|tile| serde_json::json!({"kind":"link","href":tile.url,"children":[{"kind":"image","src":tile.icon},{"kind":"text","value":tile.name},{"kind":"text","value":tile.description}]})).collect();
-    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"theme":{"card":theme.card,"foreground":theme.foreground,"muted_foreground":theme.muted},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
+    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"card":{"radius_px":parsed.tile_style.card_radius,"border_width_px":parsed.tile_style.card_border_width,"icon_radius_px":parsed.tile_style.icon_radius},"theme":{"card":theme.card,"foreground":theme.foreground,"muted_foreground":theme.muted,"border":theme.border},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
     if args.dry_run {
         return ToolResult::text("React source import plan").with_data(data);
     }
@@ -835,8 +1077,10 @@ fn layout_app_directory(
             y,
             card_w,
             card_h,
-            style.radius,
+            style.card_radius,
             &theme.card,
+            &theme.border,
+            style.card_border_width,
             layer,
             out,
         )];
@@ -892,7 +1136,7 @@ fn layout_app_directory(
         note_y,
         12.0,
         400,
-        "#64748b",
+        &theme.muted,
         layer,
         out,
     ));
@@ -1025,11 +1269,17 @@ fn rect_node(
     h: f64,
     r: f64,
     color: &str,
+    stroke_color: &str,
+    stroke_width: f64,
     layer: uuid::Uuid,
     out: &mut Vec<SceneNode>,
 ) -> uuid::Uuid {
     let mut p = PathNode::new(PathData::rounded_rect(x, y, w, h, r));
     p.fill = Fill::solid(Color::from_hex(color).unwrap_or(Color::BLACK));
+    p.stroke = Stroke::solid(
+        Color::from_hex(stroke_color).unwrap_or(Color::BLACK),
+        stroke_width,
+    );
     let n = SceneNode::new(name, layer, SceneNodeKind::Path(p));
     let id = n.id;
     out.push(n);
@@ -1304,11 +1554,21 @@ mod tests {
             std::env::temp_dir().join(format!("photonic-react-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("apps/hub/src/components")).unwrap();
         std::fs::create_dir_all(root.join("packages/waffle/src")).unwrap();
+        std::fs::create_dir_all(root.join("packages/ui/src")).unwrap();
+        std::fs::create_dir_all(root.join("packages/theme")).unwrap();
         std::fs::create_dir_all(root.join("apps/core/public")).unwrap();
         let app = "import { SUITE_APPS, filterApps } from '@bgch/waffle';\nfunction AppTile(){return <CardContent className=\"flex items-center gap-4 p-5\"><img className=\"h-12 w-12 rounded-lg\"/><span className=\"font-semibold\"/><p className=\"text-sm\"/></CardContent>}\nexport function AppDirectory(){ const tiles = filterApps(apps); return <section><div className=\"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3\">{tiles.map((app) => (<AppTile key={app.id} app={app} />))}</div></section> }\n";
         let catalog = "const ICON_ORIGIN = 'https://people.bgcharlem.org';\nconst SUITE_APPS = [{ id: 'a', name: 'ONE', icon: `${ICON_ORIGIN}/one-icon.svg`, url: 'https://one.example', description: 'One' }, { id: 'b', name: 'TWO', icon: `${ICON_ORIGIN}/two-icon.svg`, url: 'https://two.example', description: 'Two' }];\n";
         std::fs::write(root.join("apps/hub/src/components/AppDirectory.jsx"), app).unwrap();
         std::fs::write(root.join("packages/waffle/src/suiteApps.js"), catalog).unwrap();
+        std::fs::write(
+            root.join("packages/ui/src/card.jsx"),
+            "const Card = React.forwardRef(() => <div className={cn(\"rounded-xl border bg-card text-card-foreground shadow\", className)} />)\nconst CardContent = React.forwardRef(() => <div className={cn(\"p-6 pt-0\", className)} />)\n",
+        ).unwrap();
+        std::fs::write(
+            root.join("packages/theme/tokens.css"),
+            ":root {\n --card: 0 0% 100%;\n --foreground: 224 71.4% 4.1%;\n --muted-foreground: 220 8.9% 43%;\n --border: 220 13% 91%;\n}\n.dark { --card: 0 0% 0%; }\n",
+        ).unwrap();
         std::fs::write(
             root.join("apps/core/public/one-icon.svg"),
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0 L10 0 L10 10 Z" fill="#ff0000"/></svg>"##,
@@ -1513,16 +1773,19 @@ mod tests {
             .replace("rounded-lg", "rounded-xl")
             .replace("text-sm", "text-base")
             .replace("font-semibold", "font-bold");
-        let a = parse_tile_style(baseline).unwrap();
-        let b = parse_tile_style(&changed).unwrap();
+        let card = "const Card = <div className={cn(\"rounded-xl border bg-card text-card-foreground shadow\", className)} />; const CardContent = <div className={cn(\"p-6 pt-0\", className)} />;";
+        let a = parse_tile_style(baseline, card).unwrap();
+        let b = parse_tile_style(&changed, card).unwrap();
         assert_eq!(a.padding, 20.);
         assert_eq!(b.padding, 32.);
         assert_eq!(a.content_gap, 16.);
         assert_eq!(b.content_gap, 32.);
         assert_eq!(a.badge, 48.);
         assert_eq!(b.badge, 64.);
-        assert_eq!(a.radius, 8.);
-        assert_eq!(b.radius, 12.);
+        assert_eq!(a.icon_radius, 8.);
+        assert_eq!(b.icon_radius, 12.);
+        assert_eq!(a.card_radius, 12.);
+        assert_eq!(a.card_border_width, 1.);
         assert_eq!(a.description_size, 14.);
         assert_eq!(b.description_size, 16.);
         assert_eq!(a.title_weight, 600);
@@ -1536,11 +1799,118 @@ mod tests {
             card: Some("#112233".into()),
             foreground: Some("#445566".into()),
             muted_foreground: Some("#778899".into()),
+            border: Some("#aabbcc".into()),
         });
-        let parsed = theme(&args).unwrap();
+        let source = Theme {
+            card: "#ffffff".into(),
+            foreground: "#000000".into(),
+            muted: "#111111".into(),
+            border: "#222222".into(),
+        };
+        let parsed = theme(&args, &source).unwrap();
         assert_eq!(parsed.card, "#112233");
         assert_eq!(parsed.foreground, "#445566");
         assert_eq!(parsed.muted, "#778899");
+        assert_eq!(parsed.border, "#aabbcc");
+    }
+
+    #[test]
+    fn light_hsl_theme_tokens_become_hex() {
+        let parsed = parse_light_theme(
+            ":root {\n--card: 0 0% 100%;\n--foreground: 224 71.4% 4.1%;\n--muted-foreground: 220 8.9% 43%;\n--border: 220 13% 91%;\n}\n.dark { --card: 0 0% 0%; }",
+        )
+        .unwrap();
+        assert_eq!(parsed.card, "#ffffff");
+        assert_eq!(parsed.foreground, "#030712");
+        assert_eq!(parsed.muted, "#646a77");
+        assert_eq!(parsed.border, "#e5e7eb");
+    }
+
+    #[tokio::test]
+    async fn copied_card_and_theme_sources_drive_style_and_fingerprint() {
+        let root = copied_root();
+        let state = source_test_state();
+        let baseline =
+            plan_json(&create_vectors_from_react(&state, source_args(&root, true)).await);
+        assert_eq!(baseline["card"]["radius_px"], 12.0);
+        assert_eq!(baseline["card"]["border_width_px"], 1.0);
+        assert_eq!(baseline["theme"]["card"], "#ffffff");
+        assert_eq!(baseline["theme"]["foreground"], "#030712");
+        assert_eq!(baseline["theme"]["muted_foreground"], "#646a77");
+        assert_eq!(baseline["theme"]["border"], "#e5e7eb");
+        let resolved = baseline["resolved_files"].as_array().unwrap();
+        assert!(resolved
+            .iter()
+            .any(|path| path.as_str().unwrap().ends_with("packages/ui/src/card.jsx")));
+        assert!(resolved.iter().any(|path| path
+            .as_str()
+            .unwrap()
+            .ends_with("packages/theme/tokens.css")));
+
+        let card_path = root.join("packages/ui/src/card.jsx");
+        let card = std::fs::read_to_string(&card_path)
+            .unwrap()
+            .replace("rounded-xl border ", "rounded-lg border-2 ");
+        std::fs::write(&card_path, card).unwrap();
+        let changed_card =
+            plan_json(&create_vectors_from_react(&state, source_args(&root, true)).await);
+        assert_eq!(changed_card["card"]["radius_px"], 8.0);
+        assert_eq!(changed_card["card"]["border_width_px"], 2.0);
+        assert_ne!(
+            baseline["source_fingerprint"],
+            changed_card["source_fingerprint"]
+        );
+
+        let tokens_path = root.join("packages/theme/tokens.css");
+        let tokens = std::fs::read_to_string(&tokens_path)
+            .unwrap()
+            .replace("--card: 0 0% 100%", "--card: 210 50% 20%")
+            .replace("--border: 220 13% 91%", "--border: 0 100% 50%");
+        std::fs::write(&tokens_path, tokens).unwrap();
+        let changed_theme =
+            plan_json(&create_vectors_from_react(&state, source_args(&root, true)).await);
+        assert_eq!(changed_theme["theme"]["card"], "#1a334d");
+        assert_eq!(changed_theme["theme"]["border"], "#ff0000");
+        assert_ne!(
+            changed_card["source_fingerprint"],
+            changed_theme["source_fingerprint"]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn missing_or_outside_style_sources_reject_without_mutation() {
+        let root = copied_root();
+        let state = source_test_state();
+        let tokens = root.join("packages/theme/tokens.css");
+        std::fs::remove_file(&tokens).unwrap();
+        let before = state.document.lock().await.nodes.len();
+        let undo = state.history.lock().await.undo_depth();
+        let missing = create_vectors_from_react(&state, source_args(&root, false)).await;
+        assert_eq!(missing.is_error, Some(true));
+        assert_eq!(state.document.lock().await.nodes.len(), before);
+        assert_eq!(state.history.lock().await.undo_depth(), undo);
+
+        std::fs::write(
+            &tokens,
+            ":root { --card: 0 0% 100%; --foreground: 0 0% 0%; --muted-foreground: 0 0% 40%; --border: 0 0% 90%; }",
+        )
+        .unwrap();
+        let card = root.join("packages/ui/src/card.jsx");
+        std::fs::remove_file(&card).unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "photonic-card-outside-{}.jsx",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&outside, "outside").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &card).unwrap();
+        let rejected = create_vectors_from_react(&state, source_args(&root, false)).await;
+        assert_eq!(rejected.is_error, Some(true));
+        assert_eq!(state.document.lock().await.nodes.len(), before);
+        assert_eq!(state.history.lock().await.undo_depth(), undo);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
     }
 
     #[tokio::test]
@@ -1606,6 +1976,17 @@ mod tests {
                 >= 4
         );
         assert!(!doc.nodes.values().any(|node| node.name == "App badge"));
+        let card = doc
+            .nodes
+            .values()
+            .find(|node| node.name == "Card surface")
+            .expect("card surface path");
+        let SceneNodeKind::Path(card) = &card.kind else {
+            panic!("card surface is not editable path geometry")
+        };
+        assert!(card.stroke.enabled);
+        assert_eq!(card.stroke.width, 1.0);
+        assert_eq!(card.stroke.color, Color::from_hex("#e5e7eb").unwrap());
         assert_all_icon_leaves_fit(&doc);
         let rendered_doc = doc.clone();
         drop(doc);

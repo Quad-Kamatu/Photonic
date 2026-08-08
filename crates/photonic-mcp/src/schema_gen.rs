@@ -107,6 +107,7 @@ pub fn tool_list() -> Value {
                     "export_name": { "type": "string", "description": "Named React export to import." },
                     "props": { "type": "object", "description": "JSON-only static props snapshot." },
                     "module_roots": { "type": "array", "items": {"type":"string"}, "description": "Approved local roots for source and bounded imports." },
+                    "theme_tokens": { "type": "object", "description": "Optional hex overrides for source-resolved light theme tokens.", "properties": { "card": {"type":"string"}, "foreground": {"type":"string"}, "muted_foreground": {"type":"string"}, "border": {"type":"string"} } },
                     "origin": { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } },
                     "viewport": { "type": "object", "properties": { "width": {"type":"number"}, "height": {"type":"number"} } },
                     "layer_id": { "type": "string" }, "group_name": { "type": "string" },
