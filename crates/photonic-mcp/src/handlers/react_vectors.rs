@@ -5,9 +5,7 @@
 //! utility subset, then delegates all geometry lowering to the core compiler.
 
 use crate::handlers::css_vectors::create_vectors_from_css;
-use crate::protocol::{
-    CreateVectorsFromCssArgs, CreateVectorsFromReactArgs, ReactSnapshotTileArg, ToolResult,
-};
+use crate::protocol::{CreateVectorsFromCssArgs, CreateVectorsFromReactArgs, ToolResult};
 use crate::server::AppState;
 use photonic_core::{
     color::Color,
@@ -17,7 +15,6 @@ use photonic_core::{
     style::Fill,
     transform::Transform,
 };
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 const MAX_JSX_BYTES: usize = 256 * 1024;
@@ -29,9 +26,6 @@ pub async fn create_vectors_from_react(
 ) -> ToolResult {
     if args.source_path.is_some() {
         return create_source_path_snapshot(state, &args).await;
-    }
-    if let (Some(source), Some(snapshot)) = (&args.source, &args.snapshot) {
-        return create_static_snapshot(state, &args, source, snapshot).await;
     }
     let Some(jsx) = &args.jsx else {
         return ToolResult::error("provide either jsx or source plus snapshot");
@@ -60,25 +54,41 @@ pub async fn create_vectors_from_react(
     result
 }
 
-const HUB_SOURCE_SHA256: &str = "4ceee0a20625514fe0cf5aa9a8404030a12a3c2bcea0e6c4bfd4f829b7732f8c";
-const HUB_CATALOG_SHA256: &str = "9bd33c3db385655aa448ed510ce7b7390213227e588e7106de47e26a603ecf6f";
+#[derive(Debug, Clone)]
+struct ImportedTile {
+    name: String,
+    description: String,
+    icon: String,
+    url: String,
+}
+#[derive(Debug, Clone)]
+struct LayoutSpec {
+    gap: f64,
+    desktop_columns: usize,
+}
+#[derive(Debug, Clone)]
+struct ParsedPage {
+    tiles: Vec<ImportedTile>,
+    layout: LayoutSpec,
+    resolved_files: Vec<String>,
+    fingerprint: String,
+}
 
-/// Safe, file-backed acceptance path. It resolves only the two pinned files
-/// needed by the AppDirectory super-admin snapshot and checks their hashes
-/// before lowering anything. No JavaScript is evaluated and no asset is read
-/// from the network.
+/// Safe, source-driven entry point for the first bounded static React page.
+/// This is a closed parser for AppDirectory's declarative `tiles.map(AppTile)`
+/// form, not a JavaScript interpreter: expressions outside that form fail
+/// before document mutation.
 async fn create_source_path_snapshot(
     state: &AppState,
     args: &CreateVectorsFromReactArgs,
 ) -> ToolResult {
-    let diagnostics = match read_hub_snapshot_sources(args) {
-        Ok(()) => Vec::new(),
-        Err(d) => vec![d],
+    let parsed = match read_app_directory(args) {
+        Ok(parsed) => parsed,
+        Err(d) => {
+            return ToolResult::error("React source import rejected")
+                .with_data(serde_json::json!({"diagnostics":[d],"contract_version":2}))
+        }
     };
-    if !diagnostics.is_empty() {
-        return ToolResult::error("React source import rejected")
-            .with_data(serde_json::json!({"diagnostics":diagnostics,"contract_version":2}));
-    }
     let props = args.props.as_ref().and_then(|v| v.as_object());
     let is_admin = props
         .and_then(|p| p.get("isSuperAdmin"))
@@ -91,11 +101,10 @@ async fn create_source_path_snapshot(
     if !is_admin || !loading {
         return ToolResult::error("React source import rejected").with_data(serde_json::json!({"diagnostics":[diag("SNAPSHOT_PROPS", "only the pinned AppDirectory super-admin non-loading snapshot is supported", "props")],"contract_version":2}));
     }
-    let tiles = hub_tiles();
-    create_snapshot_nodes(state, args, &tiles, "BGCH Hub AppDirectory source snapshot").await
+    create_snapshot_nodes(state, args, &parsed, "React source snapshot").await
 }
 
-fn read_hub_snapshot_sources(args: &CreateVectorsFromReactArgs) -> Result<(), serde_json::Value> {
+fn read_app_directory(args: &CreateVectorsFromReactArgs) -> Result<ParsedPage, serde_json::Value> {
     let source = args
         .source_path
         .as_deref()
@@ -103,7 +112,7 @@ fn read_hub_snapshot_sources(args: &CreateVectorsFromReactArgs) -> Result<(), se
     if args.export_name.as_deref() != Some("AppDirectory") {
         return Err(diag(
             "EXPORT_UNSUPPORTED",
-            "only AppDirectory is supported for this bounded source snapshot",
+            "only the AppDirectory export is supported by this bounded parser",
             args.export_name.as_deref().unwrap_or(""),
         ));
     }
@@ -142,11 +151,25 @@ fn read_hub_snapshot_sources(args: &CreateVectorsFromReactArgs) -> Result<(), se
             &source.display().to_string(),
         )
     })?;
-    if sha256(&text) != HUB_SOURCE_SHA256 {
+    if text.contains("className={") {
         return Err(diag(
-            "STALE_SOURCE",
-            "AppDirectory source hash does not match the pinned acceptance fixture",
-            &source.display().to_string(),
+            "JSX_UNSUPPORTED_EXPRESSION",
+            "dynamic className expressions are not supported",
+            "className={…}",
+        ));
+    }
+    let required = [
+        "from '@bgch/waffle'",
+        "export function AppDirectory",
+        "filterApps(apps",
+        "tiles.map",
+        "<AppTile",
+    ];
+    if let Some(missing) = required.iter().find(|token| !text.contains(**token)) {
+        return Err(diag(
+            "SOURCE_UNSUPPORTED",
+            "source is outside the bounded AppDirectory static form",
+            missing,
         ));
     }
     let root = roots
@@ -175,43 +198,210 @@ fn read_hub_snapshot_sources(args: &CreateVectorsFromReactArgs) -> Result<(), se
             "@bgch/waffle",
         )
     })?;
-    if sha256(&catalog_text) != HUB_CATALOG_SHA256 {
+    let layout = parse_grid_layout(&text)?;
+    let tiles = parse_suite_apps(&catalog_text)?;
+    Ok(ParsedPage {
+        tiles,
+        layout,
+        resolved_files: vec![source.display().to_string(), catalog.display().to_string()],
+        fingerprint: source_fingerprint(&text, &catalog_text),
+    })
+}
+
+fn parse_grid_layout(source: &str) -> Result<LayoutSpec, serde_json::Value> {
+    let start = source.find("className=\"grid ").ok_or_else(|| {
+        diag(
+            "TAILWIND_UNSUPPORTED",
+            "AppDirectory requires a literal grid className",
+            "className",
+        )
+    })?;
+    let rest = &source[start + "className=\"".len()..];
+    let end = rest.find('"').ok_or_else(|| {
+        diag(
+            "JSX_UNSUPPORTED",
+            "unterminated className literal",
+            "className",
+        )
+    })?;
+    let classes = &rest[..end];
+    let mut gap = None;
+    let mut columns = None;
+    for token in classes.split_whitespace() {
+        if let Some(n) = token.strip_prefix("gap-") {
+            gap = Some(tailwind_space(n)?);
+        }
+        if let Some(n) = token.strip_prefix("lg:grid-cols-") {
+            columns = n.parse::<usize>().ok().filter(|n| *n > 0 && *n <= 12);
+        }
+    }
+    Ok(LayoutSpec {
+        gap: gap.ok_or_else(|| diag("TAILWIND_UNSUPPORTED", "grid must declare gap-N", classes))?,
+        desktop_columns: columns.ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "grid must declare lg:grid-cols-N",
+                classes,
+            )
+        })?,
+    })
+}
+fn tailwind_space(token: &str) -> Result<f64, serde_json::Value> {
+    token
+        .parse::<f64>()
+        .ok()
+        .filter(|n| *n >= 0. && *n <= 96.)
+        .map(|n| n * 4.)
+        .ok_or_else(|| {
+            diag(
+                "TAILWIND_UNSUPPORTED",
+                "gap must be a bounded numeric Tailwind spacing token",
+                token,
+            )
+        })
+}
+fn source_fingerprint(source: &str, catalog: &str) -> String {
+    format!(
+        "{:016x}",
+        source
+            .bytes()
+            .chain(catalog.bytes())
+            .fold(14695981039346656037u64, |h, b| (h ^ b as u64)
+                .wrapping_mul(1099511628211))
+    )
+}
+
+/// Parses only `const SUITE_APPS = [{ id:'', name:'', icon:'', url:'',
+/// description:'' }, ...]`. Bracket tracking handles optional literal arrays
+/// such as requiredCapabilities, while every emitted field must be a literal.
+fn parse_suite_apps(source: &str) -> Result<Vec<ImportedTile>, serde_json::Value> {
+    let start = source.find("const SUITE_APPS = [").ok_or_else(|| {
+        diag(
+            "CATALOG_UNSUPPORTED",
+            "missing literal SUITE_APPS declaration",
+            "SUITE_APPS",
+        )
+    })?;
+    let tail = &source[start..];
+    let end = tail.find("];\n").ok_or_else(|| {
+        diag(
+            "CATALOG_UNSUPPORTED",
+            "unterminated SUITE_APPS literal",
+            "SUITE_APPS",
+        )
+    })?;
+    let body = &tail[..end];
+    let mut objects = Vec::new();
+    let mut depth = 0usize;
+    let mut object_start = None;
+    for (i, c) in body.char_indices() {
+        match c {
+            '{' => {
+                if depth == 0 {
+                    object_start = Some(i);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth == 0 {
+                    return Err(diag(
+                        "CATALOG_UNSUPPORTED",
+                        "unbalanced object literal",
+                        "SUITE_APPS",
+                    ));
+                }
+                depth -= 1;
+                if depth == 0 {
+                    objects.push(&body[object_start.expect("set at opening brace")..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 || objects.is_empty() {
         return Err(diag(
-            "STALE_IMPORT",
-            "SUITE_APPS hash does not match the pinned acceptance fixture",
-            "@bgch/waffle",
+            "CATALOG_UNSUPPORTED",
+            "SUITE_APPS must contain object literals",
+            "SUITE_APPS",
         ));
     }
-    Ok(())
+    objects
+        .into_iter()
+        .map(|object| {
+            Ok(ImportedTile {
+                name: literal_field(object, "name")?,
+                description: literal_field(object, "description")?,
+                icon: icon_field(object)?,
+                url: literal_field(object, "url")?,
+            })
+        })
+        .collect()
 }
 
-fn sha256(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+fn literal_field(object: &str, field: &str) -> Result<String, serde_json::Value> {
+    let marker = format!("{field}:");
+    let rest = object
+        .find(&marker)
+        .map(|i| &object[i + marker.len()..])
+        .ok_or_else(|| {
+            diag(
+                "CATALOG_UNSUPPORTED",
+                "missing required literal field",
+                field,
+            )
+        })?
+        .trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| *c == '\'' || *c == '"')
+        .ok_or_else(|| {
+            diag(
+                "CATALOG_DYNAMIC",
+                "catalog fields must be string literals",
+                field,
+            )
+        })?;
+    let end = rest[1..]
+        .find(quote)
+        .ok_or_else(|| diag("CATALOG_UNSUPPORTED", "unterminated string literal", field))?;
+    Ok(rest[1..end + 1].to_string())
 }
 
-fn hub_tiles() -> Vec<ReactSnapshotTileArg> {
-    [
-        ("PEOPLE", "HR & Operations", "#2563eb"),
-        ("VIMS", "Inventory Management", "#7c3aed"),
-        ("FIRM", "Incident Reporting", "#dc2626"),
-        ("LESSON", "Curriculum & Lessons", "#0891b2"),
-        ("GRANT", "Grant Reporting", "#16a34a"),
-        ("CHECK-IN", "Member Check-In", "#ea580c"),
-        ("PROG", "Program Management", "#4f46e5"),
-    ]
-    .into_iter()
-    .map(|(name, description, color)| ReactSnapshotTileArg {
-        name: name.into(),
-        description: description.into(),
-        color: Some(color.into()),
-    })
-    .collect()
+fn icon_field(object: &str) -> Result<String, serde_json::Value> {
+    let marker = "icon:";
+    let rest = object
+        .find(marker)
+        .map(|i| &object[i + marker.len()..])
+        .ok_or_else(|| diag("CATALOG_UNSUPPORTED", "missing required icon field", "icon"))?
+        .trim_start();
+    // `ICON_ORIGIN` is a top-level literal binding in the supported catalog.
+    let suffix_start = rest.find("}/").ok_or_else(|| {
+        diag(
+            "CATALOG_DYNAMIC",
+            "icon must use the bounded ICON_ORIGIN template",
+            "icon",
+        )
+    })? + 1;
+    let suffix = rest[suffix_start..]
+        .trim_start_matches('/')
+        .split('`')
+        .next()
+        .unwrap_or("");
+    if suffix.is_empty() {
+        return Err(diag(
+            "CATALOG_DYNAMIC",
+            "icon template must have a literal suffix",
+            "icon",
+        ));
+    }
+    Ok(format!("https://people.bgcharlem.org/{suffix}"))
 }
 
 async fn create_snapshot_nodes(
     state: &AppState,
     args: &CreateVectorsFromReactArgs,
-    tiles: &[ReactSnapshotTileArg],
+    parsed: &ParsedPage,
     root_label: &str,
 ) -> ToolResult {
     let (doc_w, doc_h, active_layer) = {
@@ -241,13 +431,22 @@ async fn create_snapshot_nodes(
     }
     let origin = args.origin.as_ref().map(|p| (p.x, p.y)).unwrap_or((0., 0.));
     let mut nodes = Vec::new();
-    let root = layout_app_directory(tiles, origin, viewport, layer_id, &mut nodes);
+    let root = layout_app_directory(
+        &parsed.tiles,
+        &parsed.layout,
+        origin,
+        viewport,
+        layer_id,
+        &mut nodes,
+    );
     if let Some(n) = nodes.iter_mut().find(|n| n.id == root) {
         n.name = args.group_name.clone().unwrap_or_else(|| root_label.into());
         n.tags.push("react-role:page".into());
     }
     let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
-    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":tiles.len(),"text":15,"images":7,"links":7},"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
+    let text_count = parsed.tiles.len() * 2 + 1;
+    let semantic_tree: Vec<_> = parsed.tiles.iter().map(|tile| serde_json::json!({"kind":"link","href":tile.url,"children":[{"kind":"image","src":tile.icon},{"kind":"text","value":tile.name},{"kind":"text","value":tile.description}]})).collect();
+    let data = serde_json::json!({"root_node_ids":[root],"created_node_ids":created,"node_counts":{"nodes":nodes.len(),"tiles":parsed.tiles.len(),"text":text_count,"images":parsed.tiles.len(),"links":parsed.tiles.len()},"layout":{"columns":parsed.layout.desktop_columns,"gap_px":parsed.layout.gap},"semantic_tree":semantic_tree,"source_fingerprint":parsed.fingerprint,"resolved_files":parsed.resolved_files,"dry_run":args.dry_run,"contract_version":2,"diagnostics":[]});
     if args.dry_run {
         return ToolResult::text("React source import plan").with_data(data);
     }
@@ -262,143 +461,18 @@ async fn create_snapshot_nodes(
     ToolResult::text("Created editable vectors and text from React source snapshot").with_data(data)
 }
 
-/// A deliberately closed adapter for the first real application template.
-/// It does not execute React, load modules, or attempt to interpret arbitrary
-/// JavaScript. Instead it verifies the submitted, untouched source has the
-/// known AppDirectory structure and expands *caller-provided literal* tile
-/// records into ordinary editable paths and text nodes in one atomic command.
-async fn create_static_snapshot(
-    state: &AppState,
-    args: &CreateVectorsFromReactArgs,
-    source: &str,
-    snapshot: &crate::protocol::ReactSnapshotArg,
-) -> ToolResult {
-    let mut diagnostics = validate_app_directory_source(source, snapshot);
-    if !diagnostics.is_empty() {
-        return ToolResult::error("React snapshot conversion rejected")
-            .with_data(serde_json::json!({"diagnostics": diagnostics, "contract_version": 2}));
-    }
-    if snapshot.tiles.is_empty() || snapshot.tiles.len() > 24 {
-        diagnostics.push(diag(
-            "SNAPSHOT_TILES",
-            "snapshot must contain 1 to 24 literal tiles",
-            "tiles",
-        ));
-        return ToolResult::error("React snapshot conversion rejected")
-            .with_data(serde_json::json!({"diagnostics": diagnostics, "contract_version": 2}));
-    }
-    if snapshot.tiles.iter().any(|t| {
-        t.name.trim().is_empty()
-            || t.description.trim().is_empty()
-            || t.name.len() > 96
-            || t.description.len() > 240
-    }) {
-        return ToolResult::error("React snapshot conversion rejected").with_data(serde_json::json!({
-            "diagnostics":[diag("SNAPSHOT_LITERAL", "tile names and descriptions must be bounded non-empty literals", "tiles")], "contract_version":2
-        }));
-    }
-    let (doc_w, doc_h, active_layer) = {
-        let doc = state.document.lock().await;
-        (doc.width, doc.height, doc.active_layer_id)
-    };
-    let Some(layer_id) = args.layer_id.or(active_layer) else {
-        return ToolResult::error("Document has no active layer");
-    };
-    let viewport = args
-        .viewport
-        .as_ref()
-        .map(|v| (v.width, v.height))
-        .unwrap_or((doc_w, doc_h));
-    if !viewport.0.is_finite()
-        || !viewport.1.is_finite()
-        || viewport.0 < 240.0
-        || viewport.1 < 180.0
-    {
-        return ToolResult::error("viewport must be finite and at least 240 by 180");
-    }
-    {
-        let doc = state.document.lock().await;
-        if !doc.layers.get(&layer_id).is_some_and(|l| !l.locked) {
-            return ToolResult::error("destination layer is missing or locked");
-        }
-    }
-    let origin = args
-        .origin
-        .as_ref()
-        .map(|p| (p.x, p.y))
-        .unwrap_or((0.0, 0.0));
-    let mut nodes = Vec::new();
-    let root = layout_app_directory(&snapshot.tiles, origin, viewport, layer_id, &mut nodes);
-    if let Some(name) = &args.group_name {
-        if let Some(n) = nodes.iter_mut().find(|n| n.id == root) {
-            n.name = name.clone();
-        }
-    }
-    let created: Vec<_> = nodes.iter().map(|n| n.id).collect();
-    let data = serde_json::json!({"root_node_ids":[root], "created_node_ids":created, "node_counts":{"nodes":nodes.len(),"tiles":snapshot.tiles.len()}, "template":snapshot.template, "dry_run":args.dry_run, "contract_version":2,
-        "diagnostics":[{"severity":"warning","code":"ASSET_PLACEHOLDER","message":"remote tile icons are represented by editable color badges; image importing is not in this bounded snapshot","value":"icon"}]});
-    if args.dry_run {
-        return ToolResult::text("React static snapshot conversion plan").with_data(data);
-    }
-    let cmd = Command::AddSubtree {
-        layer_id,
-        roots: vec![root],
-        nodes,
-    };
-    let mut doc = state.document.lock().await;
-    let mut history = state.history.lock().await;
-    history.execute_discrete(cmd, &mut doc);
-    ToolResult::text("Created editable vectors and text from React static snapshot").with_data(data)
-}
-
-fn validate_app_directory_source(
-    source: &str,
-    snapshot: &crate::protocol::ReactSnapshotArg,
-) -> Vec<serde_json::Value> {
-    if source.len() > MAX_JSX_BYTES {
-        return vec![diag("SOURCE_LIMIT", "source input exceeds 256 KiB", "")];
-    }
-    if snapshot.template != "bgch-hub-app-directory-v1" {
-        return vec![diag(
-            "SNAPSHOT_TEMPLATE",
-            "unsupported static snapshot template",
-            &snapshot.template,
-        )];
-    }
-    let required = [
-        "export function AppDirectory",
-        "filterApps(apps",
-        "tiles.map",
-        "<AppTile",
-        "className=\"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3\"",
-    ];
-    let missing: Vec<_> = required
-        .iter()
-        .filter(|m| !source.contains(**m))
-        .map(|m| *m)
-        .collect();
-    if missing.is_empty() {
-        Vec::new()
-    } else {
-        vec![diag(
-            "SOURCE_TEMPLATE_MISMATCH",
-            "source does not match the bounded AppDirectory template",
-            &missing.join(", "),
-        )]
-    }
-}
-
 fn layout_app_directory(
-    tiles: &[ReactSnapshotTileArg],
+    tiles: &[ImportedTile],
+    layout: &LayoutSpec,
     origin: (f64, f64),
     viewport: (f64, f64),
     layer: uuid::Uuid,
     out: &mut Vec<SceneNode>,
 ) -> uuid::Uuid {
     let padding = 28.0;
-    let gap = 16.0;
+    let gap = layout.gap;
     let cols = if viewport.0 >= 900.0 {
-        3
+        layout.desktop_columns
     } else if viewport.0 >= 560.0 {
         2
     } else {
@@ -431,17 +505,14 @@ fn layout_app_directory(
                 48.0,
                 48.0,
                 8.0,
-                tile.color.as_deref().unwrap_or("#2563eb"),
+                badge_color(&tile.icon),
                 layer,
                 out,
             ),
         ];
         if let Some(badge) = out.iter_mut().find(|n| n.id == card_children[1]) {
-            let slug = tile.name.to_ascii_lowercase().replace("-", "");
             badge.tags.push("react-role:image".into());
-            badge.tags.push(format!(
-                "source:https://people.bgcharlem.org/{slug}-icon.svg"
-            ));
+            badge.tags.push(format!("source:{}", tile.icon));
         }
         card_children.push(text_node(
             &tile.name,
@@ -471,9 +542,7 @@ fn layout_app_directory(
         );
         if let Some(group) = out.iter_mut().find(|n| n.id == tile_group) {
             group.tags.push("react-role:link".into());
-            group
-                .tags
-                .push(format!("href:{}", hub_tile_url(&tile.name)));
+            group.tags.push(format!("href:{}", tile.url));
         }
         children.push(tile_group);
     }
@@ -492,17 +561,15 @@ fn layout_app_directory(
     group_node("BGCH Hub AppDirectory snapshot", children, layer, out)
 }
 
-fn hub_tile_url(name: &str) -> &'static str {
-    match name {
-        "PEOPLE" => "https://people.bgcharlem.org",
-        "VIMS" => "https://inventory.bgcharlem.org",
-        "FIRM" => "https://incident.bgcharlem.org",
-        "LESSON" => "https://lesson.bgcharlem.org",
-        "GRANT" => "https://grant.bgcharlem.org",
-        "CHECK-IN" => "https://checkin.bgcharlem.org",
-        "PROG" => "https://prog.bgcharlem.org",
-        _ => "",
-    }
+fn badge_color(source: &str) -> &'static str {
+    const PALETTE: [&str; 7] = [
+        "#2563eb", "#7c3aed", "#dc2626", "#0891b2", "#16a34a", "#ea580c", "#4f46e5",
+    ];
+    let index = source
+        .bytes()
+        .fold(0usize, |value, byte| value.wrapping_add(byte as usize))
+        % PALETTE.len();
+    PALETTE[index]
 }
 
 fn rect_node(
@@ -784,5 +851,38 @@ mod tests {
     #[test]
     fn text_is_rejected_not_silently_dropped() {
         assert!(jsx_to_css("<div>Save</div>").is_err());
+    }
+
+    #[test]
+    fn catalog_literals_drive_imported_tile_content() {
+        let source = "const SUITE_APPS = [\n{ id: 'x', name: 'ALPHA', icon: `${ICON_ORIGIN}/alpha-icon.svg`, url: 'https://alpha.example', description: 'First literal' },\n];\n";
+        let mut tiles = parse_suite_apps(source).unwrap();
+        assert_eq!(tiles[0].name, "ALPHA");
+        assert_eq!(tiles[0].description, "First literal");
+        assert_eq!(tiles[0].url, "https://alpha.example");
+        assert_eq!(tiles[0].icon, "https://people.bgcharlem.org/alpha-icon.svg");
+        // Simulates a copied catalog literal changed after the importer was built:
+        // the parsed plan changes without any importer code change.
+        let changed = source.replace("First literal", "Changed literal");
+        tiles = parse_suite_apps(&changed).unwrap();
+        assert_eq!(tiles[0].description, "Changed literal");
+    }
+
+    #[test]
+    fn catalog_dynamic_field_is_a_diagnostic() {
+        let source = "const SUITE_APPS = [\n{ name: app.name, icon: `${ICON_ORIGIN}/x.svg`, url: 'https://x.example', description: 'x' },\n];\n";
+        assert_eq!(
+            parse_suite_apps(source).unwrap_err()["code"],
+            "CATALOG_DYNAMIC"
+        );
+    }
+
+    #[test]
+    fn literal_tailwind_gap_drives_layout_spec() {
+        let baseline = r#"<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">"#;
+        let changed = baseline.replace("gap-4", "gap-8");
+        assert_eq!(parse_grid_layout(baseline).unwrap().gap, 16.0);
+        assert_eq!(parse_grid_layout(&changed).unwrap().gap, 32.0);
+        assert_eq!(parse_grid_layout(&changed).unwrap().desktop_columns, 3);
     }
 }
