@@ -175,7 +175,9 @@ pub fn stabilize_warp(input: &Image, warp: &StabilizeWarp, sampling: Sampling) -
         return input.clone();
     }
     let (w, h) = (input.width as f32, input.height as f32);
-    let [fx, fy, cx, cy] = warp.intrinsics;
+    // Intrinsics are normalized; scale to this frame's actual size.
+    let (fx, fy) = (warp.intrinsics[0] * w, warp.intrinsics[1] * h);
+    let (cx, cy) = (warp.intrinsics[2] * w, warp.intrinsics[3] * h);
     let r = warp.rotation;
     let inv_zoom = 1.0 / warp.zoom;
     let mut out = Image::new(input.width, input.height);
@@ -1374,7 +1376,7 @@ mod tests {
                 ..pinhole_warp(16.0, 16.0)
             },
             StabilizeWarp {
-                intrinsics: [0.0, 8.0, 8.0, 8.0],
+                intrinsics: [0.0, 0.5, 0.5, 0.5],
                 ..pinhole_warp(16.0, 16.0)
             },
             StabilizeWarp {

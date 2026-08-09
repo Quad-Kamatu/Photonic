@@ -109,7 +109,7 @@ pub struct StabilizationAnalysis {
     /// Resolution the intrinsics below are expressed at.
     pub width: f32,
     pub height: f32,
-    /// Source intrinsics `[fx, fy, cx, cy]` at `width`×`height`.
+    /// Source intrinsics normalized by frame size: `[fx/w, fy/h, cx/w, cy/h]`.
     pub intrinsics: [f32; 4],
     /// Kannala-Brandt coefficients; all zero for a pinhole.
     pub k: [f32; 4],
@@ -134,30 +134,18 @@ impl StabilizationAnalysis {
         (seconds * self.fps).round().max(0.0) as usize
     }
 
-    /// Build the resolved warp for `frame` at a delivery size of `out_w`×`out_h`.
+    /// Build the resolved warp for `frame`.
     ///
-    /// Intrinsics are rescaled from the analysis resolution, so a proxy preview
-    /// and a full-resolution export produce the *same* geometry — 22 §6.6
-    /// requires the proxy path go through this same warp at proxy dimensions,
-    /// and a preview that disagreed with the export would be worse than none.
-    pub fn warp_at(
-        &self,
-        frame: usize,
-        out_w: f32,
-        out_h: f32,
-        transparent_edges: bool,
-    ) -> StabilizeWarp {
+    /// Carries no delivery size, because [`StabilizeWarp::intrinsics`] are
+    /// normalized and the evaluator scales them to whatever it is actually
+    /// rendering. That is what lets a proxy preview and a full-resolution
+    /// export describe identical geometry, as 22 §6.6 requires.
+    pub fn warp_at(&self, frame: usize, transparent_edges: bool) -> StabilizeWarp {
         let c = self.at(frame);
-        let (sx, sy) = (out_w / self.width, out_h / self.height);
         StabilizeWarp {
             rotation: c.rotation,
             zoom: c.zoom,
-            intrinsics: [
-                self.intrinsics[0] * sx,
-                self.intrinsics[1] * sy,
-                self.intrinsics[2] * sx,
-                self.intrinsics[3] * sy,
-            ],
+            intrinsics: self.intrinsics,
             k: self.k,
             fisheye: self.fisheye,
             transparent_edges,
@@ -395,7 +383,12 @@ pub fn analyze(
         fps: geom.fps,
         width: geom.width as f32,
         height: geom.height as f32,
-        intrinsics: [fx as f32, fy as f32, cx as f32, cy as f32],
+        intrinsics: [
+            (fx / geom.width) as f32,
+            (fy / geom.height) as f32,
+            (cx / geom.width) as f32,
+            (cy / geom.height) as f32,
+        ],
         k: [
             lens.k[0] as f32,
             lens.k[1] as f32,

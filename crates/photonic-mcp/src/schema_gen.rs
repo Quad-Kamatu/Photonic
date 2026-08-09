@@ -5627,6 +5627,55 @@ pub fn tool_list() -> Value {
                     "required": ["clip_id"]
                 }
             },
+            // D-12 gyro stabilization (22 §6.5)
+            {
+                "name": "import_motion_metadata",
+                "description": "Bind a gyro/IMU sidecar to a clip for D-12 stabilization. Accepts Gyroflow-compatible `.gcsv` or Photonic gyro JSON. The file is parsed immediately and rejected with a located error if malformed — an unknown axis convention or unit hard-fails rather than being guessed. Without `lens_profile_path` only rotation is corrected, not lens distortion. Call analyze_stabilization next. Supports undo.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "clip_id": { "type": "string" },
+                        "path": { "type": "string", "description": "Path to a .gcsv or Photonic gyro JSON sidecar." },
+                        "lens_profile_path": { "type": "string", "description": "Optional lens-calibration JSON (camera_matrix + 4 Kannala-Brandt distortion coefficients). Omit for rotation-only correction." },
+                        "smoothness": { "type": "number", "description": "0..1. 0 follows the original camera motion exactly; 1 is maximally smooth and demands the most crop. Default 0.5." },
+                        "horizon_lock": { "type": "number", "description": "0..1 gravity-referenced levelling. Requires accelerometer data in the motion source; has no effect without it. Default 0." }
+                    },
+                    "required": ["clip_id","path"]
+                }
+            },
+            {
+                "name": "set_stabilization",
+                "description": "Update an existing D-12 stabilization recipe; only supplied fields change. Any change clears the prior analysis, since the corrections were computed for the old settings — re-run analyze_stabilization afterwards. Out-of-range values are rejected, not clamped. Supports undo.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "clip_id": { "type": "string" },
+                        "smoothness": { "type": "number", "description": "0..1." },
+                        "horizon_lock": { "type": "number", "description": "0..1. Needs accelerometer data." },
+                        "max_zoom": { "type": "number", "description": ">= 1.0. Ceiling on how far the crop solver may zoom to hide edges the correction swings out of frame." },
+                        "crop_mode": { "type": "string", "enum": ["static_safe","dynamic","transparent_edges"], "description": "static_safe: one fixed zoom sized for the worst frame. dynamic: tracks the requirement, smoothed. transparent_edges: no zoom, uncovered pixels left transparent." }
+                    },
+                    "required": ["clip_id"]
+                }
+            },
+            {
+                "name": "analyze_stabilization",
+                "description": "Run D-12 stabilization analysis for a clip: estimate gyro bias, integrate the camera orientation, smooth it, apply horizon lock, and solve the crop path. Returns diagnostics including estimated bias, sample rate, clock drift, maximum required zoom, and any frame range that cannot be covered within max_zoom. Does not modify the document and creates no undo step — analysis is generation, not history.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "clip_id": { "type": "string" } },
+                    "required": ["clip_id"]
+                }
+            },
+            {
+                "name": "get_stabilization_status",
+                "description": "Report a clip's D-12 stabilization state — motion source, lens profile, strength settings, crop mode, sync-anchor count, and whether an analysis exists — without running anything. Location-bearing detail is redacted: only file names are returned, never full paths.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "clip_id": { "type": "string" } },
+                    "required": ["clip_id"]
+                }
+            },
             {
                 "name": "set_transition",
                 "description": "Add, replace, or remove (transition=null) a clip's in or out transition. Supports undo.",

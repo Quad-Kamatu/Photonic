@@ -1606,7 +1606,7 @@ fn undistort_theta(td: f32) -> f32 {{\n\
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n\
   if (pos.x >= u.info.x || pos.y >= u.info.y) {{ return vec4<f32>(0.0); }}\n\
   let w = u.info.z; let h = u.info.w;\n\
-  let fx = u.intr.x; let fy = u.intr.y; let cx = u.intr.z; let cy = u.intr.w;\n\
+  let fx = u.intr.x * w; let fy = u.intr.y * h; let cx = u.intr.z * w; let cy = u.intr.w * h;\n\
   let zoom = u.flags.x; let is_fish = u.flags.y > 0.5; let transp = u.flags.z > 0.5;\n\
   let nearest = u.flags.w > 0.5;\n\
   // 1 - undo the crop zoom about the frame centre.\n\

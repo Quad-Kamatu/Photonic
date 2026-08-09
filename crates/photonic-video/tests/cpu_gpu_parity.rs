@@ -453,7 +453,7 @@ fn stabilize_warp_cpu_gpu_parity() {
             StabilizeWarp {
                 rotation,
                 zoom: 1.15,
-                intrinsics: [w * 0.5, w * 0.5, w * 0.5, h * 0.5],
+                intrinsics: [0.5, 0.5 * w / h, 0.5, 0.5],
                 k: [0.0; 4],
                 fisheye: false,
                 transparent_edges: false,
@@ -464,7 +464,7 @@ fn stabilize_warp_cpu_gpu_parity() {
             StabilizeWarp {
                 rotation,
                 zoom: 1.15,
-                intrinsics: [w * 0.45, w * 0.45, w * 0.5, h * 0.5],
+                intrinsics: [0.45, 0.45 * w / h, 0.5, 0.5],
                 k: [0.02, -0.004, 0.0007, -0.00005],
                 fisheye: true,
                 transparent_edges: false,
@@ -475,7 +475,7 @@ fn stabilize_warp_cpu_gpu_parity() {
             StabilizeWarp {
                 rotation,
                 zoom: 1.0, // no crop, so edges really are exposed
-                intrinsics: [w * 0.5, w * 0.5, w * 0.5, h * 0.5],
+                intrinsics: [0.5, 0.5 * w / h, 0.5, 0.5],
                 k: [0.0; 4],
                 fisheye: false,
                 transparent_edges: true,

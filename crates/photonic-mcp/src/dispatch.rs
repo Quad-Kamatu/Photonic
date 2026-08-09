@@ -2492,6 +2492,36 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::video::set_clip_prop(state, a).await,
             ))
         }
+        // D-12 gyro stabilization (22 §6.5)
+        "import_motion_metadata" => {
+            let a: ImportMotionMetadataArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::import_motion_metadata(state, a).await,
+            ))
+        }
+        "set_stabilization" => {
+            let a: SetStabilizationArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::video::set_stabilization(state, a).await,
+            ))
+        }
+        "analyze_stabilization" => {
+            let a: AnalyzeStabilizationArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            // Analysis is generation, not history (22 §6.5): it produces a
+            // cache entry, never an undo step, so it is not `mutating`.
+            Ok(ToolOutput::readonly(
+                handlers::video::analyze_stabilization(state, a).await,
+            ))
+        }
+        "get_stabilization_status" => {
+            let a: GetStabilizationStatusArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::video::get_stabilization_status(state, a).await,
+            ))
+        }
         "set_clip_speed" => {
             let a: SetClipSpeedArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(

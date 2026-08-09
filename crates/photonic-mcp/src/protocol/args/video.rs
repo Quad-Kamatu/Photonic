@@ -2006,3 +2006,43 @@ pub struct InsertTitleTemplateArgs {
     #[serde(default)]
     pub text_overrides: Option<std::collections::HashMap<String, String>>,
 }
+
+// ── D-12 gyro stabilization (22 §6.5) ───────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ImportMotionMetadataArgs {
+    pub clip_id: ClipId,
+    /// Path to a `.gcsv` or Photonic gyro JSON sidecar.
+    pub path: String,
+    /// Optional lens-profile JSON. Without one, only rotation is corrected.
+    #[serde(default)]
+    pub lens_profile_path: Option<String>,
+    #[serde(default)]
+    pub smoothness: Option<f32>,
+    #[serde(default)]
+    pub horizon_lock: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetStabilizationArgs {
+    pub clip_id: ClipId,
+    #[serde(default)]
+    pub smoothness: Option<f32>,
+    #[serde(default)]
+    pub horizon_lock: Option<f32>,
+    #[serde(default)]
+    pub max_zoom: Option<f32>,
+    /// `static_safe` | `dynamic` | `transparent_edges`.
+    #[serde(default)]
+    pub crop_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnalyzeStabilizationArgs {
+    pub clip_id: ClipId,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetStabilizationStatusArgs {
+    pub clip_id: ClipId,
+}

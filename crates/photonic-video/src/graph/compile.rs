@@ -667,8 +667,6 @@ impl<'a> Builder<'a> {
         let frame = analysis.frame_index(src_time.as_seconds_f64());
         Some(analysis.warp_at(
             frame,
-            format.width as f32,
-            format.height as f32,
             matches!(
                 spec.crop_mode,
                 photonic_core::timeline::StabilizationCropMode::TransparentEdges

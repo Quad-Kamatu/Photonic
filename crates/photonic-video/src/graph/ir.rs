@@ -191,8 +191,14 @@ pub struct StabilizeWarp {
     /// Zoom about the frame centre, `>= 1.0`, hiding the edges the rotation
     /// swings out of frame.
     pub zoom: f32,
-    /// Source intrinsics `[fx, fy, cx, cy]` in pixels **at this frame's
-    /// resolution**, already rescaled from the profile's calibration size.
+    /// Source intrinsics **normalized by frame size**: `[fx/w, fy/h, cx/w,
+    /// cy/h]`.
+    ///
+    /// Normalized rather than in pixels so the op is resolution-independent.
+    /// The evaluator multiplies by whatever the decoded texture actually is,
+    /// which means a proxy preview and a full-resolution export describe the
+    /// *same* geometry — with pixel intrinsics, a half-size proxy silently got
+    /// a lens twice as long as the one it was calibrated against.
     pub intrinsics: [f32; 4],
     /// Kannala-Brandt radial coefficients `k1..k4`; all zero for a pinhole.
     pub k: [f32; 4],
@@ -213,7 +219,7 @@ impl StabilizeWarp {
             zoom: 1.0,
             // A 90°-ish pinhole; irrelevant while the rotation is identity,
             // since unprojection and reprojection cancel exactly.
-            intrinsics: [width * 0.5, width * 0.5, width * 0.5, height * 0.5],
+            intrinsics: [0.5, 0.5 * width / height.max(1.0), 0.5, 0.5],
             k: [0.0; 4],
             fisheye: false,
             transparent_edges: false,

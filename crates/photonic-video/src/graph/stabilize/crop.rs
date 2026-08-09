@@ -44,6 +44,22 @@ const BISECTION_STEPS: u32 = 24;
 /// fraction of a percent buys that margin back and is invisible.
 const SAFETY_MARGIN: f64 = 1.002;
 
+/// Smallest render scale, relative to the analysis resolution, that the solved
+/// crop is guaranteed safe at.
+///
+/// The containment test runs once, at analysis resolution, but the warp runs at
+/// whatever the evaluator is rendering — which for a proxy preview is smaller.
+/// The valid source region is `[0, w-1]`, so that one-texel inset is a *larger
+/// fraction of the frame* the smaller the render gets: at 640 px it is 0.16 %,
+/// at 160 px it is 0.63 %. A crop solved to sit exactly on the boundary at
+/// analysis resolution therefore hangs outside it on a downscaled render, and
+/// an edge shows.
+///
+/// Guarding by one texel at this scale makes the solution safe for every render
+/// down to it. A quarter covers the usual proxy ladder (½, ⅓, ¼) with room to
+/// spare; below it, solve against the resolution you intend to render.
+const MIN_RENDER_SCALE: f64 = 0.25;
+
 /// What the solver decided.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CropSolution {
@@ -112,7 +128,16 @@ pub fn required_zoom(rot: DMat3, lens: &LensProfile, w: f64, h: f64, max_zoom: f
             lo = mid;
         }
     }
-    Some((hi * SAFETY_MARGIN).min(max_zoom))
+    // Applied to the *solved* zoom rather than to the containment box: insetting
+    // the box would make even an identity rotation infeasible, since at zoom 1
+    // the output boundary maps exactly onto `[0, w-1]`. A still camera must
+    // cost nothing.
+    //
+    // The extra covers one texel at `MIN_RENDER_SCALE`, expressed as a fraction
+    // of the half-extent — that is the margin a downscaled render needs and the
+    // analysis-resolution test cannot see.
+    let render_guard = 1.0 + 2.0 * (1.0 / MIN_RENDER_SCALE) / w.min(h);
+    Some((hi * SAFETY_MARGIN * render_guard).min(max_zoom))
 }
 
 /// Temporal smoothing window for [`StabilizationCropMode::Dynamic`], seconds.
