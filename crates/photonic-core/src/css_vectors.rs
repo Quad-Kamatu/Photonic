@@ -122,6 +122,9 @@ pub fn compile_css_vectors(
         )]);
     }
     let mut elements: BTreeMap<String, Vec<&Rule>> = BTreeMap::new();
+    // BTreeMap keeps cascade lookup deterministic, but CSS paint order is source
+    // order, not lexical selector order. Keep that order separately.
+    let mut element_order = BTreeMap::new();
     for rule in &rules {
         for sel in rule
             .selector
@@ -139,7 +142,10 @@ pub fn compile_css_vectors(
                 ));
                 continue;
             }
-            elements.entry(sel.to_string()).or_default().push(rule);
+            let key = sel.to_string();
+            let next_order = element_order.len();
+            element_order.entry(key.clone()).or_insert(next_order);
+            elements.entry(key).or_default().push(rule);
         }
     }
     if elements.len() > MAX_ELEMENTS {
@@ -163,11 +169,15 @@ pub fn compile_css_vectors(
             ));
             vec![]
         }
-        None => elements
-            .keys()
-            .filter(|s| !s.contains('>') && !s.contains("::"))
-            .cloned()
-            .collect(),
+        None => {
+            let mut roots: Vec<_> = elements
+                .keys()
+                .filter(|s| !s.contains('>') && !s.contains("::"))
+                .cloned()
+                .collect();
+            roots.sort_by_key(|s| element_order.get(s).copied().unwrap_or(usize::MAX));
+            roots
+        }
     };
     if selected.is_empty() {
         diagnostics.push(diag(
@@ -183,6 +193,7 @@ pub fn compile_css_vectors(
         let node = build_element(
             root,
             &elements,
+            &element_order,
             origin,
             viewport,
             &mut diagnostics,
@@ -224,6 +235,7 @@ pub fn compile_css_vectors(
 fn build_element(
     selector: &str,
     elements: &BTreeMap<String, Vec<&Rule>>,
+    element_order: &BTreeMap<String, usize>,
     origin: CssOrigin,
     viewport: CssViewport,
     diagnostics: &mut Vec<CssDiagnostic>,
@@ -244,6 +256,18 @@ fn build_element(
                 &format!("{key} cannot be represented as editable paths"),
                 selector,
                 Some(key),
+                Some(value),
+            ));
+        }
+    }
+    if let Some(value) = props.get("z-index") {
+        let value = value.trim();
+        if value != "auto" && value.parse::<i32>().is_err() {
+            diagnostics.push(diag(
+                "CSS_INVALID_Z_INDEX",
+                "z-index must be an integer or auto",
+                selector,
+                Some("z-index"),
                 Some(value),
             ));
         }
@@ -361,35 +385,51 @@ fn build_element(
             opacity,
         }));
     }
-    // Direct children and pseudo elements are ordered per the contract.
+    let child_origin = CssOrigin { x, y };
+    let child_viewport = CssViewport { width, height };
+    // Direct children and pseudo elements are ordered per the contract. A prefix
+    // check alone turns grandchildren into siblings; only the remaining selector
+    // segment after `parent > ` may be a direct child here.
     for suffix in ["::before", ""] {
-        for child in elements.keys().filter(|k| {
-            k.starts_with(&(selector.to_string() + " > "))
-                && if suffix.is_empty() {
-                    !k.contains("::")
-                } else {
-                    k.ends_with(suffix)
-                }
-        }) {
+        let mut direct_children: Vec<_> = elements
+            .keys()
+            .filter(|child| is_direct_child(selector, child, suffix))
+            .cloned()
+            .collect();
+        direct_children.sort_by_key(|child| {
+            let z = z_index(elements.get(child));
+            (z, element_order.get(child).copied().unwrap_or(usize::MAX))
+        });
+        for child in direct_children {
             children.push(CssVectorNode::Group(build_element(
-                child,
+                &child,
                 elements,
-                origin,
-                viewport,
+                element_order,
+                child_origin,
+                child_viewport,
                 diagnostics,
                 false,
             )?));
         }
     }
-    for child in elements
+    let mut after_children: Vec<_> = elements
         .keys()
-        .filter(|k| k.starts_with(&(selector.to_string() + "::after")))
-    {
+        .filter(|child| child == &&format!("{selector}::after"))
+        .cloned()
+        .collect();
+    after_children.sort_by_key(|child| {
+        (
+            z_index(elements.get(child)),
+            element_order.get(child).copied().unwrap_or(usize::MAX),
+        )
+    });
+    for child in after_children {
         children.push(CssVectorNode::Group(build_element(
-            child,
+            &child,
             elements,
-            origin,
-            viewport,
+            element_order,
+            child_origin,
+            child_viewport,
             diagnostics,
             false,
         )?));
@@ -401,6 +441,29 @@ fn build_element(
         opacity,
         provenance: selector.into(),
     })
+}
+
+fn is_direct_child(parent: &str, child: &str, suffix: &str) -> bool {
+    let Some(rest) = child.strip_prefix(&format!("{parent} > ")) else {
+        return false;
+    };
+    !rest.contains('>')
+        && if suffix.is_empty() {
+            !rest.contains("::")
+        } else {
+            rest.ends_with(suffix)
+        }
+}
+
+fn z_index(rules: Option<&Vec<&Rule>>) -> i32 {
+    rules
+        .into_iter()
+        .flatten()
+        .flat_map(|rule| rule.declarations.iter())
+        .filter(|(property, _)| property == "z-index")
+        .filter_map(|(_, value)| value.parse::<i32>().ok())
+        .last()
+        .unwrap_or(0)
 }
 
 fn supported_selector(s: &str) -> bool {
@@ -425,6 +488,7 @@ fn supported_property(k: &str) -> bool {
             | "border-width"
             | "border-radius"
             | "opacity"
+            | "z-index"
             | "position"
             | "display"
             | "visibility"
@@ -624,5 +688,95 @@ mod tests {
         assert!((a.bounds.2 - 240.).abs() < 1e-9);
         assert!((a.bounds.3 - 96.).abs() < 1e-9);
         assert_eq!(a.fingerprint,compile_css_vectors(".badge { width: 240px; height:96px; background:#6941c6; border:3px solid #fff; border-radius:24px; }",Some(".badge"),CssOrigin{x:100.,y:100.},CssViewport{width:512.,height:512.},true).unwrap().fingerprint);
+    }
+
+    #[test]
+    fn switch_tree_keeps_grandchildren_nested_relative_and_above_tracks() {
+        let css = ".switch { width: 200px; height: 80px; left: 100px; top: 50px; }\
+            .switch > .thumb { width: 30px; height: 30px; left: 150px; top: 20px; background: #fff; z-index: 2; border-radius: 50%; }\
+            .switch > .track { width: 180px; height: 50px; left: 0px; top: 10px; background: #c89013; z-index: 1; border-radius: 25px; }\
+            .switch > .track > .nested { width: 10px; height: 10px; left: 5px; top: 5px; background: #000; border-radius: 50%; }";
+        let plan = compile_css_vectors(
+            css,
+            Some(".switch"),
+            CssOrigin { x: 10.0, y: 20.0 },
+            CssViewport {
+                width: 500.0,
+                height: 300.0,
+            },
+            true,
+        )
+        .unwrap();
+        let CssVectorNode::Group(root) = &plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        // z-index wins over CSS source order: track is painted before thumb.
+        let names: Vec<_> = root.children.iter().map(node_name).collect();
+        assert_eq!(names, vec!["switch/.track", "switch/.thumb"]);
+        let CssVectorNode::Group(track) = &root.children[0] else {
+            panic!("track must be a group")
+        };
+        assert_eq!(
+            track.children.len(),
+            2,
+            "nested child must not leak into root"
+        );
+        let CssVectorNode::Group(nested) = &track.children[1] else {
+            panic!("nested node must remain grouped under track")
+        };
+        let CssVectorNode::Path(path) = &nested.children[0] else {
+            panic!("nested background must be a path")
+        };
+        let bounds = path.path.bounding_box().unwrap();
+        // Root origin (10,20) + root offset (100,50) + track (0,10) + nested (5,5).
+        assert!((bounds.x0 - 115.0).abs() < 1e-9);
+        assert!((bounds.y0 - 85.0).abs() < 1e-9);
+    }
+
+    fn node_name(node: &CssVectorNode) -> &str {
+        match node {
+            CssVectorNode::Group(group) => &group.name,
+            CssVectorNode::Path(path) => &path.name,
+        }
+    }
+
+    #[test]
+    fn equal_z_index_uses_css_source_order_not_selector_order() {
+        let plan = compile_css_vectors(
+            ".root { width: 20px; height: 20px; }\
+             .root > .zebra { width: 10px; height: 10px; background: red; }\
+             .root > .alpha { width: 10px; height: 10px; background: blue; }",
+            Some(".root"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap();
+        let CssVectorNode::Group(root) = &plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        let names: Vec<_> = root.children.iter().map(node_name).collect();
+        assert_eq!(names, vec!["root/.zebra", "root/.alpha"]);
+    }
+
+    #[test]
+    fn strict_mode_rejects_non_integer_z_index() {
+        let diagnostics = compile_css_vectors(
+            ".root { width: 20px; height: 20px; z-index: 1.5; }",
+            Some(".root"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap_err();
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "CSS_INVALID_Z_INDEX"));
     }
 }

@@ -3415,13 +3415,23 @@ impl PhotonicApp {
                             continue;
                         }
                         if let SceneNodeKind::Path(pn) = &node.kind {
-                            let pts = bez_to_screen_points_xf(
+                            let subpaths = bez_to_screen_subpaths_xf(
                                 &pn.path_data.to_bez_path(),
                                 view,
                                 &node.transform,
                             );
-                            if pts.len() >= 2 {
-                                painter.add(egui::Shape::line(pts, outline_stroke));
+                            for (pts, closed) in subpaths {
+                                if pts.len() >= 2 {
+                                    painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                                        points: pts,
+                                        closed,
+                                        fill: egui::Color32::TRANSPARENT,
+                                        stroke: egui::epaint::PathStroke::new(
+                                            outline_stroke.width,
+                                            outline_stroke.color,
+                                        ),
+                                    }));
+                                }
                             }
                         }
                     }
@@ -3441,14 +3451,25 @@ impl PhotonicApp {
                                 let bez = preview.to_bez_path();
                                 // Smooth wireframe: sample curves so fitted
                                 // Béziers render as curves, not chords.
-                                let pts = bez_to_screen_points_xf(&bez, view, &node.transform);
-                                if pts.len() >= 2 {
+                                let subpaths =
+                                    bez_to_screen_subpaths_xf(&bez, view, &node.transform);
+                                if subpaths.iter().any(|(pts, _)| pts.len() >= 2) {
                                     let painter = ui.painter_at(rect);
                                     let accent = egui::Color32::from_rgb(110, 86, 207);
-                                    painter.add(egui::Shape::line(
-                                        pts,
-                                        egui::Stroke::new(1.5, accent),
-                                    ));
+                                    for (pts, closed) in subpaths {
+                                        if pts.len() >= 2 {
+                                            painter.add(egui::Shape::Path(
+                                                egui::epaint::PathShape {
+                                                    points: pts,
+                                                    closed,
+                                                    fill: egui::Color32::TRANSPARENT,
+                                                    stroke: egui::epaint::PathStroke::new(
+                                                        1.5, accent,
+                                                    ),
+                                                },
+                                            ));
+                                        }
+                                    }
                                     // Dots at real anchor points only (not every
                                     // sampled point along a curve).
                                     for p in anchor_screen_points_xf(&bez, view, &node.transform) {
@@ -3478,20 +3499,30 @@ impl PhotonicApp {
                                 dlg.cached_thr = dlg.threshold;
                             }
                             if let Some(preview) = &dlg.preview {
-                                let pts = bez_to_screen_points_xf(
+                                let subpaths = bez_to_screen_subpaths_xf(
                                     &preview.to_bez_path(),
                                     view,
                                     &node.transform,
                                 );
-                                if pts.len() >= 2 {
+                                if subpaths.iter().any(|(pts, _)| pts.len() >= 2) {
                                     let painter = ui.painter_at(rect);
                                     let accent = egui::Color32::from_rgb(86, 170, 207);
-                                    painter.add(egui::Shape::line(
-                                        pts.clone(),
-                                        egui::Stroke::new(1.5, accent),
-                                    ));
-                                    for p in &pts {
-                                        painter.circle_filled(*p, 2.0, accent);
+                                    for (pts, closed) in subpaths {
+                                        if pts.len() >= 2 {
+                                            painter.add(egui::Shape::Path(
+                                                egui::epaint::PathShape {
+                                                    points: pts.clone(),
+                                                    closed,
+                                                    fill: egui::Color32::TRANSPARENT,
+                                                    stroke: egui::epaint::PathStroke::new(
+                                                        1.5, accent,
+                                                    ),
+                                                },
+                                            ));
+                                            for p in &pts {
+                                                painter.circle_filled(*p, 2.0, accent);
+                                            }
+                                        }
                                     }
                                 }
                             }
