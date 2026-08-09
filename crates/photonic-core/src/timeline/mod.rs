@@ -29,6 +29,7 @@ pub mod ops;
 pub mod prop_registry;
 pub mod scale;
 pub mod sequence;
+pub mod stabilization;
 pub mod time;
 pub mod unknown;
 
@@ -50,6 +51,10 @@ pub use clip::{
     AnchorSpace, Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, LumaWipeMap, Ratio,
     SpeedKey, SpeedMap, SpeedMapError, TextClipContent, Transition, TransitionKind,
     TransitionParams, WipeDirection,
+};
+pub use stabilization::{
+    LensProfileRef, MotionBinding, MotionFormat, MotionSample, MotionSourceRef, MotionSync,
+    MotionSyncAnchor, StabilizationCropMode, StabilizationError, StabilizationSpec,
 };
 pub use commands::{
     AnimTarget, AudioCmd, CaptionCmd, ClipTiming, FadeEdge, FormatOp, FxOwner, GraphCmd,

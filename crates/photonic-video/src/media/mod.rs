@@ -12,6 +12,7 @@ pub mod cache_stats;
 pub mod child_registry;
 pub mod ffmpeg_locate;
 pub mod keyframe_index;
+pub mod motion;
 /// Import-ladder L3 poster stills (24-preview-media-load).
 pub mod poster;
 pub mod probe;
@@ -29,6 +30,10 @@ pub use ffmpeg_locate::{locate, FfmpegTools, LocateError, FFMPEG_DIR_ENV};
 pub use keyframe_index::{
     cache_dir_for_project, keyframe_cache_path, keyframe_index_ready, IndexError, KeyframeIndex,
     PtsIndex,
+};
+pub use motion::{
+    adapters as motion_adapters, parse_motion, AdapterConfidence, AxisMap, MotionError,
+    MotionMetadataAdapter, MotionSeries,
 };
 pub use poster::{ensure_poster, poster_cache_dir, poster_cache_path, poster_ready, PosterError};
 pub use probe::{content_hash, probe_asset, probe_details, ProbeDetails, ProbeError};

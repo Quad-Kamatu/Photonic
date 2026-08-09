@@ -593,6 +593,107 @@ D-8 GPU parity-slice disposition:
 - [x] Focused tests, library check, focused Clippy, direct formatting check, and diff/scope audit passed.
 - [x] GPU safety follow-up rejects device-limit, pitch/alignment, transfer-size, host-size, and readback-limit failures before per-call resources; Luna returned `SPEC_COMPLIANT` and Grok returned `APPROVE`.
 
+D-12 gyro-stabilization slice disposition (recorded 2026-08-09):
+
+- [x] User authorized the D-12 gyro-metadata stabilization slice as original Photonic code, after review of the §5 disposition table and the §9 release sequence.
+- [x] Clean-room attestation recorded: no Gyroflow (`GPL-3.0`) source was read, ported, translated, or consulted as an implementation reference. The pipeline is implemented from the §9.3 native-math mandate and from publicly published concepts (quaternion kinematics, SLERP low-pass filtering, and the Kannala-Brandt generic camera model), cited in the provenance record below.
+- [x] Authorized scope is the **dependency-free** slice only: the Photonic gyro JSON interchange adapter, the `.gcsv` adapter written clean-room from its published format specification, Photonic-owned analysis math, the `IrOp::StabilizeWarp` CPU reference, its WGSL twin, GUI, and MCP surfaces. This is §9.3 release-sequence steps 1, 3 (user-supplied profiles only), 4, and 5.
+- [x] No new Cargo dependency is added by the authorized scope. Quaternion math uses `glam`, already a resolved `photonic-video` workspace dependency. The `ahrs` crate is deliberately **not** adopted: §9.3 assigns integration to Photonic.
+- [ ] **`telemetry-parser` intake NOT cleared.** The DJI-native adapter (§9.3 step 2) is out of the authorized scope. See the pending record below; no dependency may be added and no upstream source downloaded until it passes.
+- [ ] **Bundled CC0 lens-profile snapshot NOT cleared.** §9.2 per-entry intake has not been performed. The authorized scope ships lens-profile *support* (schema parsing, undistort math, user-installed profiles as user data) but bundles no profile data. See the pending record below.
+- [ ] **Rights-cleared real corpus NOT acquired.** Per §12, synthetic fixtures prove math and error handling only. No advertised-device claim may ship until an owned capture passes. See the fixture record below.
+- [x] Authorized scope changes migration/undo/cache/GUI/MCP surfaces, unlike the D-8 slices. `Clip.stabilization` is serde-additive under `docs/format-versions.md` and requires no `CURRENT_FORMAT_VERSION` bump; the new persisted enum carries the `Unknown`-preserving forward-compatible shape.
+- [x] Stabilization warp measures against the existing reference eval budget per §22 §3.3; a measured `11-testing-phasing.md` amendment is recorded before release if it does not fit.
+
+Pending third-party records — **no box below is checked; these gate their own slices only:**
+
+```rust
+// PENDING — not approved. Fields marked UNVERIFIED require the §3.2 intake
+// (actual license files, file headers, manifests, submodules, generated-code
+// notices, enabled-feature dependency graph) before any dependency is added.
+ThirdPartyUseRecord {
+    component: "telemetry-parser",
+    upstream_url: "https://github.com/AdrianEddy/telemetry-parser",
+    pinned_revision: "UNVERIFIED — must pin and digest before intake",
+    source_digest: "UNVERIFIED",
+    spdx_expression: "MIT OR Apache-2.0 (manifest claim; §3.2 requires reading actual license files)",
+    selected_files_or_features: vec!["UNVERIFIED — DJI dialect modules only; exclude unused formats per §9.1"],
+    enabled_build_features: vec!["UNVERIFIED"],
+    // Known blocker: manifest uses git-sourced parser dependencies (§5, §9.1).
+    transitive_license_report: "INCOMPLETE — mp4parse (MPL-2.0 fork of Mozilla's, \
+        git-sourced, requires `unstable-api` to reach DJI private boxes) and \
+        fc-blackbox (Apache-2.0, git-sourced) both require full audit per §9.1. \
+        MPL-2.0 is file-level copyleft and requires §3.2 written approval.",
+    build_script_review: "UNVERIFIED",
+    notices: vec!["UNVERIFIED"],
+    patent_review: PatentReviewState::NotStarted,
+    trademark_review: TrademarkReviewState::NotStarted,
+    security_review: SecurityReviewState::NotStarted,
+    maintenance_owner: "UNASSIGNED",
+    approved_for: /* WITHHELD — §9.1 preferred intake order is upstream
+                     feature-reduced configuration first, narrow attributed
+                     fork second, Photonic-authored parser third. */
+}
+```
+
+```rust
+// PENDING — not approved. §9.2 requires per-entry intake for every bundled
+// profile. CC0-1.0 gives no warranty and does not clear patent, trademark, or
+// third-party rights (§5). Until this passes, Photonic bundles no profile data
+// and reads user-installed profiles as user data only.
+ThirdPartyUseRecord {
+    component: "gyroflow/lens_profiles (pinned data snapshot)",
+    upstream_url: "https://github.com/gyroflow/lens_profiles",
+    pinned_revision: "UNVERIFIED",
+    source_digest: "UNVERIFIED",
+    spdx_expression: "CC0-1.0 (repository legal text; per-entry provenance unreviewed)",
+    // §9.2 per-entry requirements, none yet gathered:
+    selected_files_or_features: vec!["UNVERIFIED — upstream path/revision/digest, \
+        contributor/provenance, camera/lens/mode/resolution, calibration dimensions, \
+        model and coefficients, RMS error, sample count, independent validation \
+        error, and reviewer are required per entry. An unclear entry is excluded \
+        without blocking user import."],
+    trademark_review: TrademarkReviewState::NotStarted, // DJI marks appear in entry names
+    approved_for: /* WITHHELD */
+}
+```
+
+```rust
+// Fixture disposition recorded 2026-08-09 after inspecting on-disk candidates.
+// No usable gyro corpus exists yet; see the finding below.
+FixtureRightsManifest {
+    fixture: "PENDING — no rights-cleared gyro corpus acquired",
+    source_method: FixtureSource::Synthetic, // the only class currently available
+    // Inspected and REJECTED as fixtures:
+    //   ~/Downloads/dji_fly_*_video_stabilized.mp4 — FFmpeg re-encodes
+    //     (encoder=Lavf62.3.100, original filename retained in a comment tag).
+    //     Re-encode strips the private metadata box; no data track survives.
+    //   ~/Videos/DJI_00{06,07,08,10,14}.MP4 — genuine SD-card originals carrying
+    //     a `priv` data track and a mov_text subtitle track, but the payload is a
+    //     ~1 Hz flight log (256-byte packets, near-entirely zero-filled after an
+    //     ASCII `N3 00 00` header), not an IMU stream. Angular-velocity
+    //     integration requires hundreds of Hz. Container comment reads
+    //     `Type=QuickShot, HQ=Normal, Mode=P` at 1080p — a DJI Fly consumer
+    //     airframe, not the Avata 2 named as the sole §4.6 advertised target.
+    contains_location_or_gps: true,          // precise GPS in container tags AND subtitle track
+    contains_device_or_account_identifier: true, // airframe serial in container comment
+    redaction_report: Some("REQUIRED BEFORE ANY USE — §9.4 obliges discarding or \
+        redacting device serials, precise timestamps, GPS, and operator names \
+        before caching, logging, fixture publication, and default MCP output. \
+        These files must not be committed as-is."),
+    public_ci_allowed: false,
+    reviewer: "PENDING",
+}
+```
+
+To clear the fixture gate: one capture from an Avata 2 (or another dialect that passes its own §9.1 adapter gate), pulled directly off the SD card — never via the DJI Fly app, never re-encoded — with RockSteady/HorizonSteady disabled and FOV set to Wide. Without in-camera stabilization disabled the camera records no raw gyro at all. A `.gcsv` sidecar from a third-party logger satisfies the same acceptance path through the already-authorized clean-room adapter and requires no container work.
+
+Normative-equation provenance for the §9.3 native math (no GPL source consulted):
+
+- Quaternion kinematics and the normalized midpoint integration step: standard rigid-body attitude representation, e.g. Kuipers, *Quaternions and Rotation Sequences* (Princeton, 1999), and Shoemake, "Animating Rotation with Quaternion Curves," *SIGGRAPH '85*.
+- Spherical linear interpolation used for the deterministic orientation low-pass: Shoemake, ibid.
+- Generic fisheye projection and its radial distortion series: Kannala & Brandt, "A Generic Camera Model and Calibration Method for Conventional, Wide-Angle, and Fish-Eye Lenses," *IEEE TPAMI* 28(8), 2006.
+
 User authorization is recorded as the product/legal/engineering decision input. Reviewer identity, jurisdiction, and professional qualification were not independently verified by the implementation agents; distribution decisions remain subject to project governance.
 
 Until every applicable box is checked, agents may research and edit plans only. They must not run project code, add dependencies, download upstream source into the workspace, implement features, generate migrations, or change release assets.

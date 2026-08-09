@@ -15,6 +15,7 @@ use super::grade::Grade;
 use super::ids::{AssetId, ClipId, GraphId, GroupId, SequenceId};
 use super::prop_registry::PropTargetKind;
 use super::sequence::Marker;
+use super::stabilization::StabilizationSpec;
 use super::time::Tick;
 use super::unknown::UnknownTag;
 use crate::Color;
@@ -86,6 +87,8 @@ pub struct Clip {
     /// active angle. `None` = an ordinary single-source clip. Serde-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multicam: Option<MulticamGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization: Option<StabilizationSpec>,
 }
 
 impl Clip {
@@ -113,6 +116,7 @@ impl Clip {
             group: None,
             link_group: None,
             multicam: None,
+            stabilization: None,
         }
     }
 
