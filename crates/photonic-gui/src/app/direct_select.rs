@@ -916,14 +916,17 @@ impl PhotonicApp {
                     let painter = ui.painter();
 
                     // Path outline (accent, no fill)
-                    let outline_pts = bez_to_screen_points_xf(&bez, view, &node.transform);
-                    if outline_pts.len() >= 2 {
-                        painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                            points: outline_pts,
-                            closed: true,
-                            fill: Color32::TRANSPARENT,
-                            stroke: egui::epaint::PathStroke::new(1.5, accent),
-                        }));
+                    for (outline_pts, closed) in
+                        bez_to_screen_subpaths_xf(&bez, view, &node.transform)
+                    {
+                        if outline_pts.len() >= 2 {
+                            painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                                points: outline_pts,
+                                closed,
+                                fill: Color32::TRANSPARENT,
+                                stroke: egui::epaint::PathStroke::new(1.5, accent),
+                            }));
+                        }
                     }
 
                     // Bezier control handles for selected curved anchors (seam-aware).

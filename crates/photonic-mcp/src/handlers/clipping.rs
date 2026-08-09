@@ -415,6 +415,199 @@ mod tests {
         })
     }
 
+    fn dancer_subpaths() -> Vec<kurbo::BezPath> {
+        let source = PathData::from_svg(include_str!("fixtures/mbd_dancer.path").trim())
+            .expect("checked-in dancer path fixture must parse")
+            .to_bez_path();
+        let mut subpaths = Vec::new();
+        let mut current = kurbo::BezPath::new();
+        for element in source.elements() {
+            if matches!(element, kurbo::PathEl::MoveTo(_)) && !current.elements().is_empty() {
+                subpaths.push(current);
+                current = kurbo::BezPath::new();
+            }
+            current.push(*element);
+        }
+        if !current.elements().is_empty() {
+            subpaths.push(current);
+        }
+        subpaths
+    }
+
+    #[tokio::test]
+    async fn create_path_rejects_payloads_that_parse_to_empty_geometry() {
+        let state = test_state(Document::new("invalid", 100.0, 100.0));
+        let args: CreatePathArgs = serde_json::from_value(serde_json::json!({
+            "path_data": "_",
+            "name": "must not exist",
+            "fill": { "type": "solid", "color": "#000000" },
+            "stroke": { "enabled": false }
+        }))
+        .unwrap();
+        let result = crate::handlers::nodes::create_path(&state, args).await;
+        assert_eq!(result.is_error, Some(true), "{:?}", result.content);
+        assert!(state.document.lock().await.nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dancer_create_transform_compound_round_trip_preserves_geometry_and_holes() {
+        let source_svg = include_str!("fixtures/mbd_dancer.path").trim();
+        let source_path = PathData::from_svg(source_svg).expect("real exported path parses");
+        let source_bez = source_path.to_bez_path();
+        let source_anchor_count = source_bez
+            .elements()
+            .iter()
+            .filter(|element| !matches!(element, kurbo::PathEl::ClosePath))
+            .count();
+        assert_eq!(source_anchor_count, 162);
+        let source_bounds = source_bez.bounding_box();
+        let source_area = source_bez.area().abs();
+        let source_mesh = photonic_render::tessellator::tessellate_fill(&source_path, false, 0.1);
+        assert!(!source_mesh.is_empty());
+
+        let subpaths = dancer_subpaths();
+        assert_eq!(subpaths.len(), 3);
+        let state = test_state(Document::new("dancer round trip", 1296.0, 1296.0));
+        let mut ids = Vec::new();
+        for (index, subpath) in subpaths.iter().enumerate() {
+            let path_data = PathData::from_bez_path(subpath);
+            let args: CreatePathArgs = serde_json::from_value(serde_json::json!({
+                "path_data": path_data.as_svg(),
+                "name": format!("dancer contour {index}"),
+                "fill": { "type": "solid", "color": "#000000" },
+                "stroke": { "enabled": false }
+            }))
+            .unwrap();
+            let result = crate::handlers::nodes::create_path(&state, args).await;
+            assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+            let document = state.document.lock().await;
+            let node = document
+                .nodes
+                .values()
+                .find(|node| node.name == format!("dancer contour {index}"))
+                .expect("created contour");
+            let SceneNodeKind::Path(path) = &node.kind else {
+                panic!("created contour must be a path")
+            };
+            assert!(path.path_data.has_drawable_geometry());
+            ids.push(node.id);
+        }
+
+        let matrix = [1.0, 0.0, 0.0, 1.0, 56.73772898238582, 14.472548564763088];
+        let before_paths: Vec<PathData> = {
+            let document = state.document.lock().await;
+            ids.iter()
+                .map(|id| match &document.nodes[id].kind {
+                    SceneNodeKind::Path(path) => path.path_data.clone(),
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        let result = crate::handlers::nodes::apply_transform(
+            &state,
+            ApplyTransformArgs {
+                node_ids: ids.clone(),
+                operation: TransformOperation::Matrix,
+                translate: None,
+                rotate: None,
+                scale: None,
+                matrix: Some(matrix),
+                shear: None,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+        {
+            let document = state.document.lock().await;
+            for (id, before) in ids.iter().zip(&before_paths) {
+                let node = &document.nodes[id];
+                let SceneNodeKind::Path(path) = &node.kind else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    &path.path_data, before,
+                    "matrix transform must not bake or erase path data"
+                );
+                assert_eq!(node.transform.matrix, matrix);
+                assert!(node.local_bounds().is_some());
+            }
+        }
+
+        let result = make_compound_path(
+            &state,
+            MakeCompoundPathArgs {
+                node_ids: ids.clone(),
+                name: Some("Dancer rebuilt compound".into()),
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+
+        let document = state.document.lock().await;
+        assert_eq!(document.nodes.len(), 1);
+        let compound = &document.nodes[&ids[0]];
+        let SceneNodeKind::Path(compound_path) = &compound.kind else {
+            panic!("compound result must be a path")
+        };
+        assert!(compound_path.is_compound);
+        assert_eq!(compound.transform.matrix, matrix);
+        let compound_bez = compound_path.path_data.to_bez_path();
+        let compound_anchor_count = compound_bez
+            .elements()
+            .iter()
+            .filter(|element| !matches!(element, kurbo::PathEl::ClosePath))
+            .count();
+        assert_eq!(compound_anchor_count, source_anchor_count);
+        assert!((compound_bez.area().abs() - source_area).abs() < 1e-6);
+        let compound_bounds = compound.local_bounds().expect("nonzero compound bounds");
+        assert!((compound_bounds.x0 - source_bounds.x0).abs() < 1e-6);
+        assert!((compound_bounds.y0 - source_bounds.y0).abs() < 1e-6);
+        assert!((compound_bounds.x1 - source_bounds.x1).abs() < 1e-6);
+        assert!((compound_bounds.y1 - source_bounds.y1).abs() < 1e-6);
+        let world_bounds = compound
+            .transform
+            .to_kurbo()
+            .transform_rect_bbox(compound_bounds);
+        assert!((world_bounds.x0 - (source_bounds.x0 + matrix[4])).abs() < 1e-6);
+        assert!((world_bounds.y0 - (source_bounds.y0 + matrix[5])).abs() < 1e-6);
+        assert!((world_bounds.x1 - (source_bounds.x1 + matrix[4])).abs() < 1e-6);
+        assert!((world_bounds.y1 - (source_bounds.y1 + matrix[5])).abs() < 1e-6);
+
+        let compound_mesh =
+            photonic_render::tessellator::tessellate_fill(&compound_path.path_data, true, 0.1);
+        assert!(!compound_mesh.is_empty());
+        // Compare raster-fill membership across the silhouette. This catches
+        // criss-crossed subpaths and verifies even-odd output matches the
+        // original nonzero-wound SVG rendering.
+        for y_step in 0..64 {
+            for x_step in 0..64 {
+                let point = [
+                    (source_bounds.x0 + source_bounds.width() * (x_step as f64 + 0.5) / 64.0)
+                        as f32,
+                    (source_bounds.y0 + source_bounds.height() * (y_step as f64 + 0.5) / 64.0)
+                        as f32,
+                ];
+                assert_eq!(
+                    mesh_covers(&source_mesh, point),
+                    mesh_covers(&compound_mesh, point),
+                    "rendering differs at {point:?}"
+                );
+            }
+        }
+        for hole in &subpaths[1..] {
+            let bounds = hole.bounding_box();
+            let center = [bounds.center().x as f32, bounds.center().y as f32];
+            assert!(
+                !mesh_covers(&compound_mesh, center),
+                "hole must remain clear"
+            );
+        }
+
+        let svg = export_svg(&document, &SvgExportOptions::default());
+        assert!(svg.contains("fill-rule=\"evenodd\""));
+        assert!(kurbo::BezPath::from_svg(compound_path.path_data.as_svg()).is_ok());
+    }
+
     #[tokio::test]
     async fn transformed_contours_make_renderable_exportable_compound_with_holes() {
         let mut document = Document::new("compound regression", 160.0, 140.0);
