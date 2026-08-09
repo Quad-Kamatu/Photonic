@@ -352,6 +352,17 @@ pub enum PanelAction {
         clip: photonic_core::timeline::ClipId,
         at: photonic_core::timeline::Tick,
     },
+    /// D-12: bind a gyro/IMU sidecar to a clip (22 §6.5).
+    ImportMotionMetadata {
+        clip: photonic_core::timeline::ClipId,
+    },
+    /// D-12: run (or re-run) stabilization analysis for a clip (22 §6.5).
+    ///
+    /// Analysis is *generation, not history* — it produces a cache entry, not
+    /// an undo step, so re-running it never appears in the edit history.
+    AnalyzeStabilization {
+        clip: photonic_core::timeline::ClipId,
+    },
     /// Set the color tag of a layer (None = clear).
     SetLayerColor {
         layer_id: LayerId,

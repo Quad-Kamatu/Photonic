@@ -138,6 +138,7 @@ pub(crate) fn draw_clip_inspector(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         active_format,
         &mut action,
     );
+    draw_stabilization_section(ui, project, seq_id, track_id, clip, &mut action);
     draw_effects_section(ui, project, seq_id, track_id, clip, &mut action);
     draw_keyframes_section(ui, ctx, project, clip, &mut action);
     draw_transitions_section(ui, project, seq_id, track_id, clip, &mut action);
@@ -1004,6 +1005,261 @@ pub(crate) fn clip_has_effects(clip: &Clip) -> bool {
 /// Display name for a stacked effect — prefer the live manifest name so
 /// K-B16 catalogue entries (and any future id) show correctly; fall back to
 /// the seven v1 kind labels, then a generic "Effect".
+/// D-12 gyro stabilization recipe editor (22 §6.5).
+///
+/// Shows the motion source and its status, the lens profile, the strength and
+/// crop controls, and an Analyze action. Only video clips can carry motion
+/// metadata, so the section hides itself elsewhere rather than offering a
+/// control that could never do anything.
+///
+/// Slider edits go through [`set_clip_coalesced`] so a drag commits **one**
+/// undo entry (22 §6.5), while discrete choices commit immediately.
+fn draw_stabilization_section(
+    ui: &mut Ui,
+    project: &TimelineProject,
+    seq: SequenceId,
+    track: TrackId,
+    clip: &Clip,
+    action: &mut Option<PanelAction>,
+) {
+    use photonic_core::timeline::{
+        LensProfileRef, MotionSourceRef, StabilizationCropMode,
+    };
+
+    let Some(sequence) = project.sequences.get(&seq) else {
+        return;
+    };
+    if sequence.track(track).map(|t| t.kind) != Some(TrackKind::Video) {
+        return;
+    }
+
+    egui::CollapsingHeader::new("Stabilization")
+        .default_open(false)
+        .id_salt("clip_inspector_stabilization")
+        .show(ui, |ui| {
+            let Some(spec) = clip.stabilization.as_ref() else {
+                ui.label(
+                    RichText::new("No motion metadata bound to this clip.")
+                        .color(MUTED)
+                        .small(),
+                );
+                ui.label(
+                    RichText::new(
+                        "Import a gyro sidecar (.gcsv or Photonic gyro JSON) to stabilize \
+                         this shot.",
+                    )
+                    .color(MUTED)
+                    .small(),
+                );
+                if ui
+                    .button(format!("{} Import motion metadata…", ph::FILE_ARROW_UP))
+                    .on_hover_text(
+                        "Bind a gyro/IMU sidecar to this clip. Camera-embedded telemetry \
+                         is not yet supported.",
+                    )
+                    .clicked()
+                {
+                    *action = Some(PanelAction::ImportMotionMetadata { clip: clip.id });
+                }
+                return;
+            };
+
+            // ── source + status ─────────────────────────────────────────
+            let source_label = match &spec.binding.source {
+                MotionSourceRef::Embedded { .. } => "Embedded in media".to_string(),
+                MotionSourceRef::Sidecar { path, .. } => path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string()),
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Source").color(MUTED).small());
+                ui.label(RichText::new(source_label).small())
+                    .on_hover_text(match &spec.binding.source {
+                        MotionSourceRef::Sidecar { path, .. } => path.display().to_string(),
+                        MotionSourceRef::Embedded { .. } => {
+                            "Telemetry carried inside the media file.".to_string()
+                        }
+                    });
+            });
+
+            // Whether an analysis exists is the single most useful status:
+            // until one does, the clip renders unstabilized no matter what the
+            // sliders say.
+            let analyzed = spec.analysis_key.is_some();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Status").color(MUTED).small());
+                if analyzed {
+                    ui.label(RichText::new("Analyzed").color(ACCENT).small());
+                } else {
+                    ui.label(
+                        RichText::new("Not analyzed — clip renders unstabilized")
+                            .color(MUTED)
+                            .small(),
+                    );
+                }
+            });
+
+            let anchors = spec.binding.sync.anchors.len();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Clock sync").color(MUTED).small());
+                let text = match anchors {
+                    0 => "Dialect-declared".to_string(),
+                    1 => "1 anchor (offset)".to_string(),
+                    n => format!("{n} anchors (offset + rate)"),
+                };
+                ui.label(RichText::new(text).small()).on_hover_text(
+                    "Sensor time is not video time. One anchor fixes an offset; two or \
+                     more also fit the clock rate and report drift.",
+                );
+            });
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Lens").color(MUTED).small());
+                let text = match &spec.binding.lens {
+                    LensProfileRef::RotationOnly => "Rotation only (uncalibrated)".to_string(),
+                    LensProfileRef::UserFile { path, .. } => path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string()),
+                    LensProfileRef::Bundled { id } => id.clone(),
+                };
+                ui.label(RichText::new(text).small()).on_hover_text(
+                    "Without a calibrated lens, only rotation is corrected — lens \
+                     distortion is left alone.",
+                );
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+
+            // ── strength controls ───────────────────────────────────────
+            let mut edited = spec.clone();
+            let mut changed = false;
+
+            ui.horizontal(|ui| {
+                let label = ui.label("Smoothness");
+                let mut v = edited.smoothness as f64;
+                if ui
+                    .add(egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(2))
+                    .labelled_by(label.id)
+                    .on_hover_text(
+                        "How hard to smooth the camera path. Zero follows the original \
+                         motion exactly; higher is steadier but demands more crop.",
+                    )
+                    .changed()
+                {
+                    edited.smoothness = v as f32;
+                    changed = true;
+                }
+            });
+
+            ui.horizontal(|ui| {
+                let label = ui.label("Horizon lock");
+                let mut v = edited.horizon_lock as f64;
+                if ui
+                    .add(egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(2))
+                    .labelled_by(label.id)
+                    .on_hover_text(
+                        "Level the horizon against measured gravity. Needs accelerometer \
+                         data in the motion source; has no effect without it.",
+                    )
+                    .changed()
+                {
+                    edited.horizon_lock = v as f32;
+                    changed = true;
+                }
+            });
+
+            ui.horizontal(|ui| {
+                let label = ui.label("Max zoom");
+                let mut v = edited.max_zoom as f64;
+                if ui
+                    .add(egui::Slider::new(&mut v, 1.0..=2.0).fixed_decimals(2))
+                    .labelled_by(label.id)
+                    .on_hover_text(
+                        "Ceiling on how far the crop solver may zoom in to hide the edges \
+                         the correction swings out of frame.",
+                    )
+                    .changed()
+                {
+                    edited.max_zoom = v as f32;
+                    changed = true;
+                }
+            });
+
+            if changed {
+                let mut new_clip = clip.clone();
+                new_clip.stabilization = Some(edited.clone());
+                set_clip_coalesced(project, seq, track, new_clip, action);
+            }
+
+            // ── crop mode (discrete) ────────────────────────────────────
+            let current = spec.crop_mode;
+            let mode_label = |m: StabilizationCropMode| match m {
+                StabilizationCropMode::StaticSafe => "Static safe",
+                StabilizationCropMode::Dynamic => "Dynamic",
+                StabilizationCropMode::TransparentEdges => "Transparent edges",
+                // Forward-compat: a mode written by a newer build is shown as
+                // itself rather than silently remapped.
+                _ => "Unknown (from a newer build)",
+            };
+            ui.horizontal(|ui| {
+                ui.label("Crop");
+                egui::ComboBox::from_id_salt("clip_inspector_stab_crop")
+                    .selected_text(mode_label(current))
+                    .show_ui(ui, |ui| {
+                        for m in [
+                            StabilizationCropMode::StaticSafe,
+                            StabilizationCropMode::Dynamic,
+                            StabilizationCropMode::TransparentEdges,
+                        ] {
+                            if ui
+                                .selectable_label(current == m, mode_label(m))
+                                .clicked()
+                                && current != m
+                            {
+                                let mut new_spec = spec.clone();
+                                new_spec.crop_mode = m;
+                                let mut new_clip = clip.clone();
+                                new_clip.stabilization = Some(new_spec);
+                                set_clip_discrete(project, seq, track, new_clip, action);
+                            }
+                        }
+                    });
+            });
+
+            ui.add_space(4.0);
+
+            // ── actions ─────────────────────────────────────────────────
+            ui.horizontal(|ui| {
+                let verb = if analyzed { "Reanalyze" } else { "Analyze" };
+                if ui
+                    .button(format!("{} {verb}", ph::WAVEFORM))
+                    .on_hover_text(
+                        "Read the motion data, integrate the camera path, and solve the \
+                         crop. Runs in the background.",
+                    )
+                    .clicked()
+                {
+                    *action = Some(PanelAction::AnalyzeStabilization { clip: clip.id });
+                }
+                if ui
+                    .button(format!("{} Remove", ph::TRASH))
+                    .on_hover_text(
+                        "Return this clip to its unstabilized source. The motion metadata \
+                         and cached analysis are kept.",
+                    )
+                    .clicked()
+                {
+                    let mut new_clip = clip.clone();
+                    new_clip.stabilization = None;
+                    set_clip_discrete(project, seq, track, new_clip, action);
+                }
+            });
+        });
+}
+
 fn effect_label(effect: &photonic_core::timeline::ClipEffect) -> String {
     use photonic_core::timeline::manifest;
     if !effect.id.is_empty() {

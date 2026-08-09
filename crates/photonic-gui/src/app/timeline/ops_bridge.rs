@@ -917,6 +917,53 @@ pub(crate) fn set_clip_enabled(
     }
 }
 
+/// Set (or clear, with `None`) a clip's D-12 stabilization recipe (22 §6.5).
+///
+/// Takes only a `ClipId` and finds its owning sequence/track itself, because
+/// the caller (a file-picker action) has no reason to know either. Returns
+/// whether the document changed, so the caller can decide what to report.
+///
+/// Clearing restores the unstabilized source path without touching the motion
+/// metadata or cached analysis — 22 §6.5 requires removal be reversible.
+pub fn set_clip_stabilization(
+    doc: &mut Document,
+    history: &mut CommandHistory,
+    clip: photonic_core::timeline::ClipId,
+    spec: Option<photonic_core::timeline::StabilizationSpec>,
+) -> bool {
+    // Reject an invalid recipe before it can reach the document: 22 §6.6 wants
+    // the impossible case reported, and a stored-but-invalid spec would fail
+    // later at analysis time with far less context.
+    if let Some(s) = &spec {
+        if s.validate().is_err() {
+            return false;
+        }
+    }
+    let Some(p) = doc.timeline.as_ref() else {
+        return false;
+    };
+    let found = p.sequences.iter().find_map(|(seq_id, s)| {
+        s.tracks().find_map(|t| {
+            t.clips
+                .iter()
+                .find(|c| c.id == clip)
+                .map(|c| (*seq_id, t.id, c.clone()))
+        })
+    });
+    let Some((seq, track, existing)) = found else {
+        return false;
+    };
+    let mut new = existing;
+    new.stabilization = spec;
+    match ops::set_clip_prop(p, seq, track, new) {
+        Ok(cmd) => {
+            commit(history, doc, cmd);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Set (or clear, with `None`) a clip's organizational color label
 /// (14-nle-parity §M-1, gap #7's UI half) — the clip context menu's "Label"
 /// submenu routes through here; the swatch palette itself lives in

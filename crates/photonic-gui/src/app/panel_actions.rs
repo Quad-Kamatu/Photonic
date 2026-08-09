@@ -2871,6 +2871,89 @@ impl PhotonicApp {
                     doc_modified = true;
                 }
 
+                PanelAction::ImportMotionMetadata { clip } => {
+                    // Parse synchronously, right here: a bad file is then
+                    // rejected while the user is still looking at the picker,
+                    // rather than surfacing later as a mysterious failed
+                    // analysis. 22 §6.6 — report, never guess.
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Gyro metadata", &["gcsv", "json"])
+                        .set_title("Select gyro/IMU sidecar")
+                        .pick_file()
+                    {
+                        match photonic_video::media::parse_motion(&path) {
+                            Ok(series) => {
+                                let spec = photonic_core::timeline::StabilizationSpec::new(
+                                    photonic_core::timeline::MotionBinding {
+                                        source:
+                                            photonic_core::timeline::MotionSourceRef::Sidecar {
+                                                path: path.clone(),
+                                                rel_path: None,
+                                                format: series.format,
+                                            },
+                                        sync: Default::default(),
+                                        // Uncalibrated until the user picks a
+                                        // profile: rotation-only is the honest
+                                        // default, and 22 §6.6 requires it be
+                                        // an explicit state rather than a
+                                        // silent fallback.
+                                        lens:
+                                            photonic_core::timeline::LensProfileRef::RotationOnly,
+                                    },
+                                );
+                                if crate::app::timeline::ops_bridge::set_clip_stabilization(
+                                    doc,
+                                    history,
+                                    clip,
+                                    Some(spec),
+                                ) {
+                                    doc_modified = true;
+                                    self.file_status = Some(format!(
+                                        "Bound {} — {} samples{}{}. Run Analyze to stabilize.",
+                                        path.file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_default(),
+                                        series.samples.len(),
+                                        series
+                                            .sample_rate_hz()
+                                            .map(|hz| format!(", {hz:.0} Hz"))
+                                            .unwrap_or_default(),
+                                        if series.has_accel() {
+                                            ", with accelerometer"
+                                        } else {
+                                            ", gyro only (horizon lock unavailable)"
+                                        },
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                self.file_status =
+                                    Some(format!("Motion metadata rejected: {e}"));
+                            }
+                        }
+                    }
+                }
+
+                PanelAction::AnalyzeStabilization { clip } => {
+                    // Runs on the engine thread: integrating a long clip's
+                    // motion series would stall the UI.
+                    match self.engine.as_ref() {
+                        Some(engine) => {
+                            engine.send_analyze_stabilization(clip);
+                            self.file_status =
+                                Some("Stabilization analysis running…".into());
+                        }
+                        // No engine means no preview to stabilize; say so
+                        // rather than silently dropping the request.
+                        None => {
+                            self.file_status = Some(
+                                "Stabilization needs the video engine; open a sequence first."
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+
                 PanelAction::OpenExportDialog => {
                     // Export (#176): open the export dialog seeded from the
                     // Document-tab settings (format, scale, area).

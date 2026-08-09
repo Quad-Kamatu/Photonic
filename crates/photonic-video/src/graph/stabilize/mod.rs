@@ -165,6 +165,51 @@ impl StabilizationAnalysis {
     }
 }
 
+/// Warm per-clip analyses, read lock-free by the compiler.
+///
+/// Mirrors `LutCache`'s shape and contract: warmed off the hot path, then read
+/// during compile without locking. Analyses are keyed by clip because the
+/// recipe (smoothness, crop mode, lens) is per-clip — two clips cut from the
+/// same media with different settings need different corrections.
+#[derive(Default)]
+pub struct StabilizationCache {
+    entries: std::collections::HashMap<
+        photonic_core::timeline::ClipId,
+        std::sync::Arc<StabilizationAnalysis>,
+    >,
+    /// Diagnostics from the most recent analyses, surfaced alongside the frame.
+    pub failures: Vec<String>,
+}
+
+impl StabilizationCache {
+    /// Store (or replace) the analysis for `clip`.
+    pub fn insert(
+        &mut self,
+        clip: photonic_core::timeline::ClipId,
+        analysis: StabilizationAnalysis,
+    ) {
+        self.entries.insert(clip, std::sync::Arc::new(analysis));
+    }
+
+    /// Drop a clip's analysis, e.g. when its recipe changed.
+    pub fn invalidate(&mut self, clip: photonic_core::timeline::ClipId) {
+        self.entries.remove(&clip);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl crate::graph::compile::StabilizationProvider for StabilizationCache {
+    fn analysis(
+        &self,
+        clip: photonic_core::timeline::ClipId,
+    ) -> Option<std::sync::Arc<StabilizationAnalysis>> {
+        self.entries.get(&clip).cloned()
+    }
+}
+
 /// Why analysis could not run.
 #[derive(Debug, thiserror::Error)]
 pub enum AnalyzeError {
@@ -178,6 +223,10 @@ pub enum AnalyzeError {
     BadFrameRate,
     #[error("frame dimensions must be positive")]
     BadDimensions,
+    #[error("motion metadata: {0}")]
+    Motion(String),
+    #[error("lens profile: {0}")]
+    Lens(String),
 }
 
 /// Everything the analysis needs about the clip itself.
@@ -187,6 +236,58 @@ pub struct ClipGeometry {
     pub height: f64,
     pub fps: f64,
     pub frame_count: usize,
+}
+
+/// End-to-end: read the motion source and lens profile named by `spec`, then
+/// analyze. The one entry point both the GUI's Analyze action and the MCP
+/// `analyze_stabilization` job call, so they cannot drift apart.
+///
+/// `resolve` maps a stored sidecar path to something openable — the caller owns
+/// project-relative resolution and relink, which this module has no business
+/// knowing about.
+pub fn analyze_clip(
+    spec: &StabilizationSpec,
+    geom: ClipGeometry,
+    resolve: impl Fn(&std::path::Path) -> std::path::PathBuf,
+) -> Result<StabilizationAnalysis, AnalyzeError> {
+    use photonic_core::timeline::{LensProfileRef, MotionSourceRef};
+
+    spec.validate().map_err(AnalyzeError::Recipe)?;
+
+    let series = match &spec.binding.source {
+        MotionSourceRef::Sidecar { path, .. } => {
+            crate::media::motion::parse_motion(&resolve(path))
+                .map_err(|e| AnalyzeError::Motion(e.to_string()))?
+        }
+        MotionSourceRef::Embedded { .. } => {
+            // 23 §9.1's dependency audit has not cleared, so no container
+            // adapter exists to call. Fail loudly rather than pretending.
+            return Err(AnalyzeError::Motion(
+                "container-embedded telemetry is not supported in this build".into(),
+            ));
+        }
+    };
+
+    let lens = match &spec.binding.lens {
+        // No calibration: rays still need *a* consistent camera to be defined
+        // in, so use an ideal rectilinear one. This corrects rotation only,
+        // which is exactly what RotationOnly promises.
+        LensProfileRef::RotationOnly => {
+            LensProfile::ideal_pinhole(geom.width, geom.height, 90.0)
+        }
+        LensProfileRef::UserFile { path, .. } => LensProfile::from_path(&resolve(path))
+            .map_err(|e| AnalyzeError::Lens(e.to_string()))?,
+        LensProfileRef::Bundled { id } => {
+            // No snapshot ships until 23 §9.2 per-entry intake passes, so a
+            // document referencing one resolves to "unavailable" rather than
+            // silently degrading to uncalibrated.
+            return Err(AnalyzeError::Lens(format!(
+                "bundled lens profile {id:?} is not available in this build"
+            )));
+        }
+    };
+
+    analyze(&series.samples, spec, &lens, geom)
 }
 
 /// Run the full analysis (22 §6.4 steps 2-8).

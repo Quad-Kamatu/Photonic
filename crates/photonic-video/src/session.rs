@@ -52,7 +52,7 @@ use crate::decode::{PixFmt, SharedRing};
 use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{
-    compile_asset_peek, compile_with_luts_and_opts, fit_long_edge,
+    compile_asset_peek, compile_full, compile_with_luts_and_opts, fit_long_edge,
     CompileDiagnostic, DiagSeverity, LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
 };
 use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
@@ -219,6 +219,15 @@ pub enum EngineCmd {
     /// state, like [`EngineCmd::SetPreviewTarget`]: it changes nothing the
     /// document can observe, so it is not a `Command` and has no undo unit.
     SetScopeTap(ScopeTapPoint),
+    /// D-12: run stabilization analysis for `clip` and warm the engine's
+    /// analysis cache (22 §6.5).
+    ///
+    /// A command rather than a document `Command`: analysis is *generation, not
+    /// history*, so it produces a cache entry and never an undo step. Running
+    /// it on the engine thread keeps a long clip's integration off the UI.
+    AnalyzeStabilization {
+        clip: photonic_core::timeline::ClipId,
+    },
     /// K-B5: enable/disable compare-effect mode (second clean compile without
     /// clip looks). View state only — not a document Command.
     SetCompareEffects(bool),
@@ -609,6 +618,9 @@ struct EngineThread {
     /// from, so an edit that changes them re-measures and one that does not
     /// costs nothing.
     deflicker_fingerprints: std::collections::HashMap<ClipId, u64>,
+    /// D-12 warm per-clip stabilization analyses (22 §6.4), read lock-free by
+    /// the compiler exactly as `lut_cache` is.
+    stabilization: crate::graph::stabilize::StabilizationCache,
     last_revision: Option<u64>,
     active_sequence_override: Option<SequenceId>,
     proxy_mode: ProxyMode,
@@ -682,6 +694,7 @@ impl EngineThread {
             lut_cache: LutCache::default(),
             deflicker_gains: crate::graph::deflicker::GainTable::new(),
             deflicker_fingerprints: std::collections::HashMap::new(),
+            stabilization: crate::graph::stabilize::StabilizationCache::default(),
             last_revision: None,
             active_sequence_override: None,
             proxy_mode: ProxyMode::Auto,
@@ -836,6 +849,10 @@ impl EngineThread {
                 // The re-present is a cache-hit replay of the same graph (the tap
                 // changes no content hash), not a re-render.
                 self.scope_tap = point;
+                self.controller.request_present();
+            }
+            EngineCmd::AnalyzeStabilization { clip } => {
+                self.run_stabilization_analysis(clip);
                 self.controller.request_present();
             }
             EngineCmd::SetCompareEffects(on) => {
@@ -1418,6 +1435,67 @@ impl EngineThread {
         }
     }
 
+    /// D-12: analyze `clip` and warm the stabilization cache (22 §6.4).
+    ///
+    /// Runs on the engine thread, off the UI. Geometry comes from the clip's
+    /// own sequence format and frame rate, so the corrections are indexed at
+    /// the rate the timeline will ask for them.
+    ///
+    /// A failure records a diagnostic and leaves the cache untouched, which
+    /// means the clip keeps rendering from its unstabilized source rather than
+    /// going black — the same posture an unresolvable LUT takes.
+    fn run_stabilization_analysis(&mut self, clip_id: photonic_core::timeline::ClipId) {
+        use crate::graph::stabilize::{analyze_clip, ClipGeometry};
+
+        let Some(project) = self.snapshot.clone() else {
+            return;
+        };
+        // Locate the clip and the format it will be rendered at.
+        let found = project.sequences.values().find_map(|seq| {
+            seq.tracks()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .map(|c| (seq, c))
+        });
+        let Some((seq, clip)) = found else {
+            self.stabilization
+                .failures
+                .push(format!("stabilization: clip {clip_id:?} not found"));
+            return;
+        };
+        let Some(spec) = clip.stabilization.clone() else {
+            self.stabilization.invalidate(clip_id);
+            return;
+        };
+        let format = seq.format();
+        // Exact rational rate, not a rounded float: at 23.976 the drift
+        // between the two accumulates to a whole frame over a long clip, which
+        // would misindex the corrections near the end.
+        let rate = seq.frame_rate;
+        let fps = rate.num as f64 / rate.den.max(1) as f64;
+        let frame_count = ((clip.duration.as_seconds_f64() * fps).ceil() as usize).max(1);
+        let geom = ClipGeometry {
+            width: format.width as f64,
+            height: format.height as f64,
+            fps,
+            frame_count,
+        };
+
+        // Sidecar paths are stored as the user gave them; project-relative
+        // resolution is the caller's job, and the session is the caller.
+        match analyze_clip(&spec, geom, |p| p.to_path_buf()) {
+            Ok(analysis) => {
+                self.stabilization.insert(clip_id, analysis);
+            }
+            Err(e) => {
+                self.stabilization
+                    .failures
+                    .push(format!("stabilization analysis failed: {e}"));
+                self.stabilization.invalidate(clip_id);
+            }
+        }
+    }
+
     fn effective_sequence(&self, project: &TimelineProject) -> Option<SequenceId> {
         self.active_sequence_override
             .filter(|id| project.sequences.contains_key(id))
@@ -1491,7 +1569,7 @@ impl EngineThread {
                         // Thread the pre-warmed LUT cache so `Grade` `Lut3d` ops
                         // resolve to real tables (K-0.5); parse-failure diagnostics
                         // ride along on the compiled frame.
-                        let mut compiled = crate::graph::compile::compile_full(
+                        let mut compiled = compile_full(
                             project.as_ref(),
                             seq_id,
                             format_index,
@@ -1501,6 +1579,7 @@ impl EngineThread {
                             Some(&self.lut_cache),
                             false,
                             Some(&self.deflicker_gains),
+                            Some(&self.stabilization),
                         );
                         compiled
                             .diagnostics

@@ -451,6 +451,7 @@ pub fn compile_with_luts_and_opts(
         luts,
         skip_clip_looks,
         None,
+        None,
     )
 }
 
@@ -458,6 +459,40 @@ pub fn compile_with_luts_and_opts(
 /// deflicker gains. This is the entry point a session uses once it has run the
 /// deflicker analysis job; every other entry point delegates here with `None`,
 /// which lowers each `Deflicker` effect as a pass-through.
+/// [`compile_with_luts_and_opts`] plus a [`StabilizationProvider`], so D-12
+/// clips resolve their per-frame warp (22 §6.4).
+///
+/// Separate entry point rather than another parameter on the existing ones:
+/// every current caller wants `None` here, and threading an extra `Option`
+/// through all of them would be churn for no gain.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_with_providers(
+    project: &TimelineProject,
+    sequence: SequenceId,
+    format_index: usize,
+    tick: Tick,
+    quality: Quality,
+    view_override: Option<ViewNodeOverride>,
+    luts: Option<&dyn LutProvider>,
+    stabilization: Option<&dyn StabilizationProvider>,
+    skip_clip_looks: bool,
+) -> CompiledFrame {
+    compile_full(
+        project,
+        sequence,
+        format_index,
+        tick,
+        quality,
+        view_override,
+        luts,
+        skip_clip_looks,
+        None,
+        stabilization,
+    )
+}
+
+/// Like [`compile_with_providers`], additionally threading compile-resolved
+/// deflicker gains for effects that depend on whole-range analysis.
 #[allow(clippy::too_many_arguments)]
 pub fn compile_full(
     project: &TimelineProject,
@@ -469,9 +504,11 @@ pub fn compile_full(
     luts: Option<&dyn LutProvider>,
     skip_clip_looks: bool,
     deflicker: Option<&dyn DeflickerGains>,
+    stabilization: Option<&dyn StabilizationProvider>,
 ) -> CompiledFrame {
     let mut b = Builder::new();
     b.luts = luts;
+    b.stabilization = stabilization;
     b.skip_clip_looks = skip_clip_looks;
     b.deflicker = deflicker;
 
