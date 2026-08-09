@@ -372,7 +372,6 @@ impl ClipGains {
         self.frame_ticks = frame_ticks.max(1);
         self
     }
-
 }
 
 /// Measured gains for every analysed clip — the store [`compile_full`] consults.
@@ -851,13 +850,15 @@ mod tests {
             img
         };
 
-        let drift = std::f32::consts::TAU / 4.0;
+        // 100 Hz mains at 30 fps — the advance the snap will recognise.
+        let drift = std::f32::consts::TAU / 3.0;
         let frames: Vec<Image> = (0..12).map(|i| with_band(drift * i as f32)).collect();
 
         // Exposure is measured on a stride; bands come from the consecutive burst.
         let strided: Vec<&Image> = frames.iter().step_by(3).collect();
         let burst: Vec<Vec<f32>> = frames.iter().map(rolling_bands::row_profile).collect();
-        let track = rolling_bands::track_from_burst(&burst).expect("band track");
+        // 30 fps + a quarter-turn drift snaps cleanly to a mains candidate.
+        let track = rolling_bands::track_from_burst(&burst, 30.0, 0).expect("band track");
 
         let g = measure_clip(strided, Tick(0), 300, DeflickerParams::default())
             .with_band(Some(track), 100);

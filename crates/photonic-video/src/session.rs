@@ -52,8 +52,8 @@ use crate::decode::{PixFmt, SharedRing};
 use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{
-    compile_asset_peek, compile_full, compile_with_luts_and_opts, fit_long_edge,
-    CompileDiagnostic, DiagSeverity, LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
+    compile_asset_peek, compile_full, compile_with_luts_and_opts, fit_long_edge, CompileDiagnostic,
+    DiagSeverity, LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
 };
 use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
 use crate::graph::ir::IrOp;
@@ -1260,6 +1260,8 @@ impl EngineThread {
             /// sequence rate, not assumed, or `params.window` (documented in
             /// seconds) would be scaled by `fps / assumed_fps`.
             frame_ticks: i64,
+            /// Sequence frame rate, needed to snap the band advance to mains.
+            fps: f32,
             speed: photonic_core::timeline::SpeedMap,
         }
         let mut todo: Vec<Job> = Vec::new();
@@ -1304,6 +1306,7 @@ impl EngineThread {
                     fingerprint: fp,
                     params,
                     frame_ticks: frame_ticks.max(1),
+                    fps,
                     speed: clip.speed.clone(),
                 });
             }
@@ -1321,6 +1324,7 @@ impl EngineThread {
                 fingerprint: fp,
                 mut params,
                 frame_ticks: frame,
+                fps: fps_for_band,
                 speed,
             } = job;
             let total = (duration.0 / frame.max(1)).max(1) as usize;
@@ -1418,7 +1422,12 @@ impl EngineThread {
                     ));
                 }
             }
-            let band = crate::graph::rolling_bands::track_from_burst(&burst);
+            // The burst starts mid-clip, so its frame index is the anchor; and the
+            // advance is snapped to the mains value for this rate, which is what
+            // makes extrapolating to the clip's ends safe.
+            let anchor_frame = burst_start / frame.max(1);
+            let band =
+                crate::graph::rolling_bands::track_from_burst(&burst, fps_for_band, anchor_frame);
             if let Some(b) = band {
                 tracing::info!(clip = ?clip_id, cycles = b.cycles, amplitude = b.amplitude,
                     dphase = b.dphase, "deflicker: rolling band detected");

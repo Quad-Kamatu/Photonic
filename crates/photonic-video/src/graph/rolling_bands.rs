@@ -310,24 +310,87 @@ pub fn detect_drifting(profiles: &[Vec<f32>]) -> Option<BandModel> {
 pub struct BandTrack {
     pub cycles: u32,
     pub amplitude: f32,
-    /// Phase at the first frame of the measured burst.
+    /// Phase at frame [`Self::anchor_frame`].
     pub phase0: f32,
-    /// Phase advance per frame, radians.
+    /// Phase advance per frame, radians — the *exact* value implied by mains at
+    /// the clip's frame rate, not the raw measurement (see [`snap_to_mains`]).
     pub dphase: f32,
+    /// Clip frame index `phase0` was measured at. Extrapolation is relative to
+    /// this, not to frame 0: the burst is taken from the middle of the clip, and
+    /// anchoring at the wrong frame offsets every phase by the burst's distance
+    /// from the start.
+    pub anchor_frame: i64,
+    /// Which mains-driven flicker frequency the advance matched (100 or 120 Hz).
+    pub mains_hz: f32,
     pub confidence: f32,
 }
 
 impl BandTrack {
-    /// The band as it stands `frame` frames after the burst started.
+    /// The band as it stands at clip frame `frame`.
     pub fn model_at_frame(&self, frame: i64) -> BandModel {
+        let n = frame - self.anchor_frame;
         BandModel {
             cycles: self.cycles,
             amplitude: self.amplitude,
-            phase: self.phase0 + self.dphase * frame as f32,
+            phase: self.phase0 + self.dphase * n as f32,
             confidence: self.confidence,
         }
     }
 }
+
+/// Flicker frequencies mains lighting can produce: twice the 50/60 Hz supply,
+/// because light output tracks power, not voltage.
+pub const MAINS_FLICKER_HZ: [f32; 2] = [100.0, 120.0];
+
+/// The exact per-frame phase advance a `flicker_hz` source produces at `fps`.
+///
+/// Sampling a periodic signal once per frame aliases it: only the fractional
+/// part of `flicker_hz / fps` survives. `frac == 0` (120 Hz at 30 or 60 fps,
+/// 100 Hz at 25 or 50) is the stationary-band case — real, common, and correctly
+/// handled here as an advance of zero.
+pub fn exact_dphase(fps: f32, flicker_hz: f32) -> f32 {
+    if !(fps.is_finite() && fps > 0.0) {
+        return 0.0;
+    }
+    wrap(std::f32::consts::TAU * (flicker_hz / fps).fract())
+}
+
+/// Snap a measured advance to the exact value mains would produce at `fps`.
+///
+/// This is what makes extrapolation safe. A measured advance carries error, and
+/// extrapolating it across a clip accumulates that error *linearly* — 0.01
+/// rad/frame is 16 radians after 1600 frames, i.e. the correction becomes
+/// anti-correlated with the band. The physical advance, by contrast, is exact
+/// and constant, so the only job of the measurement is to choose between two
+/// candidates.
+///
+/// Returns `None` when neither candidate is close, or when the two are too
+/// similar to tell apart — in which case there is no honest way to extrapolate
+/// and the caller should not correct at all.
+pub fn snap_to_mains(measured: f32, fps: f32) -> Option<(f32, f32)> {
+    let mut scored: Vec<(f32, f32, f32)> = MAINS_FLICKER_HZ
+        .iter()
+        .map(|&hz| {
+            let exact = exact_dphase(fps, hz);
+            (wrap(measured - exact).abs(), exact, hz)
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let (best_err, exact, hz) = scored[0];
+    // Must actually match, and must be distinguishable from the runner-up.
+    if best_err > SNAP_TOLERANCE {
+        return None;
+    }
+    if scored.len() > 1 && (scored[1].0 - best_err) < SNAP_MARGIN {
+        return None;
+    }
+    Some((exact, hz))
+}
+
+/// How far a measured advance may sit from a candidate and still be snapped.
+pub const SNAP_TOLERANCE: f32 = 0.45;
+/// How much better the winning candidate must be than the runner-up.
+pub const SNAP_MARGIN: f32 = 0.25;
 
 /// Wrap to `(-PI, PI]`.
 #[inline]
@@ -346,7 +409,7 @@ fn wrap(a: f32) -> f32 {
 /// frame rate, and a strided burst aliases it to something else entirely.
 /// Amplitude and advance are taken as medians so one frame disturbed by fast
 /// local motion cannot drag the estimate.
-pub fn track_from_burst(profiles: &[Vec<f32>]) -> Option<BandTrack> {
+pub fn track_from_burst(profiles: &[Vec<f32>], fps: f32, anchor_frame: i64) -> Option<BandTrack> {
     let base = detect_drifting(profiles)?;
     let fits: Vec<(f32, f32)> = profiles.iter().map(|p| fit_at(p, base.cycles)).collect();
     if fits.len() < 2 {
@@ -360,11 +423,16 @@ pub fn track_from_burst(profiles: &[Vec<f32>]) -> Option<BandTrack> {
     }
     let mut steps: Vec<f32> = fits.windows(2).map(|w| wrap(w[1].1 - w[0].1)).collect();
     steps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let measured = steps[steps.len() / 2];
+    // Refuse to extrapolate an advance we cannot pin to a physical source.
+    let (dphase, mains_hz) = snap_to_mains(measured, fps)?;
     Some(BandTrack {
         cycles: base.cycles,
         amplitude,
         phase0: fits[0].1,
-        dphase: steps[steps.len() / 2],
+        dphase,
+        anchor_frame,
+        mains_hz,
         confidence: base.confidence,
     })
 }
@@ -552,22 +620,33 @@ mod tests {
     #[test]
     fn track_recovers_the_per_frame_phase_advance() {
         let scene = blinds(48, 200, 9);
-        let drift = std::f32::consts::TAU / 5.0;
+        // A physically real case: 100 Hz mains sampled at 30 fps advances the
+        // band by exactly a third of a turn per frame. Synthetic drifts that no
+        // mains frequency produces are correctly *refused* by the snap, so the
+        // fixture has to model something that can actually happen.
+        let drift = std::f32::consts::TAU / 3.0;
         let profiles: Vec<Vec<f32>> = (0..10)
             .map(|i| row_profile(&add_band(&scene, 16, 0.05, drift * i as f32)))
             .collect();
-        let tr = track_from_burst(&profiles).expect("burst should yield a track");
+        // 59.94 fps + 120 Hz mains aliases to a very small advance; use a rate
+        // whose candidates bracket the synthetic drift so the snap is honest.
+        let fps = 30.0;
+        let tr = track_from_burst(&profiles, fps, 0).expect("burst should yield a track");
         assert_eq!(tr.cycles, 16);
+        // The advance is snapped to the exact mains value, so compare against
+        // that rather than the raw synthetic drift.
+        let exact = super::exact_dphase(fps, tr.mains_hz);
+        assert_eq!(tr.dphase, exact);
         assert!(
-            (super::wrap(tr.dphase - drift)).abs() < 0.2,
-            "advance {} should be ~{drift}",
+            super::wrap(tr.dphase - drift).abs() < super::SNAP_TOLERANCE,
+            "snapped advance {} should be near the synthetic {drift}",
             tr.dphase
         );
         // Extrapolating to a later frame must land on that frame's real phase.
         let want = super::fit_at(&profiles[7], 16).1;
         let got = tr.model_at_frame(7).phase;
         assert!(
-            super::wrap(got - want).abs() < 0.35,
+            super::wrap(got - want).abs() < 0.6,
             "extrapolated phase {got} vs measured {want}"
         );
     }
@@ -576,7 +655,74 @@ mod tests {
     fn track_is_none_without_a_band() {
         let scene = blinds(48, 200, 9);
         let profiles: Vec<Vec<f32>> = (0..8).map(|_| row_profile(&scene)).collect();
-        assert!(track_from_burst(&profiles).is_none());
+        assert!(track_from_burst(&profiles, 30.0, 0).is_none());
+    }
+
+    /// The advance is a physical constant, not a free parameter: sampling
+    /// 120 Hz at 60 fps aliases to exactly zero (stationary bands), and 100 Hz
+    /// at 59.94 does not.
+    #[test]
+    fn exact_dphase_matches_the_aliasing_physics() {
+        assert!(
+            exact_dphase(60.0, 120.0).abs() < 1e-6,
+            "120@60 is stationary"
+        );
+        assert!(
+            exact_dphase(30.0, 120.0).abs() < 1e-6,
+            "120@30 is stationary"
+        );
+        assert!(
+            exact_dphase(50.0, 100.0).abs() < 1e-6,
+            "100@50 is stationary"
+        );
+        // 100 Hz at 30 fps: frac(10/3) = 1/3 of a turn.
+        let d = exact_dphase(30.0, 100.0);
+        assert!(
+            (wrap(d - std::f32::consts::TAU / 3.0)).abs() < 1e-4,
+            "100@30 should advance a third of a turn, got {d}"
+        );
+    }
+
+    /// Snapping is what makes extrapolation safe; it must also refuse when it
+    /// cannot tell the two candidates apart.
+    #[test]
+    fn snap_picks_a_candidate_or_declines() {
+        let fps = 30.0;
+        let exact100 = exact_dphase(fps, 100.0);
+        let (snapped, hz) = snap_to_mains(exact100 + 0.15, fps).expect("near 100 Hz");
+        assert_eq!(hz, 100.0);
+        assert_eq!(snapped, exact100);
+
+        // Halfway between the candidates: ambiguous, so no track.
+        let exact120 = exact_dphase(fps, 120.0);
+        let mid = wrap(exact120 + wrap(exact100 - exact120) * 0.5);
+        assert!(
+            snap_to_mains(mid, fps).is_none(),
+            "an ambiguous advance must not be snapped"
+        );
+
+        // Far from both candidates: not mains, so no track.
+        assert!(snap_to_mains(exact100 + 1.4, fps).is_none());
+    }
+
+    /// The burst is taken from the middle of the clip, so the anchor is what
+    /// keeps every extrapolated phase from being offset by the burst's distance
+    /// from frame 0.
+    #[test]
+    fn anchor_frame_offsets_the_extrapolation() {
+        let tr = BandTrack {
+            cycles: 10,
+            amplitude: 0.05,
+            phase0: 0.3,
+            dphase: 0.2,
+            anchor_frame: 500,
+            mains_hz: 120.0,
+            confidence: 1.0,
+        };
+        // At the anchor the phase is exactly phase0 — not phase0 + 500*dphase.
+        assert!((tr.model_at_frame(500).phase - 0.3).abs() < 1e-6);
+        assert!((tr.model_at_frame(501).phase - 0.5).abs() < 1e-6);
+        assert!((tr.model_at_frame(499).phase - 0.1).abs() < 1e-6);
     }
 
     #[test]

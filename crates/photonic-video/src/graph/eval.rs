@@ -2224,15 +2224,33 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
         let r = warp.rotation;
         let uniform: [f32; 28] = [
             // r0, r1, r2 — row-major rotation, one row per vec4 (w unused).
-            r[0], r[1], r[2], 0.0,
-            r[3], r[4], r[5], 0.0,
-            r[6], r[7], r[8], 0.0,
+            r[0],
+            r[1],
+            r[2],
+            0.0,
+            r[3],
+            r[4],
+            r[5],
+            0.0,
+            r[6],
+            r[7],
+            r[8],
+            0.0,
             // k1..k4
-            warp.k[0], warp.k[1], warp.k[2], warp.k[3],
+            warp.k[0],
+            warp.k[1],
+            warp.k[2],
+            warp.k[3],
             // fx, fy, cx, cy
-            warp.intrinsics[0], warp.intrinsics[1], warp.intrinsics[2], warp.intrinsics[3],
+            warp.intrinsics[0],
+            warp.intrinsics[1],
+            warp.intrinsics[2],
+            warp.intrinsics[3],
             // logical / source dimensions
-            logical_w as f32, logical_h as f32, source_w as f32, source_h as f32,
+            logical_w as f32,
+            logical_h as f32,
+            source_w as f32,
+            source_h as f32,
             // zoom, fisheye, transparent_edges, sampling
             warp.zoom,
             if warp.fisheye { 1.0 } else { 0.0 },
@@ -4730,6 +4748,8 @@ mod tests {
                         amplitude: m.amplitude,
                         phase0: m.phase,
                         dphase: 0.0,
+                        anchor_frame: 0,
+                        mains_hz: 120.0,
                         confidence: m.confidence,
                     }),
                     frame_ticks: 1,
