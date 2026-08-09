@@ -26,19 +26,27 @@ use egui_phosphor::regular as ph;
 // `SpeedKey` isn't re-exported at `timeline::` root (only `SpeedMap` is);
 // reached via the `clip` submodule directly, same precedent as
 // `app/timeline/mod.rs`'s `use photonic_core::timeline::clip::LinkGroupId`.
+use photonic_core::timeline::anim::EasePreset;
 use photonic_core::timeline::clip::SpeedKey;
 // `VfxOwner` (K-B1/K-B2 effect-stack scope) isn't re-exported at `timeline::`
 // root either — same precedent as `SpeedKey` above.
 use super::param_expr;
 use photonic_core::timeline::commands::VfxOwner;
 use photonic_core::timeline::{
-    ops, prop_registry, Clip, ClipId, EffectKind, EffectParams, PropTargetKind, PropValue, Ratio,
-    SequenceId, SpeedMap, Tick, TimelineProject, TrackId, TrackKind, Transition, TransitionKind,
-    TransitionParams, TICKS_PER_SECOND,
+    ops, prop_registry, Clip, ClipId, EffectKind, EffectParams, Interp, PropTargetKind, PropValue,
+    Ratio, SequenceId, SpeedMap, Tick, TimelineProject, TrackId, TrackKind, Transition,
+    TransitionKind, TransitionParams, TICKS_PER_SECOND,
 };
 
 const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
 const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x56, 0xCF); // `primary`
+const SPEED_CURVE_MAX: f64 = 10.0;
+
+#[derive(Clone, Copy)]
+struct SpeedCurveDrag {
+    clip: ClipId,
+    at: Tick,
+}
 
 /// Left-rail Clip Inspector drawer. Reads the timeline selection and clip data
 /// via `ctx` (`ctx.video.selection`, `ctx.doc`).
@@ -294,8 +302,183 @@ fn transform_row_suffixed(ui: &mut Ui, label: &str, v: &mut f64, suffix: &str) -
 /// field and every ramp-point row below.
 fn ratio_from_pct(pct: f64, reversed: bool) -> Ratio {
     let den: u32 = 1000;
-    let mag = ((pct / 100.0) * den as f64).round().max(1.0) as i32;
+    let mag = ((pct / 100.0) * den as f64).round().clamp(0.0, 10_000.0) as i32;
     Ratio::new(if reversed { -mag } else { mag }, den)
+}
+
+fn preset_speed_keys(name: &str, duration: Tick) -> Vec<SpeedKey> {
+    let at = |fraction: f64| Tick((duration.0 as f64 * fraction).round() as i64);
+    let eased = |fraction: f64, speed: f64| {
+        SpeedKey::eased(
+            at(fraction),
+            Ratio::new((speed * 1000.0).round() as i32, 1000),
+            EasePreset::EaseInOut.interp(),
+        )
+    };
+    let last =
+        |speed: f64| SpeedKey::new(duration, Ratio::new((speed * 1000.0).round() as i32, 1000));
+    match name {
+        "Flow" => vec![
+            eased(0.0, 1.0),
+            eased(0.25, 0.5),
+            eased(0.65, 2.0),
+            last(1.0),
+        ],
+        "Hero" => vec![
+            eased(0.0, 1.0),
+            eased(0.35, 0.25),
+            eased(0.65, 4.0),
+            last(1.0),
+        ],
+        "Action" => vec![
+            eased(0.0, 1.0),
+            eased(0.25, 0.5),
+            eased(0.55, 8.0),
+            last(1.0),
+        ],
+        "Fast Lane" => vec![
+            eased(0.0, 1.0),
+            eased(0.2, 3.0),
+            eased(0.75, 5.0),
+            last(1.0),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn speed_to_curve_y(speed: f64, rect: egui::Rect) -> f32 {
+    let normalized = speed.signum() * (1.0 + speed.abs()).ln() / (1.0 + SPEED_CURVE_MAX).ln();
+    rect.center().y - normalized as f32 * rect.height() * 0.45
+}
+
+fn curve_y_to_speed(y: f32, rect: egui::Rect) -> f64 {
+    let normalized = ((rect.center().y - y) / (rect.height() * 0.45)) as f64;
+    normalized.signum() * ((normalized.abs().min(1.0) * (1.0 + SPEED_CURVE_MAX).ln()).exp() - 1.0)
+}
+
+fn speed_curve_canvas(
+    ui: &mut Ui,
+    clip: &Clip,
+    keys: &[SpeedKey],
+    frame_ticks: i64,
+) -> Option<Vec<SpeedKey>> {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(160.0), 132.0),
+        egui::Sense::click_and_drag(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, MUTED.gamma_multiply(0.55)),
+    );
+    for value in [-10.0, -1.0, 0.0, 1.0, 10.0] {
+        let y = speed_to_curve_y(value, rect);
+        let stroke = if value == 0.0 {
+            egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.7))
+        } else {
+            egui::Stroke::new(1.0, MUTED.gamma_multiply(0.35))
+        };
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            stroke,
+        );
+        painter.text(
+            egui::pos2(rect.left() + 3.0, y - 1.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{value:.0}x"),
+            egui::FontId::proportional(9.0),
+            MUTED,
+        );
+    }
+    let mut sorted = keys.to_vec();
+    sorted.sort_by_key(|key| key.at.0);
+    let point = |key: SpeedKey| {
+        let x = rect.left() + rect.width() * (key.at.0 as f32 / clip.duration.0.max(1) as f32);
+        egui::pos2(x, speed_to_curve_y(key.ratio.as_f64(), rect))
+    };
+    let points: Vec<_> = sorted.iter().copied().map(point).collect();
+    if points.len() > 1 {
+        painter.add(egui::Shape::line(
+            points.clone(),
+            egui::Stroke::new(1.8, ACCENT),
+        ));
+    }
+    for p in &points {
+        painter.circle_filled(*p, 4.5, ACCENT);
+        painter.circle_stroke(*p, 4.5, egui::Stroke::new(1.0, Color32::WHITE));
+    }
+
+    let drag_id = ui.id().with(("speed_curve_drag", clip.id));
+    if response.drag_started() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if let Some((index, _)) = points
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.distance(pos).total_cmp(&b.distance(pos)))
+                .filter(|(_, p)| p.distance(pos) <= 10.0)
+            {
+                ui.data_mut(|data| {
+                    data.insert_temp(
+                        drag_id,
+                        SpeedCurveDrag {
+                            clip: clip.id,
+                            at: sorted[index].at,
+                        },
+                    )
+                });
+            }
+        }
+    }
+    if response.dragged() {
+        if let (Some(drag), Some(pos)) = (
+            ui.data(|data| data.get_temp::<SpeedCurveDrag>(drag_id)),
+            response.interact_pointer_pos(),
+        ) {
+            if drag.clip == clip.id {
+                let raw_tick =
+                    ((pos.x - rect.left()) / rect.width() * clip.duration.0 as f32) as i64;
+                let at = Tick(
+                    ((raw_tick as f64 / frame_ticks.max(1) as f64).round() as i64 * frame_ticks)
+                        .clamp(0, clip.duration.0),
+                );
+                if at == drag.at || !sorted.iter().any(|key| key.at == at) {
+                    if let Some(key) = sorted.iter_mut().find(|key| key.at == drag.at) {
+                        key.at = at;
+                        key.ratio = Ratio::new(
+                            (curve_y_to_speed(pos.y, rect) * 1000.0).round() as i32,
+                            1000,
+                        );
+                        sorted.sort_by_key(|key| key.at.0);
+                        return Some(sorted);
+                    }
+                }
+            }
+        }
+    }
+    if response.drag_stopped() {
+        ui.data_mut(|data| data.remove::<SpeedCurveDrag>(drag_id));
+    }
+    if response.clicked() && ui.input(|input| input.modifiers.ctrl) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let raw_tick = ((pos.x - rect.left()) / rect.width() * clip.duration.0 as f32) as i64;
+            let at = Tick(
+                ((raw_tick as f64 / frame_ticks.max(1) as f64).round() as i64 * frame_ticks)
+                    .clamp(0, clip.duration.0),
+            );
+            if !sorted.iter().any(|key| key.at == at) {
+                let ratio = Ratio::new(
+                    (curve_y_to_speed(pos.y, rect) * 1000.0).round() as i32,
+                    1000,
+                );
+                sorted.push(SpeedKey::new(at, ratio));
+                sorted.sort_by_key(|key| key.at.0);
+                return Some(sorted);
+            }
+        }
+    }
+    None
 }
 
 /// The piecewise-constant ramp speed in effect at clip-relative tick `t`,
@@ -405,12 +588,9 @@ fn draw_constant_speed_row(
     }
 }
 
-/// Speed-ramp editor (G-11): one row per keyframe (clip-relative position in
-/// seconds, speed %, reverse, remove), plus "Add point"/"Clear ramp". Kept
-/// deliberately simple per the story's scope — add/remove/drag-the-numeric-
-/// field editing here; full on-clip rubber-band dragging in the timeline
-/// lane is a later story (the badge in `app/timeline/clips.rs` covers the
-/// on-clip cue for now).
+/// Speed-ramp editor with presets, a direct signed-speed curve, and precise
+/// point controls. The curve is clip-relative, so changing it never resizes
+/// the timeline slot.
 fn draw_speed_ramp_editor(
     ui: &mut Ui,
     keys: &[SpeedKey],
@@ -420,19 +600,54 @@ fn draw_speed_ramp_editor(
     clip: &Clip,
     action: &mut Option<PanelAction>,
 ) {
-    ui.label(
-        RichText::new("Piecewise ramp — each point holds its speed until the next point.")
-            .color(MUTED)
-            .small(),
-    );
     let mut sorted: Vec<SpeedKey> = keys.to_vec();
     sorted.sort_by_key(|k| k.at.0);
     let clip_secs = clip.duration.as_seconds_f64().max(0.01);
+    let frame_ticks = project
+        .sequences
+        .get(&seq)
+        .map(|sequence| sequence.frame_rate.ticks_per_frame().0)
+        .unwrap_or(TICKS_PER_SECOND / 30);
 
     // One mutation per frame at most: whichever row/button changed last wins,
     // same one-write-per-frame shape as every other section in this file.
     let mut new_keys: Option<Vec<SpeedKey>> = None;
     let mut discrete = false;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Presets").color(MUTED).small());
+        for preset in ["Flow", "Hero", "Action", "Fast Lane"] {
+            if ui.small_button(preset).clicked() {
+                new_keys = Some(preset_speed_keys(preset, clip.duration));
+                discrete = true;
+            }
+        }
+    });
+    let curve_edit_id = ui.id().with(("speed_curve_edit", clip.id));
+    let mut editing_curve = ui
+        .data(|data| data.get_temp::<bool>(curve_edit_id))
+        .unwrap_or(false);
+    if ui
+        .small_button(if editing_curve {
+            "Hide speed curve"
+        } else {
+            "Edit speed curve"
+        })
+        .clicked()
+    {
+        editing_curve = !editing_curve;
+        ui.data_mut(|data| data.insert_temp(curve_edit_id, editing_curve));
+    }
+    if editing_curve {
+        ui.label(
+            RichText::new("Ctrl-click adds a point; drag points through 0x for reverse.")
+                .color(MUTED)
+                .small(),
+        );
+        if let Some(edited) = speed_curve_canvas(ui, clip, &sorted, frame_ticks) {
+            new_keys = Some(edited);
+        }
+    }
 
     if sorted.is_empty() {
         ui.label(
@@ -442,12 +657,13 @@ fn draw_speed_ramp_editor(
         );
     } else {
         egui::Grid::new(("clip_speed_ramp_grid", clip.id))
-            .num_columns(4)
+            .num_columns(5)
             .spacing([4.0, 2.0])
             .show(ui, |ui| {
                 ui.label(RichText::new("At").color(MUTED).small());
                 ui.label(RichText::new("Speed").color(MUTED).small());
                 ui.label(RichText::new("Rev").color(MUTED).small());
+                ui.label(RichText::new("Ease").color(MUTED).small());
                 ui.label("");
                 ui.end_row();
 
@@ -464,19 +680,41 @@ fn draw_speed_ramp_editor(
                     let pct_resp = ui.add(
                         egui::DragValue::new(&mut pct)
                             .speed(1.0)
-                            .range(1.0..=10000.0)
+                            .range(0.0..=1000.0)
                             .suffix("%"),
                     );
                     let rev_resp = ui.checkbox(&mut reversed, "");
+                    let mut interp = key.interp;
+                    egui::ComboBox::from_id_salt(("speed_interp", clip.id, key.at))
+                        .selected_text(match interp {
+                            Interp::Hold => "Hold",
+                            Interp::Linear => "Linear",
+                            Interp::Bezier { .. } => "Bezier",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut interp, Interp::Hold, "Hold");
+                            ui.selectable_value(&mut interp, Interp::Linear, "Linear");
+                            ui.selectable_value(
+                                &mut interp,
+                                EasePreset::EaseInOut.interp(),
+                                "Ease In-Out",
+                            );
+                        });
                     let remove = ui
                         .add(egui::Button::new(RichText::new(ph::X)).small())
                         .on_hover_text("Remove point");
-                    if at_resp.changed() || pct_resp.changed() || rev_resp.changed() {
+                    if at_resp.changed()
+                        || pct_resp.changed()
+                        || rev_resp.changed()
+                        || interp != key.interp
+                    {
                         let mut edited = sorted.clone();
-                        edited[i] = SpeedKey::new(
-                            Tick((at_secs * TICKS_PER_SECOND as f64).round() as i64),
-                            ratio_from_pct(pct, reversed),
-                        );
+                        edited[i] = SpeedKey {
+                            at: Tick((at_secs * TICKS_PER_SECOND as f64).round() as i64)
+                                .clamp(Tick::ZERO, clip.duration),
+                            ratio: ratio_from_pct(pct, reversed),
+                            interp,
+                        };
                         new_keys = Some(edited);
                     }
                     if remove.clicked() {
@@ -520,6 +758,36 @@ fn draw_speed_ramp_editor(
             discrete = true;
         }
     });
+
+    if let Some(first) = sorted.first() {
+        let mut selected_interp = first.interp;
+        ui.collapsing("Selected segment controls", |ui| {
+            ui.label(RichText::new("Use the row's Ease picker to select a segment. Custom Bezier handles apply to the first segment.").small().color(MUTED));
+            if let Interp::Bezier {
+                mut out_handle,
+                mut in_handle,
+            } = selected_interp
+            {
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Out");
+                    changed |= ui.add(egui::Slider::new(&mut out_handle[0], 0.0..=1.0).text("X")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut out_handle[1], 0.0..=1.0).text("Y")).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("In");
+                    changed |= ui.add(egui::Slider::new(&mut in_handle[0], 0.0..=1.0).text("X")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut in_handle[1], 0.0..=1.0).text("Y")).changed();
+                });
+                if changed {
+                    selected_interp = Interp::Bezier { out_handle, in_handle };
+                    let mut edited = sorted.clone();
+                    edited[0].interp = selected_interp;
+                    new_keys = Some(edited);
+                }
+            }
+        });
+    }
 
     if let Some(mut edited) = new_keys {
         edited.sort_by_key(|k| k.at.0);
@@ -1453,9 +1721,7 @@ mod tests {
         assert_eq!(ratio_from_pct(100.0, false), Ratio::new(1000, 1000));
         assert_eq!(ratio_from_pct(200.0, false), Ratio::new(2000, 1000));
         assert_eq!(ratio_from_pct(50.0, true), Ratio::new(-500, 1000));
-        // Never zero even at the floor — a 0-speed clip would divide by zero
-        // downstream in `SpeedMap::source_delta`.
-        assert_eq!(ratio_from_pct(0.0, false), Ratio::new(1, 1000));
+        assert_eq!(ratio_from_pct(0.0, false), Ratio::new(0, 1000));
     }
 
     #[test]

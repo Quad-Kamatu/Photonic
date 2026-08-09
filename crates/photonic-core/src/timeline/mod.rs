@@ -48,7 +48,8 @@ pub use captions::{
 };
 pub use clip::{
     AnchorSpace, Clip, ClipEffect, ClipSource, ClipTransform, EaseCurve, LumaWipeMap, Ratio,
-    SpeedMap, TextClipContent, Transition, TransitionKind, TransitionParams, WipeDirection,
+    SpeedKey, SpeedMap, SpeedMapError, TextClipContent, Transition, TransitionKind,
+    TransitionParams, WipeDirection,
 };
 pub use commands::{
     AnimTarget, AudioCmd, CaptionCmd, ClipTiming, FadeEdge, FormatOp, FxOwner, GraphCmd,

@@ -788,6 +788,22 @@ pub fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// sRGB OETF (scene-linear → gamma), the exact inverse of [`srgb_to_linear`].
+///
+/// Needed by kernels that must reason in the *perceptual* domain rather than the
+/// linear working space — deflicker measures and corrects there, because equal
+/// visibility of residual error matters more than equal energy (see
+/// [`crate::graph::deflicker`]). Sharing the breakpoint form with the EOTF above
+/// keeps the round trip exact.
+#[inline]
+pub fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// A well-defined `smoothstep` (Hermite) matching WGSL's `smoothstep`: the band
 /// width is floored at a tiny epsilon so `edge0 == edge1` (a hard key with zero
 /// softness) degrades to a near-step instead of dividing by zero — the CPU and

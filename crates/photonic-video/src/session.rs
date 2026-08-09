@@ -32,8 +32,8 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
 use photonic_core::timeline::{
-    AssetKind, AssetSource, Clip, ClipAudio, ClipId, ClipSource, FrameRate, Sequence, SequenceId,
-    Tick, TimelineProject, TICKS_PER_SECOND,
+    AssetKind, AssetSource, Clip, ClipAudio, ClipId, ClipSource, FrameRate, Ratio, Sequence,
+    SequenceId, SpeedMap, Tick, TimelineProject, TICKS_PER_SECOND,
 };
 use photonic_core::{CommandHistory, Document};
 use photonic_render::color::{Colorimetry, Matrix, Range};
@@ -52,7 +52,7 @@ use crate::decode::{PixFmt, SharedRing};
 use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{
-    compile_asset_peek, compile_with_luts, compile_with_luts_and_opts, fit_long_edge,
+    compile_asset_peek, compile_with_luts_and_opts, fit_long_edge,
     CompileDiagnostic, DiagSeverity, LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
 };
 use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
@@ -61,6 +61,7 @@ use crate::media::ffmpeg_locate::{locate, FfmpegTools};
 use crate::media::keyframe_index::{KeyframeIndex, PtsIndex};
 use crate::media::probe::{content_hash, probe_details, ProbeDetails};
 use crate::media::stills::{resample_linear_premult, still_target_size, StillCache};
+use crate::playback::pcm::{read_pcm_window, TimeWarpPcmSource};
 use crate::playback::prefetch::{
     cut_ahead_targets, lru_eviction_victims, CUT_AHEAD_LEAD_FRAMES, MAX_LIVE_SOURCES,
 };
@@ -601,6 +602,13 @@ struct EngineThread {
     /// Memoised `.cube` LUT tables (K-0.5), warmed on snapshot change and read
     /// lock-free by the compiler's `Grade` `Lut3d` resolution.
     lut_cache: LutCache,
+    /// Solved deflicker gains per clip (see `graph::deflicker`), produced by an
+    /// on-demand measurement job and read by the compiler.
+    deflicker_gains: crate::graph::deflicker::GainTable,
+    /// Fingerprint of the inputs each entry in `deflicker_gains` was measured
+    /// from, so an edit that changes them re-measures and one that does not
+    /// costs nothing.
+    deflicker_fingerprints: std::collections::HashMap<ClipId, u64>,
     last_revision: Option<u64>,
     active_sequence_override: Option<SequenceId>,
     proxy_mode: ProxyMode,
@@ -672,6 +680,8 @@ impl EngineThread {
             controller: PlaybackController::new(FrameRate::FPS_30),
             snapshot: None,
             lut_cache: LutCache::default(),
+            deflicker_gains: crate::graph::deflicker::GainTable::new(),
+            deflicker_fingerprints: std::collections::HashMap::new(),
             last_revision: None,
             active_sequence_override: None,
             proxy_mode: ProxyMode::Auto,
@@ -1128,6 +1138,286 @@ impl EngineThread {
         self.controller.request_present();
     }
 
+    /// Cap on frames sampled per clip. A 4-minute 60 fps clip is ~14 000
+    /// frames; measuring every one would mean 14 000 GPU renders and readbacks.
+    /// Auto-exposure hunting lives around 0.5 Hz, so a few hundred samples
+    /// spanning the clip resolve it comfortably, and [`ClipGains`] interpolates
+    /// between them.
+    ///
+    /// [`ClipGains`]: crate::graph::deflicker::ClipGains
+    const DEFLICKER_MAX_SAMPLES: usize = 240;
+
+    /// Consecutive frames rendered for the rolling-band burst.
+    const DEFLICKER_BURST_FRAMES: usize = 12;
+
+    /// Resolution the measurement renders at. The statistic is a frame mean, so
+    /// it converges long before full resolution — and this keeps a whole-clip
+    /// analysis to a few hundred small renders instead of a few hundred 4K ones.
+    const DEFLICKER_SAMPLE_W: u32 = 320;
+    /// See [`Self::DEFLICKER_SAMPLE_W`].
+    const DEFLICKER_SAMPLE_H: u32 = 180;
+
+    /// Fingerprint the inputs a clip's measurement depends on. Changing the
+    /// source, the trimmed range or any deflicker param re-measures; moving the
+    /// clip on the timeline, renaming it or editing an unrelated effect does not.
+    fn deflicker_fingerprint(clip: &Clip, fx: &photonic_core::timeline::ClipEffect) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match &clip.source {
+            ClipSource::Asset { asset } | ClipSource::Vector { asset } => asset.hash(&mut h),
+            other => std::mem::discriminant(other).hash(&mut h),
+        }
+        clip.source_in.0.hash(&mut h);
+        clip.duration.0.hash(&mut h);
+        for (path, value) in &fx.params.base.entries {
+            path.as_str().hash(&mut h);
+            format!("{value:?}").hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// True when some clip carries an enabled deflicker whose measurement is
+    /// missing or stale. Borrow-only and allocation-free, so it is cheap enough
+    /// to run every present.
+    fn deflicker_pending(&self, project: &TimelineProject, seq_id: SequenceId) -> bool {
+        use photonic_core::timeline::EffectKind;
+        let Some(seq) = project.sequences.get(&seq_id) else {
+            return false;
+        };
+        seq.video_tracks.iter().any(|track| {
+            track.clips.iter().any(|clip| {
+                matches!(clip.source, ClipSource::Asset { .. })
+                    && clip.effects.iter().any(|f| {
+                        f.kind == EffectKind::Deflicker
+                            && f.enabled
+                            && !f.inert
+                            && self.deflicker_fingerprints.get(&clip.id)
+                                != Some(&Self::deflicker_fingerprint(clip, f))
+                    })
+            })
+        })
+    }
+
+    /// Measure pending clips, taking the snapshot only when there is work.
+    fn measure_deflicker_if_pending(&mut self) {
+        let Some(project) = self.snapshot.as_ref() else {
+            return;
+        };
+        let Some(seq_id) = self.effective_sequence(project) else {
+            return;
+        };
+        if !self.deflicker_pending(project, seq_id) {
+            return;
+        }
+        let project = Arc::clone(project);
+        self.ensure_deflicker_measured(project.as_ref(), seq_id, 0);
+    }
+
+    /// Run the deflicker analysis for any clip that needs it (32 §2's two-pass
+    /// rule: a job, not a node).
+    ///
+    /// Measurement renders the clip's **source asset** in isolation rather than
+    /// the composite, so an overlapping clip on another track cannot pollute the
+    /// curve. The deflicker effect itself is absent from that graph, so there is
+    /// no feedback: the job always measures uncorrected content.
+    fn ensure_deflicker_measured(
+        &mut self,
+        project: &TimelineProject,
+        seq_id: SequenceId,
+        _format_index: usize,
+    ) {
+        use photonic_core::timeline::EffectKind;
+
+        let Some(seq) = project.sequences.get(&seq_id) else {
+            return;
+        };
+        // Collect the work under the immutable borrow, run it after.
+        struct Job {
+            clip: ClipId,
+            asset: AssetId,
+            source_in: Tick,
+            duration: Tick,
+            fingerprint: u64,
+            params: crate::graph::deflicker::DeflickerParams,
+            /// Ticks per sequence frame — the sample grid. Derived from the
+            /// sequence rate, not assumed, or `params.window` (documented in
+            /// seconds) would be scaled by `fps / assumed_fps`.
+            frame_ticks: i64,
+            speed: photonic_core::timeline::SpeedMap,
+        }
+        let mut todo: Vec<Job> = Vec::new();
+        for track in &seq.video_tracks {
+            for clip in &track.clips {
+                let Some(fx) = clip
+                    .effects
+                    .iter()
+                    .find(|f| f.kind == EffectKind::Deflicker && f.enabled && !f.inert)
+                else {
+                    continue;
+                };
+                let ClipSource::Asset { asset } = clip.source else {
+                    continue;
+                };
+                let fp = Self::deflicker_fingerprint(clip, fx);
+                if self.deflicker_fingerprints.get(&clip.id) == Some(&fp) {
+                    continue;
+                }
+                let fps = seq.frame_rate.num as f32 / seq.frame_rate.den.max(1) as f32;
+                let f = |path: &str, dflt: f32| -> f32 {
+                    match fx.params.base.get(path) {
+                        Some(photonic_core::timeline::PropValue::Float(v)) => *v as f32,
+                        _ => dflt,
+                    }
+                };
+                let params = crate::graph::deflicker::params_for(
+                    f("params.amount", 0.85),
+                    f("params.window", 4.0),
+                    f("params.max_change", 0.25),
+                    f("params.chroma_amount", 0.0),
+                    fps,
+                );
+                let frame_ticks = (photonic_core::timeline::TICKS_PER_SECOND
+                    * seq.frame_rate.den.max(1) as i64)
+                    / seq.frame_rate.num.max(1) as i64;
+                todo.push(Job {
+                    clip: clip.id,
+                    asset,
+                    source_in: clip.source_in,
+                    duration: clip.duration,
+                    fingerprint: fp,
+                    params,
+                    frame_ticks: frame_ticks.max(1),
+                    speed: clip.speed.clone(),
+                });
+            }
+        }
+
+        // One clip per call: a project with several unmeasured clips makes
+        // progress each present instead of freezing the render thread for the
+        // sum of them. The remainder is picked up on the next frame.
+        for job in todo.into_iter().take(1) {
+            let Job {
+                clip: clip_id,
+                asset,
+                source_in,
+                duration,
+                fingerprint: fp,
+                mut params,
+                frame_ticks: frame,
+                speed,
+            } = job;
+            let total = (duration.0 / frame.max(1)).max(1) as usize;
+            let stride = total.div_ceil(Self::DEFLICKER_MAX_SAMPLES).max(1);
+            let step_ticks = frame * stride as i64;
+            // The solver's window is in *samples*, so a strided measurement must
+            // shrink it by the same factor or the baseline spans far longer than
+            // the user asked for.
+            params.window_frames = (params.window_frames / stride).max(1) | 1;
+            params.smooth_frames = (params.smooth_frames / stride).max(1) | 1;
+
+            let mut images = Vec::new();
+            let mut t = 0i64;
+            while t < duration.0 {
+                // Map clip-relative `t` through the speed map: `ClipGains` is
+                // indexed by clip-relative dt at compile time, so a retimed clip
+                // must be *measured* at the source frames it actually shows or
+                // the curve is misaligned with the rendered frames.
+                let src = Tick(source_in.0 + speed.source_delta(Tick(t)).0);
+                let compiled = compile_asset_peek(
+                    project,
+                    asset,
+                    src,
+                    Quality::PREVIEW,
+                    Self::DEFLICKER_SAMPLE_W,
+                    Self::DEFLICKER_SAMPLE_H,
+                );
+                if let Some(tex) = self.evaluator.evaluate(
+                    &compiled.graph,
+                    (Self::DEFLICKER_SAMPLE_W, Self::DEFLICKER_SAMPLE_H),
+                    &mut self.media,
+                ) {
+                    let px = crate::graph::eval::read_texture_rgba16f(
+                        self.evaluator.gpu(),
+                        &tex,
+                        Self::DEFLICKER_SAMPLE_W,
+                        Self::DEFLICKER_SAMPLE_H,
+                    );
+                    images.push(crate::graph::ops::Image {
+                        width: Self::DEFLICKER_SAMPLE_W,
+                        height: Self::DEFLICKER_SAMPLE_H,
+                        pixels: px,
+                    });
+                }
+                t += step_ticks;
+            }
+            if images.is_empty() {
+                // Record the fingerprint anyway. Without this the clip stays
+                // "pending" and the whole 240-sample loop re-runs on every
+                // present, forever, for a clip that cannot be measured.
+                tracing::warn!(clip = ?clip_id, "deflicker: no frames decoded; leaving clip uncorrected");
+                self.deflicker_fingerprints.insert(clip_id, fp);
+                continue;
+            }
+            let gains = crate::graph::deflicker::measure_clip(&images, Tick(0), step_ticks, params);
+
+            // Rolling bands need CONSECUTIVE frames — the strided pass above
+            // aliases the per-frame phase advance into nonsense — so they get
+            // their own short burst from the middle of the clip. One burst is
+            // enough: the advance is set by the beat between the mains frequency
+            // and the frame rate, and does not drift over a shot.
+            let burst_start = (duration.0 / 2).max(0);
+            let mut burst = Vec::new();
+            for k in 0..Self::DEFLICKER_BURST_FRAMES {
+                let t = burst_start + frame * k as i64;
+                if t >= duration.0 {
+                    break;
+                }
+                let src = Tick(source_in.0 + speed.source_delta(Tick(t)).0);
+                let compiled = compile_asset_peek(
+                    project,
+                    asset,
+                    src,
+                    Quality::PREVIEW,
+                    Self::DEFLICKER_SAMPLE_W,
+                    Self::DEFLICKER_SAMPLE_H,
+                );
+                if let Some(tex) = self.evaluator.evaluate(
+                    &compiled.graph,
+                    (Self::DEFLICKER_SAMPLE_W, Self::DEFLICKER_SAMPLE_H),
+                    &mut self.media,
+                ) {
+                    let px = crate::graph::eval::read_texture_rgba16f(
+                        self.evaluator.gpu(),
+                        &tex,
+                        Self::DEFLICKER_SAMPLE_W,
+                        Self::DEFLICKER_SAMPLE_H,
+                    );
+                    burst.push(crate::graph::rolling_bands::row_profile(
+                        &crate::graph::ops::Image {
+                            width: Self::DEFLICKER_SAMPLE_W,
+                            height: Self::DEFLICKER_SAMPLE_H,
+                            pixels: px,
+                        },
+                    ));
+                }
+            }
+            let band = crate::graph::rolling_bands::track_from_burst(&burst);
+            if let Some(b) = band {
+                tracing::info!(clip = ?clip_id, cycles = b.cycles, amplitude = b.amplitude,
+                    dphase = b.dphase, "deflicker: rolling band detected");
+            }
+            let gains = gains.with_band(band, frame);
+            tracing::info!(
+                clip = ?clip_id,
+                samples = images.len(),
+                stride,
+                "deflicker: measured clip"
+            );
+            self.deflicker_gains.insert(clip_id, gains);
+            self.deflicker_fingerprints.insert(clip_id, fp);
+        }
+    }
+
     fn effective_sequence(&self, project: &TimelineProject) -> Option<SequenceId> {
         self.active_sequence_override
             .filter(|id| project.sequences.contains_key(id))
@@ -1137,6 +1427,10 @@ impl EngineThread {
     }
 
     fn present(&mut self) {
+        // Deflicker is measured before the snapshot borrow below, because the
+        // job needs `&mut self`. The pending check is a borrow-only scan, so the
+        // steady state costs no Arc bump — the reason that borrow exists.
+        self.measure_deflicker_if_pending();
         // Borrow the snapshot Arc — no atomic bump every tick (was `.clone()`).
         let Some(project) = self.snapshot.as_ref() else {
             return;
@@ -1197,7 +1491,7 @@ impl EngineThread {
                         // Thread the pre-warmed LUT cache so `Grade` `Lut3d` ops
                         // resolve to real tables (K-0.5); parse-failure diagnostics
                         // ride along on the compiled frame.
-                        let mut compiled = compile_with_luts(
+                        let mut compiled = crate::graph::compile::compile_full(
                             project.as_ref(),
                             seq_id,
                             format_index,
@@ -1205,6 +1499,8 @@ impl EngineThread {
                             quality,
                             None,
                             Some(&self.lut_cache),
+                            false,
+                            Some(&self.deflicker_gains),
                         );
                         compiled
                             .diagnostics
@@ -2356,7 +2652,7 @@ fn feeder_main(
     // Persistent per-clip PCM sidecars: opened when a clip becomes audible
     // (seeked to its mapped source position), read sequentially block after
     // block, dropped when the clip stops sounding.
-    let mut pcm: HashMap<ClipId, FfmpegPcmSource> = HashMap::new();
+    let mut pcm: HashMap<ClipId, Box<dyn PcmSource>> = HashMap::new();
 
     while !stop.load(Ordering::Relaxed) {
         if producer.is_full() {
@@ -2398,22 +2694,55 @@ fn feeder_main(
                 else {
                     continue;
                 };
-                // K-D3: stream + offset; speed maps remain a seam (P8 DSP).
                 let (offset, stream) = clip
                     .audio
                     .as_ref()
                     .map(|a| (a.offset, a.stream))
                     .unwrap_or((Tick::ZERO, None));
-                let src_pos = crate::playback::pcm::source_seek_with_offset(
-                    clip.source_in,
-                    t,
-                    clip.start,
-                    offset,
-                );
-                if let Ok(source) =
-                    FfmpegPcmSource::spawn_stream(tools, path, src_pos, sample_rate, stream)
-                {
-                    pcm.insert(clip.id, source);
+                let identity = matches!(clip.speed, SpeedMap::Constant(r) if r == Ratio::ONE);
+                if identity {
+                    let src_pos = crate::playback::pcm::source_seek_with_offset(
+                        clip.source_in,
+                        t,
+                        clip.start,
+                        offset,
+                    );
+                    if let Ok(source) =
+                        FfmpegPcmSource::spawn_stream(tools, path, src_pos, sample_rate, stream)
+                    {
+                        pcm.insert(clip.id, Box::new(source));
+                    }
+                } else {
+                    let (lo, hi) = clip.speed.source_delta_range(clip.duration);
+                    let source_start =
+                        Tick((clip.source_in.0 - offset.0 + lo.floor() as i64).max(0));
+                    let source_end = (clip.source_in.0 - offset.0) as f64 + hi.ceil();
+                    let frames = ((source_end - source_start.0 as f64).max(0.0)
+                        * sample_rate as f64
+                        / TICKS_PER_SECOND as f64)
+                        .ceil() as usize
+                        + 2;
+                    if let Ok(mut decoder) = FfmpegPcmSource::spawn_stream(
+                        tools,
+                        path,
+                        source_start,
+                        sample_rate,
+                        stream,
+                    ) {
+                        let window = read_pcm_window(&mut decoder, frames);
+                        pcm.insert(
+                            clip.id,
+                            Box::new(TimeWarpPcmSource::new(
+                                window,
+                                sample_rate,
+                                source_start,
+                                clip.source_in,
+                                offset,
+                                clip.speed.clone(),
+                                t - clip.start,
+                            )),
+                        );
+                    }
                 }
             }
         }
@@ -2422,7 +2751,7 @@ fn feeder_main(
 
         // Build this block's voice list (09 §4: the playback side resolves
         // "what's audible" once per block; the mixer owns only signal flow).
-        let mut refs: HashMap<ClipId, &mut FfmpegPcmSource> =
+        let mut refs: HashMap<ClipId, &mut Box<dyn PcmSource>> =
             pcm.iter_mut().map(|(id, src)| (*id, src)).collect();
         let mut voices: Vec<TrackVoice<'_>> = Vec::new();
         for track in seq
@@ -2438,7 +2767,7 @@ fn feeder_main(
                         audio: clip.audio.as_ref().unwrap_or(&default_clip_audio),
                         elapsed: t - clip.start,
                         remaining: clip.end() - t,
-                        source: source as &mut dyn PcmSource,
+                        source: source.as_mut(),
                     });
                 }
             }

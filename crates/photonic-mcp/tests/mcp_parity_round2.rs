@@ -541,6 +541,38 @@ async fn set_clip_speed_accepts_a_keyframed_ramp() {
 }
 
 #[tokio::test]
+async fn set_clip_speed_preserves_bezier_interpolation() {
+    let state = test_state();
+    let (_seq, track) = seq_with_track(&state, "video").await;
+    let clip = insert_solid_clip(&state, &track, "#ff0000", 0, 200).await;
+
+    let args = serde_json::from_value(json!({
+        "clip_id": clip,
+        "keys": [
+            {
+                "at_ticks": 0,
+                "ratio": { "num": 1, "den": 1 },
+                "interp": {
+                    "kind": "bezier",
+                    "out_handle": [0.42, 0.0],
+                    "in_handle": [0.58, 1.0]
+                }
+            },
+            { "at_ticks": 100, "ratio": { "num": 2, "den": 1 } }
+        ]
+    }))
+    .unwrap();
+    let result = handlers::video::set_clip_speed(&state, args).await;
+    assert_ok(&result, "set_clip_speed (bezier ramp)");
+
+    let clip_json = get_clip_json(&state, &clip).await;
+    assert_eq!(
+        clip_json["speed"]["keys"][0]["interp"]["kind"].as_str(),
+        Some("bezier")
+    );
+}
+
+#[tokio::test]
 async fn set_clip_speed_rejects_supplying_both_ratio_and_keys() {
     let state = test_state();
     let (_seq, track) = seq_with_track(&state, "video").await;

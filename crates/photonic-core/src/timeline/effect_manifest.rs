@@ -80,8 +80,15 @@ impl EffectId {
     }
 }
 
-/// The bidirectional bridge between the seven v1 [`EffectKind`] variants and
-/// their [`EffectId`]s (spec §10). Total over the seven mapped ids.
+/// The bidirectional bridge between the mapped [`EffectKind`] variants and their
+/// [`EffectId`]s (spec §10).
+///
+/// Every id with a real kernel **must** appear here: [`ClipEffect::from_manifest`]
+/// resolves an id to its kind through this table, and an id that is missing
+/// silently becomes [`EffectKind::Unknown`] — i.e. the effect is created inert
+/// and its kernel never runs, with no error anywhere.
+///
+/// [`ClipEffect::from_manifest`]: super::clip::ClipEffect::from_manifest
 const LEGACY_IDS: &[(&str, EffectKind)] = &[
     ("blur.gaussian", EffectKind::Blur),
     ("sharpen.unsharp", EffectKind::Sharpen),
@@ -90,6 +97,7 @@ const LEGACY_IDS: &[(&str, EffectKind)] = &[
     ("key.luma", EffectKind::LumaKey),
     ("color.invert", EffectKind::Invert),
     ("util.mask_shape", EffectKind::MaskShapeGen),
+    ("color.deflicker", EffectKind::Deflicker),
 ];
 
 // ── Schema ───────────────────────────────────────────────────────────────────
@@ -359,6 +367,23 @@ const LUMAKEY_PARAMS: &[ParamSpec] = &[
 ];
 
 const INVERT_PARAMS: &[ParamSpec] = &[];
+
+/// Deflicker (`color.deflicker`). `window` is in **seconds** rather than frames
+/// so the same setting behaves identically at 24 and 60 fps; the kernel converts
+/// using the clip's rate. The default 4 s is long enough to catch slow
+/// auto-exposure drift (0.05–0.2 Hz) without the baseline chasing the hunting
+/// it is meant to measure against.
+const DEFLICKER_PARAMS: &[ParamSpec] = &[
+    pf_def("params.amount", 0.85, Some((0.0, 1.0)), UiHint::Slider),
+    pf_def("params.window", 4.0, Some((0.2, 30.0)), UiHint::Slider),
+    pf_def("params.max_change", 0.25, Some((0.0, 0.9)), UiHint::Slider),
+    pf_def(
+        "params.chroma_amount",
+        0.0,
+        Some((0.0, 1.0)),
+        UiHint::Slider,
+    ),
+];
 
 const MASKSHAPE_PARAMS: &[ParamSpec] = &[
     pf("params.center_x", Some((0.0, 1.0)), UiHint::Slider),
@@ -656,6 +681,17 @@ pub static MANIFESTS: &[EffectManifest] = &[
         name: "Curves",
         category: EffectCategory::Color,
         params: CURVES_PARAMS,
+        caps: CAPS_TRANSFER,
+        applies: Applicability::ALL_SCOPES,
+        space: OperandSpace::TransferStraight,
+        arity: 1,
+    },
+    EffectManifest {
+        id: EffectId::new_static("color.deflicker"),
+        version: 1,
+        name: "Deflicker",
+        category: EffectCategory::Color,
+        params: DEFLICKER_PARAMS,
         caps: CAPS_TRANSFER,
         applies: Applicability::ALL_SCOPES,
         space: OperandSpace::TransferStraight,
@@ -1148,6 +1184,40 @@ mod tests {
     use super::*;
     use crate::timeline::PropTargetKind;
     use std::collections::HashSet;
+
+    /// Every known [`EffectKind`] must round-trip through its [`EffectId`].
+    ///
+    /// A kind whose id is missing from [`LEGACY_IDS`] still *compiles* and still
+    /// appears in the palette, but [`ClipEffect::from_manifest`] resolves it to
+    /// `Unknown` — so the effect is created inert and its kernel silently never
+    /// runs. This test is the tripwire for that, since nothing else fails.
+    ///
+    /// [`ClipEffect::from_manifest`]: super::super::clip::ClipEffect::from_manifest
+    #[test]
+    fn every_known_kind_round_trips_through_its_id() {
+        let kinds = [
+            EffectKind::Blur,
+            EffectKind::Sharpen,
+            EffectKind::Glow,
+            EffectKind::ChromaKey,
+            EffectKind::LumaKey,
+            EffectKind::Invert,
+            EffectKind::MaskShapeGen,
+            EffectKind::Deflicker,
+        ];
+        for kind in kinds {
+            let id = kind.effect_id();
+            assert!(
+                manifest(id.clone()).is_some(),
+                "{id:?} has no manifest entry"
+            );
+            assert_eq!(
+                id.legacy_kind(),
+                Some(kind),
+                "{id:?} does not map back to {kind:?} — from_manifest would build it inert"
+            );
+        }
+    }
 
     #[test]
     fn ids_are_unique_and_sorted() {

@@ -125,6 +125,26 @@ pub trait LutProvider {
     fn lut(&self, asset: AssetId) -> Option<std::sync::Arc<photonic_render::Lut3d>>;
 }
 
+/// Supplies the compile-resolved deflicker gain for a clip at a tick
+/// (see [`crate::graph::deflicker`]).
+///
+/// Deflicker is measured over a *whole range* and applied per frame, so the gain
+/// cannot be derived from the timeline alone the way every other effect param
+/// can — it is the verdict of an analysis job. Threading it in here keeps that
+/// asymmetry in one place: the evaluator stays pure, and a clip with no
+/// measurement simply lowers with no gain (an exact pass-through).
+pub trait DeflickerGains {
+    /// Per-channel gain for `clip` at clip-relative `dt`, or `None` when this
+    /// clip has not been measured.
+    fn gain(&self, clip: ClipId, dt: Tick) -> Option<[f32; 3]>;
+
+    /// Rolling-band fit for `clip` at `dt`, if the detector found one. Defaults
+    /// to `None` so a store that only does exposure need not implement it.
+    fn band(&self, _clip: ClipId, _dt: Tick) -> Option<crate::graph::rolling_bands::BandModel> {
+        None
+    }
+}
+
 /// A stable diagnostic code for the coded compile/load conditions 38 registers
 /// (§1.2 / §2.2 / §2.4 / §3.5). Kept as a compiler-local enum until 36 §3's
 /// `DiagCode` registry lands; the variant names are byte-identical to 36's
@@ -404,9 +424,39 @@ pub fn compile_with_luts_and_opts(
     luts: Option<&dyn LutProvider>,
     skip_clip_looks: bool,
 ) -> CompiledFrame {
+    compile_full(
+        project,
+        sequence,
+        format_index,
+        tick,
+        quality,
+        view_override,
+        luts,
+        skip_clip_looks,
+        None,
+    )
+}
+
+/// Like [`compile_with_luts_and_opts`], additionally threading compile-resolved
+/// deflicker gains. This is the entry point a session uses once it has run the
+/// deflicker analysis job; every other entry point delegates here with `None`,
+/// which lowers each `Deflicker` effect as a pass-through.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_full(
+    project: &TimelineProject,
+    sequence: SequenceId,
+    format_index: usize,
+    tick: Tick,
+    quality: Quality,
+    view_override: Option<ViewNodeOverride>,
+    luts: Option<&dyn LutProvider>,
+    skip_clip_looks: bool,
+    deflicker: Option<&dyn DeflickerGains>,
+) -> CompiledFrame {
     let mut b = Builder::new();
     b.luts = luts;
     b.skip_clip_looks = skip_clip_looks;
+    b.deflicker = deflicker;
 
     let Some(seq) = project.sequences.get(&sequence) else {
         b.diag(CompileDiagnostic::plain(format!(
@@ -450,6 +500,7 @@ pub fn compile_with_luts_and_opts(
             seq.master_grade.as_ref(),
             p,
             tick,
+            None,
         )
     });
 
@@ -501,6 +552,9 @@ struct Builder<'a> {
     /// Parsed-LUT provider (K-0.5), threaded so `Grade` `Lut3d` ops resolve to a
     /// real table. `None` = no provider (LUT ops resolve inert → identity).
     luts: Option<&'a dyn LutProvider>,
+    /// Compile-resolved deflicker gains (see [`DeflickerGains`]). `None` = no
+    /// measurement available, so every `Deflicker` effect lowers inert.
+    deflicker: Option<&'a dyn DeflickerGains>,
     /// K-E2 scope taps: each lowered clip's post-`Grade` node (07 §5).
     clip_taps: Vec<(ClipId, IrNodeId)>,
     /// K-E2: the folded program before `CaptionOverlay` (03 §3.6).
@@ -519,6 +573,7 @@ impl<'a> Builder<'a> {
             diagnostics: Vec::new(),
             view_index: HashMap::new(),
             luts: None,
+            deflicker: None,
             clip_taps: Vec::new(),
             program_tap: None,
             skip_clip_looks: false,
@@ -667,6 +722,7 @@ fn fold_sequence(
                     clip.grade.as_ref(),
                     below,
                     dt,
+                    Some(clip.id),
                 ));
             }
             continue;
@@ -697,7 +753,8 @@ fn fold_sequence(
                     // before it merges — never on the accumulator. Sequence-
                     // relative keyframes.
                     // TODO(30 §2.3): gate on the track stack's Applicability once a manifest type exists.
-                    let node = apply_stack(b, &track.effects, track.grade.as_ref(), node, tick);
+                    let node =
+                        apply_stack(b, &track.effects, track.grade.as_ref(), node, tick, None);
                     acc = Some(fold_over(b, acc, node, track.opacity, track.blend));
                     continue;
                 }
@@ -748,7 +805,7 @@ fn fold_sequence(
         // OWN composited content before it merges into the accumulator — never on
         // the accumulator itself. Track keyframes are sequence-relative (`tick`).
         // TODO(30 §2.3): gate on the track stack's Applicability once a manifest type exists.
-        let image = apply_stack(b, &track.effects, track.grade.as_ref(), image, tick);
+        let image = apply_stack(b, &track.effects, track.grade.as_ref(), image, tick, None);
         acc = Some(fold_over(
             b,
             acc,
@@ -1309,7 +1366,7 @@ fn build_clip_chain(
         .asset()
         .and_then(|a| project.media.assets.get(&a))
     {
-        Some(asset) => apply_stack(b, &asset.effects, asset.grade.as_ref(), source, dt),
+        Some(asset) => apply_stack(b, &asset.effects, asset.grade.as_ref(), source, dt, None),
         None => source,
     };
 
@@ -1327,7 +1384,14 @@ fn build_clip_chain(
     // K-B5: compare-clean compile omits the look stack so the bypass side shares
     // every upstream (source/transform) node by content hash with the full compile.
     if !b.skip_clip_looks {
-        cur = apply_stack(b, &clip.effects, clip.grade.as_ref(), cur, dt);
+        cur = apply_stack(
+            b,
+            &clip.effects,
+            clip.grade.as_ref(),
+            cur,
+            dt,
+            Some(clip.id),
+        );
     }
     // K-E2 / 07 §5: this node — post-`Grade`, pre-fold — is the per-clip scope
     // tap. Recorded for every lowered clip (including clips inside a nest, which
@@ -1350,12 +1414,18 @@ fn build_clip_chain(
 /// **sequence-relative** (`dt = tick`). Passing the wrong domain mis-times every
 /// keyframe on the stack with no error and no visible warning — get it right at
 /// the call site.
+///
+/// `scope` names the clip this stack belongs to, when it belongs to one. Only
+/// [`EffectKind::Deflicker`] consults it, to look up the gain its analysis job
+/// measured; at track/master scope there is no clip to have measured, so a
+/// deflicker there lowers inert rather than guessing.
 fn apply_stack(
     b: &mut Builder<'_>,
     effects: &[ClipEffect],
     grade: Option<&Grade>,
     input: IrNodeId,
     dt: Tick,
+    scope: Option<ClipId>,
 ) -> IrNodeId {
     let mut cur = input;
     for fx in effects {
@@ -1378,11 +1448,46 @@ fn apply_stack(
         } else {
             fx.kind
         };
+        let mut params = resolve_effect_params(fx.kind, &fx.params.base, &fx.params, dt);
+        // Deflicker's gain is the verdict of a whole-range analysis job, not a
+        // keyframe-resolvable param, so it is appended here rather than seeded
+        // from the manifest. Absent a measurement the entries stay absent and
+        // `eval_cpu` falls back to unity — an exact pass-through.
+        if fx.kind == EffectKind::Deflicker {
+            if let Some(gain) = scope.and_then(|c| b.deflicker.and_then(|d| d.gain(c, dt))) {
+                params.entries.push((
+                    PropPath::new("params.gain_r"),
+                    PropValue::Float(gain[0] as f64),
+                ));
+                params.entries.push((
+                    PropPath::new("params.gain_g"),
+                    PropValue::Float(gain[1] as f64),
+                ));
+                params.entries.push((
+                    PropPath::new("params.gain_b"),
+                    PropValue::Float(gain[2] as f64),
+                ));
+            }
+            // Rolling bands ride along on the same effect: one user-facing
+            // "Deflicker", two corrections, because they are two symptoms of the
+            // same shooting problem. Absent a detection these stay absent.
+            if let Some(band) = scope.and_then(|c| b.deflicker.and_then(|d| d.band(c, dt))) {
+                params.entries.push((
+                    PropPath::new("params.band_cycles"),
+                    PropValue::Float(band.cycles as f64),
+                ));
+                params.entries.push((
+                    PropPath::new("params.band_amp"),
+                    PropValue::Float(band.amplitude as f64),
+                ));
+                params.entries.push((
+                    PropPath::new("params.band_phase"),
+                    PropValue::Float(band.phase as f64),
+                ));
+            }
+        }
         cur = b.push(
-            IrOp::Effect {
-                kind,
-                params: resolve_effect_params(fx.kind, &fx.params.base, &fx.params, dt),
-            },
+            IrOp::Effect { kind, params },
             vec![(cur, OutPort::default())],
         );
     }
@@ -3177,6 +3282,116 @@ mod tests {
             (actual - expected).length() < 1e-4,
             "actual {actual:?}, expected {expected:?}"
         );
+    }
+
+    /// The whole point of the compile-pass integration: a measured clip gets its
+    /// solved gain injected into the lowered `Effect` params, and an unmeasured
+    /// one does not (so it lowers as an exact pass-through).
+    #[test]
+    fn deflicker_gain_is_injected_only_for_measured_clips() {
+        use crate::graph::deflicker::{ClipGains, GainTable};
+
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        let mut clip = solid_clip(Color::WHITE, 0, Tick::from_seconds(2).0);
+        clip.effects.push(photonic_core::timeline::ClipEffect::new(
+            EffectKind::Deflicker,
+        ));
+        let clip_id = clip.id;
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(clip);
+
+        let gain_of = |out: &CompiledFrame| -> Option<f32> {
+            out.graph.nodes.iter().find_map(|n| match &n.op {
+                IrOp::Effect {
+                    kind: EffectKind::Deflicker,
+                    params,
+                } => params.get("params.gain_r").map(|v| match v {
+                    PropValue::Float(f) => *f as f32,
+                    _ => f32::NAN,
+                }),
+                _ => None,
+            })
+        };
+
+        // No store: the effect lowers, but carries no gain.
+        let bare = compile(&project, seq_id, 0, Tick(0), Quality::PREVIEW, None);
+        assert!(
+            bare.graph.nodes.iter().any(|n| matches!(
+                &n.op,
+                IrOp::Effect {
+                    kind: EffectKind::Deflicker,
+                    ..
+                }
+            )),
+            "the deflicker effect should still lower without a measurement"
+        );
+        assert_eq!(gain_of(&bare), None, "no measurement ⇒ no gain param");
+
+        // With a measurement, the gain for this tick is injected verbatim.
+        let mut table = GainTable::new();
+        table.insert(
+            clip_id,
+            ClipGains {
+                first: Tick(0),
+                step: Tick::from_seconds(1).0,
+                gains: vec![[1.25, 1.25, 1.25], [0.80, 0.80, 0.80]],
+                band: None,
+                frame_ticks: 1,
+            },
+        );
+        let measured = compile_full(
+            &project,
+            seq_id,
+            0,
+            Tick(0),
+            Quality::PREVIEW,
+            None,
+            None,
+            false,
+            Some(&table),
+        );
+        assert_eq!(gain_of(&measured), Some(1.25));
+
+        // A later tick picks up the later sample — the gain really is per-frame.
+        let later = compile_full(
+            &project,
+            seq_id,
+            0,
+            Tick::from_seconds(1),
+            Quality::PREVIEW,
+            None,
+            None,
+            false,
+            Some(&table),
+        );
+        assert_eq!(gain_of(&later), Some(0.80));
+
+        // A different clip's id must not pick up this clip's gains.
+        let mut other = GainTable::new();
+        other.insert(
+            photonic_core::timeline::ClipId::new(),
+            ClipGains {
+                first: Tick(0),
+                step: 1,
+                gains: vec![[2.0; 3]],
+                band: None,
+                frame_ticks: 1,
+            },
+        );
+        let unrelated = compile_full(
+            &project,
+            seq_id,
+            0,
+            Tick(0),
+            Quality::PREVIEW,
+            None,
+            None,
+            false,
+            Some(&other),
+        );
+        assert_eq!(gain_of(&unrelated), None);
     }
 
     #[test]

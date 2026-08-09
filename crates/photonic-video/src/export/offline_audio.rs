@@ -14,8 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use photonic_core::timeline::{
-    AssetSource, Clip, ClipAudio, ClipId, ClipSource, SequenceId, Tick, TimelineProject,
-    TICKS_PER_SECOND,
+    AssetSource, Clip, ClipAudio, ClipId, ClipSource, Ratio, SequenceId, SpeedMap, Tick,
+    TimelineProject, TICKS_PER_SECOND,
 };
 
 use super::presets::LoudnessTarget;
@@ -24,6 +24,7 @@ use crate::audio::mixer::{ClipVoice, Mixer, PcmSource, TrackVoice};
 use crate::audio::{BLOCK_FRAMES, CHANNELS};
 use crate::graph::analysis::{self, AnalysisCache, AnalysisResult};
 use crate::media::ffmpeg_locate::FfmpegTools;
+use crate::playback::pcm::{read_pcm_window, TimeWarpPcmSource};
 use crate::playback::FfmpegPcmSource;
 
 /// Default export mix rate when a sequence does not declare one (48 kHz).
@@ -84,7 +85,7 @@ pub fn render_export_audio_filtered(
     let mut block = vec![0f32; BLOCK_FRAMES * CHANNELS];
     let mut mixer = Mixer::new(sample_rate);
     let default_clip_audio = ClipAudio::new();
-    let mut pcm: HashMap<ClipId, FfmpegPcmSource> = HashMap::new();
+    let mut pcm: HashMap<ClipId, Box<dyn PcmSource>> = HashMap::new();
     let mut t = start;
     let mut frames_left = total_frames;
 
@@ -123,29 +124,62 @@ pub fn render_export_audio_filtered(
                 else {
                     continue;
                 };
-                // K-D3: stream index + sync offset on the source read.
                 let (offset, stream) = clip
                     .audio
                     .as_ref()
                     .map(|a| (a.offset, a.stream))
                     .unwrap_or((Tick::ZERO, None));
-                let src_pos = crate::playback::pcm::source_seek_with_offset(
-                    clip.source_in,
-                    t,
-                    clip.start,
-                    offset,
-                );
-                if let Ok(source) =
-                    FfmpegPcmSource::spawn_stream(tools, path, src_pos, sample_rate, stream)
-                {
-                    pcm.insert(clip.id, source);
+                let identity = matches!(clip.speed, SpeedMap::Constant(r) if r == Ratio::ONE);
+                if identity {
+                    let src_pos = crate::playback::pcm::source_seek_with_offset(
+                        clip.source_in,
+                        t,
+                        clip.start,
+                        offset,
+                    );
+                    if let Ok(source) =
+                        FfmpegPcmSource::spawn_stream(tools, path, src_pos, sample_rate, stream)
+                    {
+                        pcm.insert(clip.id, Box::new(source));
+                    }
+                } else {
+                    let (lo, hi) = clip.speed.source_delta_range(clip.duration);
+                    let source_start =
+                        Tick((clip.source_in.0 - offset.0 + lo.floor() as i64).max(0));
+                    let source_end = (clip.source_in.0 - offset.0) as f64 + hi.ceil();
+                    let frames = ((source_end - source_start.0 as f64).max(0.0)
+                        * sample_rate as f64
+                        / TICKS_PER_SECOND as f64)
+                        .ceil() as usize
+                        + 2;
+                    if let Ok(mut decoder) = FfmpegPcmSource::spawn_stream(
+                        tools,
+                        path,
+                        source_start,
+                        sample_rate,
+                        stream,
+                    ) {
+                        let window = read_pcm_window(&mut decoder, frames);
+                        pcm.insert(
+                            clip.id,
+                            Box::new(TimeWarpPcmSource::new(
+                                window,
+                                sample_rate,
+                                source_start,
+                                clip.source_in,
+                                offset,
+                                clip.speed.clone(),
+                                t - clip.start,
+                            )),
+                        );
+                    }
                 }
             }
         }
         let active_ids: HashSet<ClipId> = active.iter().map(|(_, c)| c.id).collect();
         pcm.retain(|id, _| active_ids.contains(id));
 
-        let mut refs: HashMap<ClipId, &mut FfmpegPcmSource> =
+        let mut refs: HashMap<ClipId, &mut Box<dyn PcmSource>> =
             pcm.iter_mut().map(|(id, src)| (*id, src)).collect();
         let mut voices: Vec<TrackVoice<'_>> = Vec::new();
         for track in seq
@@ -162,7 +196,7 @@ pub fn render_export_audio_filtered(
                         audio: clip.audio.as_ref().unwrap_or(&default_clip_audio),
                         elapsed: t - clip.start,
                         remaining: clip.end() - t,
-                        source: source as &mut dyn PcmSource,
+                        source: source.as_mut(),
                     });
                 }
             }

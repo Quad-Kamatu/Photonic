@@ -866,6 +866,33 @@ impl Evaluator {
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
             IrOp::Effect {
+                kind: EffectKind::Deflicker,
+                params,
+            } => match inputs.first() {
+                Some(src) => {
+                    let amp = params.f32_or("params.band_amp", 0.0);
+                    let band = (amp.abs() > 1e-6).then(|| crate::graph::rolling_bands::BandModel {
+                        cycles: params.f32_or("params.band_cycles", 0.0).max(0.0) as u32,
+                        amplitude: amp,
+                        phase: params.f32_or("params.band_phase", 0.0),
+                        confidence: 1.0,
+                    });
+                    self.passes.deflicker(
+                        &self.gpu,
+                        &src.texture,
+                        target,
+                        [
+                            params.f32_or("params.gain_r", 1.0),
+                            params.f32_or("params.gain_g", 1.0),
+                            params.f32_or("params.gain_b", 1.0),
+                        ],
+                        band,
+                        logical_h,
+                    )
+                }
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            IrOp::Effect {
                 kind: EffectKind::Blur,
                 params,
             } => match inputs.first() {
@@ -1363,6 +1390,7 @@ struct Passes {
     transform_bgl: wgpu::BindGroupLayout,
     /// `Effect{Invert}` (08 §3): shares the blit bind-group layout (tex + sampler).
     invert_pipeline: wgpu::RenderPipeline,
+    deflicker_pipeline: wgpu::RenderPipeline,
     /// K-G6 deinterlace: textureLoad + method/order/dims uniform (reuses transform_bgl).
     deinterlace_pipeline: wgpu::RenderPipeline,
     /// `Effect{LumaKey}`/`Effect{ChromaKey}` (08 §3): a filter BGL (tex + sampler
@@ -1544,6 +1572,16 @@ impl Passes {
             "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct CK {{ key: vec4<f32>, aux: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: CK;\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  var straight = vec3<f32>(0.0);\n  if (c.a > 1e-6) {{ straight = c.rgb / c.a; }}\n  let dist = length(straight - u.key.xyz);\n  let keep = smoothstep(u.key.w, u.aux.x, dist);\n  var col = straight;\n  let spill = u.aux.y;\n  let dom = i32(u.aux.z + 0.5);\n  if (dom == 0) {{ let m = 0.5 * (col.g + col.b); if (col.r > m) {{ col.r = col.r + (m - col.r) * spill; }} }}\n  else if (dom == 1) {{ let m = 0.5 * (col.r + col.b); if (col.g > m) {{ col.g = col.g + (m - col.g) * spill; }} }}\n  else {{ let m = 0.5 * (col.r + col.g); if (col.b > m) {{ col.b = col.b + (m - col.b) * spill; }} }}\n  let a = c.a * keep;\n  return vec4<f32>(col * a, a);\n}}\n"
         );
         let chroma_key_pipeline = make_pipeline(device, &filter_bgl, &chroma_key_src, "fs");
+
+        // Deflicker (`color.deflicker`): per-channel gain applied to sRGB-ENCODED
+        // straight colour, with a highlight rolloff so a brightening gain cannot
+        // push near-white over. WGSL twin of `deflicker::apply_gain` — the
+        // transfer-function breakpoints are byte-for-byte the Rust constants so
+        // the two agree. `u = [gain_r, gain_g, gain_b, knee]`. Reuses filter_bgl.
+        let deflicker_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n@group(0) @binding(1) var s: sampler;\nstruct DF {{ g: vec4<f32>, b: vec4<f32> }}\n@group(0) @binding(2) var<uniform> u: DF;\nfn lin2srgb(c: f32) -> f32 {{\n  if (c <= 0.0031308) {{ return c * 12.92; }}\n  return 1.055 * pow(c, 1.0 / 2.4) - 0.055;\n}}\nfn srgb2lin(c: f32) -> f32 {{\n  if (c <= 0.04045) {{ return c / 12.92; }}\n  return pow((c + 0.055) / 1.055, 2.4);\n}}\nfn rolled(g: f32, enc: f32, knee: f32) -> f32 {{\n  if (g <= 1.0 || enc <= knee) {{ return g; }}\n  let tt = clamp((enc - knee) / (1.0 - knee), 0.0, 1.0);\n  return 1.0 + (g - 1.0) * (1.0 - tt * tt);\n}}\n@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {{\n  let c = textureSample(t, s, i.uv);\n  if (c.a <= 1e-6) {{ return c; }}\n  // Exact pass-through when nothing was measured, matching the CPU kernel.\n  // Without this an inert Deflicker still round-trips sRGB and clamps to\n  // [0,1], which silently hard-clips super-white values the rgba16f working\n  // space legitimately carries.\n  if (abs(u.b.y) <= 1e-6 && all(abs(u.g.rgb - vec3<f32>(1.0)) <= vec3<f32>(1e-6))) {{ return c; }}\n  var lin = c.rgb / c.a;\n  if (abs(u.b.y) > 1e-6 && u.b.w > 0.5) {{\n    let kk = 6.2831853 * u.b.x / u.b.w;\n    let bb = u.b.y * cos(kk * (i.pos.y - 0.5) + u.b.z);\n    lin = lin * clamp(1.0 / (1.0 + bb), 0.5, 2.0);\n  }}\n  let straight = clamp(lin, vec3<f32>(0.0), vec3<f32>(1.0));\n  let knee = u.g.w;\n  var out = vec3<f32>(0.0);\n  for (var k = 0; k < 3; k++) {{\n    let enc = lin2srgb(straight[k]);\n    let gain = rolled(u.g[k], enc, knee);\n    out[k] = srgb2lin(clamp(enc * gain, 0.0, 1.0));\n  }}\n  return vec4<f32>(out * c.a, c.a);\n}}\n"
+        );
+        let deflicker_pipeline = make_pipeline(device, &filter_bgl, &deflicker_src, "fs");
 
         // Separable Gaussian blur (K-0.2) — WGSL twin of `ops::blur`. Uses
         // `textureLoad` + LOGICAL dims (not physical pool-bucket size) so the
@@ -1889,6 +1927,7 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
             transform_pipeline,
             transform_bgl,
             invert_pipeline,
+            deflicker_pipeline,
             deinterlace_pipeline,
             filter_bgl,
             luma_key_pipeline,
@@ -3263,6 +3302,36 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
         self.run_filter(gpu, &self.luma_key_pipeline, src, target, &uniform);
     }
 
+    /// `Effect{Deflicker}` pass — tex + sampler + `[gain_r, gain_g, gain_b,
+    /// knee]` and `[band_cycles, band_amp, band_phase, rows]` uniforms.
+    ///
+    /// `rows` must be the **logical** height, not the physical pool-bucket
+    /// height, or the band frequency is scaled wrong; and the shader subtracts
+    /// the half-pixel from `@builtin(position)` so its row index matches the
+    /// CPU's integer `y`. Both are asserted by the GPU/CPU band parity test. The gain is resolved by the compile pass from a cached
+    /// whole-range measurement; this pass only applies it.
+    fn deflicker(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        gain: [f32; 3],
+        band: Option<crate::graph::rolling_bands::BandModel>,
+        rows: u32,
+    ) {
+        let uniform = [
+            gain[0],
+            gain[1],
+            gain[2],
+            crate::graph::deflicker::HIGHLIGHT_KNEE,
+            band.map(|b| b.cycles as f32).unwrap_or(0.0),
+            band.map(|b| b.amplitude).unwrap_or(0.0),
+            band.map(|b| b.phase).unwrap_or(0.0),
+            rows as f32,
+        ];
+        self.run_filter(gpu, &self.deflicker_pipeline, src, target, &uniform);
+    }
+
     /// `Effect{ChromaKey}` pass — tex + sampler + a `[key.rgb, tolerance | hi,
     /// spill, dom, pad]` uniform. `key` is the sRGB→linear key colour, `dom` the
     /// dominant key channel; both are computed in Rust so the GPU matches
@@ -4399,6 +4468,121 @@ mod tests {
             },
         );
         assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+    }
+
+    /// GPU/CPU parity for `Effect{Deflicker}`: the WGSL must reproduce
+    /// `deflicker::apply_gain`'s encode → scale → decode round trip, including
+    /// the highlight rolloff. Two gains are exercised — a mid-grey brightening
+    /// (well below the knee, so a plain gain) and a near-white one (inside the
+    /// knee, so the rolloff branch fires) — because a shader that ignored the
+    /// rolloff would still pass the first case.
+    ///
+    /// The gain is injected the way the real pipeline injects it: through
+    /// `compile_full` with a populated `GainTable`, not by hand-setting params.
+    #[test]
+    fn deflicker_solid_gpu_matches_cpu_reference() {
+        use crate::graph::deflicker::{ClipGains, GainTable};
+        use photonic_core::timeline::EffectKind;
+
+        // Third case carries a rolling band: a uniform source becomes row-varying,
+        // so this is what catches a row-orientation flip between the CPU's
+        // top-down `y` index and the shader's fragment coordinate — a bug that
+        // would otherwise show only as an inverted band on real footage.
+        let cases: [(
+            f32,
+            [f32; 3],
+            Option<crate::graph::rolling_bands::BandModel>,
+        ); 3] = [
+            (0.5, [1.2, 1.05, 0.9], None),
+            (0.95, [1.4, 1.4, 1.4], None),
+            (
+                0.45,
+                [1.0, 1.0, 1.0],
+                Some(crate::graph::rolling_bands::BandModel {
+                    cycles: 3,
+                    amplitude: 0.12,
+                    phase: 0.7,
+                    confidence: 1.0,
+                }),
+            ),
+        ];
+        for (level, gain, band) in cases {
+            let mut project = TimelineProject::new();
+            let mut seq = Sequence::new("seq", FrameRate::FPS_30, 8, 8);
+            let seq_id = seq.id;
+            let mut t = Track::new(TrackKind::Video, "V1");
+            let mut clip = Clip::new(
+                ClipSource::SolidColor {
+                    color: Color {
+                        r: level,
+                        g: level,
+                        b: level,
+                        a: 1.0,
+                    },
+                },
+                crate::contract::Tick(0),
+                crate::contract::Tick::from_seconds(2),
+            );
+            clip.effects.push(photonic_core::timeline::ClipEffect::new(
+                EffectKind::Deflicker,
+            ));
+            let clip_id = clip.id;
+            t.clips.push(clip);
+            seq.video_tracks.push(t);
+            project.insert_sequence(seq);
+
+            let mut table = GainTable::new();
+            table.insert(
+                clip_id,
+                ClipGains {
+                    first: crate::contract::Tick(0),
+                    step: 1,
+                    gains: vec![gain],
+                    // `dphase: 0` pins the phase so the parity comparison is
+                    // against a fixed band, not a moving one.
+                    band: band.map(|m| crate::graph::rolling_bands::BandTrack {
+                        cycles: m.cycles,
+                        amplitude: m.amplitude,
+                        phase0: m.phase,
+                        dphase: 0.0,
+                        confidence: m.confidence,
+                    }),
+                    frame_ticks: 1,
+                },
+            );
+            let compiled = crate::graph::compile::compile_full(
+                &project,
+                seq_id,
+                0,
+                crate::contract::Tick(0),
+                Quality::FULL,
+                None,
+                None,
+                false,
+                Some(&table),
+            );
+            // Guard the test itself: if the gain stopped being injected this
+            // would silently become a parity check on a pass-through.
+            assert!(
+                compiled.graph.nodes.iter().any(|n| matches!(
+                    &n.op,
+                    IrOp::Effect { kind: EffectKind::Deflicker, params }
+                        if params.get("params.gain_r").is_some()
+                )),
+                "gain must be injected for this parity test to mean anything"
+            );
+            if band.is_some() {
+                assert!(
+                    compiled.graph.nodes.iter().any(|n| matches!(
+                        &n.op,
+                        IrOp::Effect { kind: EffectKind::Deflicker, params }
+                            if params.get("params.band_amp").is_some()
+                    )),
+                    "band must be injected for the band parity case to mean anything"
+                );
+            }
+            assert_graph_gpu_matches_cpu(&compiled, 1e-3);
+        }
     }
 
     /// GPU/CPU parity for `Effect{ChromaKey}` (08 §3): keep-smoothstep + dominant-

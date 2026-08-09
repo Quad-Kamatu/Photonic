@@ -813,7 +813,8 @@ pub struct FreezeFrameArgs {
 
 /// One control point of a [`SetClipSpeedArgs::keys`] ramp — clip-relative
 /// position (`at_*`, §1 rule 3 precedence) + the exact-rational ratio that
-/// takes effect there.
+/// takes effect there. `interp` controls the segment leaving this key and
+/// defaults to `hold` for backwards-compatible stepped ramps.
 #[derive(Debug, Deserialize)]
 pub struct SpeedKeyArg {
     #[serde(default)]
@@ -823,6 +824,8 @@ pub struct SpeedKeyArg {
     #[serde(default)]
     pub at_seconds: Option<f64>,
     pub ratio: RatioArg,
+    #[serde(default)]
+    pub interp: Option<Interp>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -377,6 +377,19 @@ pub enum SpeedMap {
     Keyframed { keys: Vec<SpeedKey> },
 }
 
+/// Why a speed map cannot be applied to a clip.
+///
+/// This is deliberately separate from the editor-facing [`super::ops::EditError`]
+/// so importers and non-timeline callers can validate a map before constructing
+/// a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeedMapError {
+    ZeroDenominator,
+    KeyOutsideClip,
+    DuplicateKeyTick,
+    InvalidBezierHandle,
+}
+
 impl Default for SpeedMap {
     fn default() -> Self {
         SpeedMap::Constant(Ratio::ONE)
@@ -384,6 +397,56 @@ impl Default for SpeedMap {
 }
 
 impl SpeedMap {
+    /// Sort keyed control points into the canonical serialized order.
+    pub fn normalize(&mut self) {
+        if let SpeedMap::Keyframed { keys } = self {
+            keys.sort_by_key(|key| key.at.0);
+        }
+    }
+
+    /// Validate the map against a clip-relative duration.
+    ///
+    /// Key order is normalized by callers before storage, but duplicate ticks
+    /// are rejected because a speed at one instant must be unambiguous.
+    pub fn validate_for_duration(&self, duration: Tick) -> Result<(), SpeedMapError> {
+        let SpeedMap::Keyframed { keys } = self else {
+            return match self {
+                SpeedMap::Constant(ratio) if ratio.den == 0 => Err(SpeedMapError::ZeroDenominator),
+                SpeedMap::Constant(_) => Ok(()),
+                SpeedMap::Keyframed { .. } => unreachable!("keyframed handled above"),
+            };
+        };
+        let mut sorted = keys.clone();
+        sorted.sort_by_key(|key| key.at.0);
+        let mut last = None;
+        for key in &sorted {
+            if key.ratio.den == 0 {
+                return Err(SpeedMapError::ZeroDenominator);
+            }
+            if key.at.0 < 0 || key.at > duration {
+                return Err(SpeedMapError::KeyOutsideClip);
+            }
+            if last == Some(key.at) {
+                return Err(SpeedMapError::DuplicateKeyTick);
+            }
+            if let Interp::Bezier {
+                out_handle,
+                in_handle,
+            } = key.interp
+            {
+                if !out_handle
+                    .iter()
+                    .chain(in_handle.iter())
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                {
+                    return Err(SpeedMapError::InvalidBezierHandle);
+                }
+            }
+            last = Some(key.at);
+        }
+        Ok(())
+    }
+
     /// Source-time delta consumed over the clip-relative interval `[0, dt]`
     /// (01 §5.1: exact rational arithmetic; `source = source_in + dt * speed`).
     /// Returns the source-time delta only (the caller adds `source_in`).
@@ -400,6 +463,109 @@ impl SpeedMap {
             SpeedMap::Keyframed { keys } => Tick(integrate_ramp(keys, dt.0)),
         }
     }
+
+    /// Source-time delta without tick rounding.
+    ///
+    /// The frame renderer intentionally uses [`Self::source_delta`]; audio
+    /// retiming uses this value to address individual PCM samples without
+    /// accumulating a tick-rounding error per sample.
+    pub fn source_delta_f64(&self, dt: Tick) -> f64 {
+        match self {
+            SpeedMap::Constant(r) => dt.0 as f64 * r.as_f64(),
+            SpeedMap::Keyframed { keys } => integrate_ramp_f64(keys, dt.0),
+        }
+    }
+
+    /// Instantaneous signed playback ratio at a clip-relative time.
+    ///
+    /// This complements [`Self::source_delta_f64`] for audio: a zero-rate
+    /// interval deliberately emits silence rather than repeatedly sampling a
+    /// DC value.
+    pub fn ratio_at_f64(&self, at: Tick) -> f64 {
+        match self {
+            SpeedMap::Constant(ratio) => ratio.as_f64(),
+            SpeedMap::Keyframed { keys } if keys.is_empty() => 1.0,
+            SpeedMap::Keyframed { keys } => {
+                let mut sorted = keys.clone();
+                sorted.sort_by_key(|key| key.at.0);
+                let index = sorted.partition_point(|key| key.at <= at);
+                match index {
+                    0 => sorted[0].ratio.as_f64(),
+                    i if i == sorted.len() => sorted[i - 1].ratio.as_f64(),
+                    i => segment_ratio(sorted[i - 1], sorted[i], at.0 as f64),
+                }
+            }
+        }
+    }
+
+    /// Inclusive extrema of the source-time path over `0..=duration`.
+    ///
+    /// Reverse and zero-crossing ramps can visit source positions that are not
+    /// visible from only the start and end deltas. The returned values are
+    /// unrounded source ticks for prefetch and source-bound diagnostics.
+    pub fn source_delta_range(&self, duration: Tick) -> (f64, f64) {
+        let mut samples = vec![0_i64, duration.0.max(0)];
+        if let SpeedMap::Keyframed { keys } = self {
+            let mut sorted = keys.clone();
+            sorted.sort_by_key(|k| k.at.0);
+            for key in &sorted {
+                if (0..=duration.0).contains(&key.at.0) {
+                    samples.push(key.at.0);
+                }
+            }
+            for pair in sorted.windows(2) {
+                let lo = pair[0].at.0.max(0);
+                let hi = pair[1].at.0.min(duration.0);
+                if lo < hi && pair[0].ratio.num.signum() != pair[1].ratio.num.signum() {
+                    samples.push(zero_crossing(pair[0], pair[1]));
+                }
+            }
+        }
+        samples.sort_unstable();
+        samples.dedup();
+        samples
+            .into_iter()
+            .map(|t| self.source_delta_f64(Tick(t)))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), value| {
+                (lo.min(value), hi.max(value))
+            })
+    }
+}
+
+fn zero_crossing(a: SpeedKey, b: SpeedKey) -> i64 {
+    let mut lo = a.at.0 as f64;
+    let mut hi = b.at.0 as f64;
+    let target = 0.0;
+    for _ in 0..48 {
+        let mid = (lo + hi) * 0.5;
+        let ratio = segment_ratio(a, b, mid);
+        if (ratio - target).abs() < 1e-12 {
+            return mid.round() as i64;
+        }
+        if ratio.signum() == a.ratio.as_f64().signum() {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    ((lo + hi) * 0.5).round() as i64
+}
+
+fn segment_ratio(a: SpeedKey, b: SpeedKey, at: f64) -> f64 {
+    let span = (b.at.0 - a.at.0) as f64;
+    if span <= 0.0 || matches!(a.interp, Interp::Hold) {
+        return a.ratio.as_f64();
+    }
+    let u = ((at - a.at.0 as f64) / span).clamp(0.0, 1.0);
+    let ease = match a.interp {
+        Interp::Hold => 0.0,
+        Interp::Linear => u,
+        Interp::Bezier {
+            out_handle,
+            in_handle,
+        } => cubic_bezier_ease(out_handle, in_handle, u),
+    };
+    a.ratio.as_f64() + (b.ratio.as_f64() - a.ratio.as_f64()) * ease
 }
 
 /// `len * ratio`, exact (multiply-before-divide in i128, saturating back to i64).
@@ -434,6 +600,18 @@ fn integrate_ramp(keys: &[SpeedKey], target: i64) -> i64 {
     } else {
         integrate_hold(&sorted, target)
     }
+}
+
+fn integrate_ramp_f64(keys: &[SpeedKey], target: i64) -> f64 {
+    if keys.is_empty() {
+        return target as f64;
+    }
+    if target == 0 {
+        return 0.0;
+    }
+    let mut sorted = keys.to_vec();
+    sorted.sort_by_key(|key| key.at.0);
+    integrate_eased_f64(&sorted, target)
 }
 
 /// Exact piecewise-constant integration (the classic path): each key's ratio
@@ -475,6 +653,10 @@ fn integrate_hold(sorted: &[SpeedKey], target: i64) -> i64 {
 /// `∫ speed dt = (b−a)·r0 + (r1−r0)·w·∫ e du` over the clamped sub-interval.
 /// Rounded to the nearest tick.
 fn integrate_eased(sorted: &[SpeedKey], target: i64) -> i64 {
+    integrate_eased_f64(sorted, target).round() as i64
+}
+
+fn integrate_eased_f64(sorted: &[SpeedKey], target: i64) -> f64 {
     let (lo, hi) = if target >= 0 {
         (0, target)
     } else {
@@ -520,9 +702,10 @@ fn integrate_eased(sorted: &[SpeedKey], target: i64) -> i64 {
     }
 
     if target < 0 {
-        acc = -acc;
+        -acc
+    } else {
+        acc
     }
-    acc.round() as i64
 }
 
 /// Definite integral `∫_{ua}^{ub} e(u) du` of the normalized easing progress
@@ -1334,5 +1517,43 @@ mod tests {
         // Re-load a serialized plain effect (no zone key) → None.
         let legacy: ClipEffect = serde_json::from_str(&j).unwrap();
         assert_eq!(legacy.zone, None);
+    }
+
+    #[test]
+    fn speed_map_validation_rejects_duplicate_key_ticks() {
+        let map = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::new(Tick(10), Ratio::ONE),
+                SpeedKey::new(Tick(10), Ratio::new(2, 1)),
+            ],
+        };
+        assert_eq!(
+            map.validate_for_duration(Tick(100)),
+            Err(SpeedMapError::DuplicateKeyTick)
+        );
+    }
+
+    #[test]
+    fn speed_map_validation_rejects_constant_zero_denominator() {
+        let map = SpeedMap::Constant(Ratio { num: 1, den: 0 });
+        assert_eq!(
+            map.validate_for_duration(Tick(100)),
+            Err(SpeedMapError::ZeroDenominator)
+        );
+    }
+
+    #[test]
+    fn speed_map_range_includes_reverse_turnaround() {
+        let map = SpeedMap::Keyframed {
+            keys: vec![
+                SpeedKey::eased(Tick::ZERO, Ratio::new(1, 1), Interp::Linear),
+                SpeedKey::new(Tick(100), Ratio::new(-1, 1)),
+            ],
+        };
+        let (_, high) = map.source_delta_range(Tick(100));
+        assert!(
+            (high - 25.0).abs() < 1.0,
+            "turnaround should be near 25 ticks: {high}"
+        );
     }
 }

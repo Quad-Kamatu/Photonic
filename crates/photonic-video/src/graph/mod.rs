@@ -9,12 +9,15 @@
 //! - [`raster_bridge`] — K-B16 CPU bridge from `photonic_core::raster` kernels.
 //! - [`source_range`] — E-1 temporal source-range contract (32 §1).
 //! - [`analysis`] — E-2 analysis-as-node foundation (32 §2 image, 31 §5 audio).
+//! - [`deflicker`] — exposure-drift stabilization, measured once and cached (E-2).
+//! - [`rolling_bands`] — rolling-shutter AC banding: per-scanline detect + correct.
 
 pub mod ir;
 
 pub mod analysis;
 pub mod cache;
 pub mod compile;
+pub mod deflicker;
 pub mod eval;
 pub mod eval_cpu;
 pub mod luma_wipe;
@@ -22,6 +25,7 @@ pub mod ops;
 pub mod panorama;
 pub mod panorama_gpu;
 pub mod raster_bridge;
+pub mod rolling_bands;
 pub mod source_range;
 
 pub use source_range::{

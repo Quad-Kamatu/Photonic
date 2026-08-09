@@ -215,6 +215,36 @@ fn eval_op(
                 params.f32_or("params.rotation", 0.0),
                 params.f32_or("params.feather", 0.0),
             ),
+            // Deflicker applies a gain that a *whole-range* measurement produced
+            // (32 §2's two-pass rule — see `graph::deflicker`). The evaluator
+            // stays pure: it never reaches for the analysis cache, it just
+            // consumes the resolved per-channel gain the compile pass wrote into
+            // the params. Absent that gain the effect is an exact pass-through,
+            // which is the correct behaviour before the measurement job has run.
+            EffectKind::Deflicker => {
+                let gain = [
+                    params.f32_or("params.gain_r", 1.0),
+                    params.f32_or("params.gain_g", 1.0),
+                    params.f32_or("params.gain_b", 1.0),
+                ];
+                // Bands first, in LINEAR light: they are a physical modulation
+                // of the light, so dividing them out there inverts the actual
+                // degradation. The exposure gain then runs in the perceptual
+                // domain (see `graph::deflicker`). The two deliberately differ.
+                let band_amp = params.f32_or("params.band_amp", 0.0);
+                let img = if band_amp.abs() > 1e-6 {
+                    let model = crate::graph::rolling_bands::BandModel {
+                        cycles: params.f32_or("params.band_cycles", 0.0).max(0.0) as u32,
+                        amplitude: band_amp,
+                        phase: params.f32_or("params.band_phase", 0.0),
+                        confidence: 1.0,
+                    };
+                    crate::graph::rolling_bands::apply_correction(&in0(), &model, 1.0)
+                } else {
+                    in0()
+                };
+                crate::graph::deflicker::apply_gain(&img, gain)
+            }
             EffectKind::Unknown(tag) => {
                 // K-B16: unknown tags that name a raster-bridge id evaluate on
                 // the CPU oracle; other unknowns stay inert (39 §2.2).
@@ -483,6 +513,53 @@ mod tests {
         seq.video_tracks.push(t);
         project.insert_sequence(seq);
         (project, seq_id)
+    }
+
+    /// The deflicker dispatch reaches the real kernel and consumes the gain the
+    /// compile pass resolves, rather than silently passing through.
+    #[test]
+    fn deflicker_effect_applies_the_resolved_gain() {
+        use crate::contract::ResolvedParams;
+        use photonic_core::timeline::{PropPath, PropValue};
+
+        let lin = crate::graph::ops::srgb_to_linear(0.4);
+        let img = Image::filled(
+            2,
+            2,
+            crate::graph::ir::LinearColor {
+                r: lin,
+                g: lin,
+                b: lin,
+                a: 1.0,
+            },
+        );
+
+        let params = ResolvedParams {
+            entries: vec![
+                (PropPath::new("params.gain_r"), PropValue::Float(1.25)),
+                (PropPath::new("params.gain_g"), PropValue::Float(1.25)),
+                (PropPath::new("params.gain_b"), PropValue::Float(1.25)),
+            ],
+        };
+        let op = IrOp::Effect {
+            kind: EffectKind::Deflicker,
+            params,
+        };
+        let out = eval_op(&op, &[&img], 2, 2, &mut EmptyProvider);
+        let got = crate::graph::ops::linear_to_srgb(out.pixels[0][0]);
+        assert!(
+            (got - 0.5).abs() < 1e-3,
+            "0.4 encoded x1.25 should be 0.5, got {got}"
+        );
+
+        // Before the measurement job has run there is no gain, and the effect
+        // must then be an exact pass-through — not an approximate one.
+        let inert = IrOp::Effect {
+            kind: EffectKind::Deflicker,
+            params: ResolvedParams::default(),
+        };
+        let passthrough = eval_op(&inert, &[&img], 2, 2, &mut EmptyProvider);
+        assert_eq!(passthrough.pixels, img.pixels);
     }
 
     /// A clip grade of Exposure +1 stop doubles the linear working value — proving

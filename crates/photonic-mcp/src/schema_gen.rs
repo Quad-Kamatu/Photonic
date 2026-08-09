@@ -5616,13 +5616,13 @@ pub fn tool_list() -> Value {
             },
             {
                 "name": "set_clip_speed",
-                "description": "Set a clip's playback speed — supply exactly one of `ratio` (SpeedMap::Constant, an exact rational) or `keys` (SpeedMap::Keyframed, a variable-speed ramp, G-11): control points at clip-relative timeline ticks, piecewise-constant between them. Supports undo.",
+                "description": "Set a clip's playback speed — supply exactly one of `ratio` (SpeedMap::Constant, an exact rational) or `keys` (SpeedMap::Keyframed, a variable-speed ramp, G-11). Each key has clip-relative time, ratio, and optional outgoing interpolation: {kind:hold|linear|bezier,out_handle:[x,y],in_handle:[x,y]}. Supports undo.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "clip_id": { "type": "string" },
                         "ratio": { "type": "object", "description": "Constant speed. {\"num\":int,\"den\":uint} — e.g. {\"num\":2,\"den\":1} for 2x, {\"num\":-1,\"den\":1} for reverse. Mutually exclusive with keys.", "properties": { "num": {"type":"integer"}, "den": {"type":"integer"} }, "required": ["num","den"] },
-                        "keys": { "type": "array", "description": "Keyframed ramp control points, clip-relative. Mutually exclusive with ratio.", "items": { "type": "object", "properties": { "at_ticks": {"type":"integer"}, "at_tc": {"type":"string"}, "at_seconds": {"type":"number"}, "ratio": { "type": "object", "properties": { "num": {"type":"integer"}, "den": {"type":"integer"} }, "required": ["num","den"] } }, "required": ["ratio"] } }
+                        "keys": { "type": "array", "description": "Keyframed ramp control points, clip-relative. Mutually exclusive with ratio.", "items": { "type": "object", "properties": { "at_ticks": {"type":"integer"}, "at_tc": {"type":"string"}, "at_seconds": {"type":"number"}, "ratio": { "type": "object", "properties": { "num": {"type":"integer"}, "den": {"type":"integer"} }, "required": ["num","den"] }, "interp": { "type": "object", "description": "Optional outgoing interpolation: {kind:hold|linear|bezier,out_handle:[0..1,0..1],in_handle:[0..1,0..1]}. Defaults to hold." } }, "required": ["ratio"] } }
                     },
                     "required": ["clip_id"]
                 }

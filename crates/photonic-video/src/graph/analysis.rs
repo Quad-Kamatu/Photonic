@@ -50,6 +50,14 @@ pub enum AnalysisResult {
         frames: u32,
         sample_rate: u32,
     },
+    /// Per-frame exposure measurements over a contiguous frame range — the
+    /// image analogue of [`AnalysisResult::Loudness`], and like it a **job, not
+    /// a node**: one pass measures the whole range, every later frame reads the
+    /// cached verdict. This is what lets deflicker correct slow drift without
+    /// the evaluator ever fetching a neighbouring frame.
+    Exposure {
+        curve: crate::graph::deflicker::ExposureCurve,
+    },
 }
 
 /// Kind tags for [`analysis_key`]. One byte, distinct per [`AnalysisResult`]
@@ -59,6 +67,8 @@ pub const KIND_HISTOGRAM: u8 = 1;
 pub const KIND_LEVELS: u8 = 2;
 /// See [`KIND_HISTOGRAM`].
 pub const KIND_LOUDNESS: u8 = 3;
+/// See [`KIND_HISTOGRAM`].
+pub const KIND_EXPOSURE: u8 = 4;
 
 /// Context for analysis (tick + optional canvas hint). Reserved for multi-frame
 /// windowed analysis.
@@ -232,6 +242,39 @@ pub fn loudness_cached(
         return hit.clone();
     }
     let result = analyze_loudness(pcm, sample_rate);
+    cache.insert(key, result.clone());
+    result
+}
+
+/// Measure an exposure curve over `frames`, in frame order — the deflicker
+/// analysis pass (see [`crate::graph::deflicker`]).
+///
+/// Whole-range like [`analyze_loudness`], so callers run it once off the
+/// realtime path. Order matters here in a way it does not for the other image
+/// analyses: the result is a *sequence*, and the caller owns that ordering.
+pub fn analyze_exposure<'a>(frames: impl IntoIterator<Item = &'a Image>) -> AnalysisResult {
+    AnalysisResult::Exposure {
+        curve: crate::graph::deflicker::ExposureCurve {
+            samples: frames
+                .into_iter()
+                .map(crate::graph::deflicker::measure_frame)
+                .collect(),
+        },
+    }
+}
+
+/// Cached exposure curve: returns the prior measurement when `key` hits, so
+/// re-rendering an unchanged range never pays the measurement pass again.
+/// Mirrors [`loudness_cached`].
+pub fn exposure_cached<'a>(
+    cache: &mut AnalysisCache,
+    key: ContentHash,
+    frames: impl IntoIterator<Item = &'a Image>,
+) -> AnalysisResult {
+    if let Some(hit) = cache.get(key) {
+        return hit.clone();
+    }
+    let result = analyze_exposure(frames);
     cache.insert(key, result.clone());
     result
 }

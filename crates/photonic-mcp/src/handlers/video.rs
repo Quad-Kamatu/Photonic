@@ -2456,13 +2456,15 @@ pub async fn set_clip_speed(state: &AppState, args: SetClipSpeedArgs) -> ToolRes
                 Ok(t) => t,
                 Err(e) => return e,
             };
-            resolved.push(SpeedKey::new(at, Ratio::new(k.ratio.num, k.ratio.den)));
+            resolved.push(SpeedKey::eased(
+                at,
+                Ratio::new(k.ratio.num, k.ratio.den),
+                k.interp.unwrap_or(photonic_core::timeline::Interp::Hold),
+            ));
         }
         SpeedMap::Keyframed { keys: resolved }
     };
-    let mut new_clip = clip.clone();
-    new_clip.speed = speed;
-    match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
+    match ops::set_speed_map(project, seq_id, track_id, clip.id, speed) {
         Ok(cmd) => {
             history.execute_discrete(Command::Timeline(cmd), &mut doc);
             ToolResult::text("Updated clip speed")

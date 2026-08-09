@@ -104,6 +104,14 @@ const EFFECT_LUMAKEY: &[PropEntry] = &[
     boolean("params.invert"),
 ];
 const EFFECT_INVERT: &[PropEntry] = &[];
+/// Ranges mirror `DEFLICKER_PARAMS` in `effect_manifest`; `params.window` is in
+/// seconds so a setting means the same thing at any frame rate.
+const EFFECT_DEFLICKER: &[PropEntry] = &[
+    f("params.amount", Some((0.0, 1.0))),
+    f("params.window", Some((0.2, 30.0))),
+    f("params.max_change", Some((0.0, 0.9))),
+    f("params.chroma_amount", Some((0.0, 1.0))),
+];
 const EFFECT_MASKSHAPE: &[PropEntry] = &[
     f("params.center_x", Some((0.0, 1.0))),
     f("params.center_y", Some((0.0, 1.0))),
@@ -208,6 +216,7 @@ pub fn entries(kind: PropTargetKind) -> &'static [PropEntry] {
             EffectKind::LumaKey => EFFECT_LUMAKEY,
             EffectKind::Invert => EFFECT_INVERT,
             EffectKind::MaskShapeGen => EFFECT_MASKSHAPE,
+            EffectKind::Deflicker => EFFECT_DEFLICKER,
             // Forward-compat (39 §2.2): an unknown kind has zero registered
             // paths, so every PropertyTrack targeting it is flagged orphaned by
             // `flag_orphaned_property_tracks` — retained, not dropped, eval

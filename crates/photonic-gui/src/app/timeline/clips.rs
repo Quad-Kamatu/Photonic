@@ -97,6 +97,7 @@ pub(crate) fn label_color(label: u8) -> Option<egui::Color32> {
 /// this story's territory doesn't reach `app/timeline/mod.rs::lane_colors`,
 /// which is the only place a `LaneColors` value is constructed.
 const SPEED_BADGE_COLOR: egui::Color32 = egui::Color32::from_rgb(0xFB, 0xBF, 0x24);
+const SPEED_CURVE_COLOR: egui::Color32 = egui::Color32::from_rgb(0xE9, 0xE5, 0xFF);
 
 /// Compact on-clip speed cue text (14-nle-parity G-11): `None` for the
 /// default 100%-forward case and an empty ramp (both read as "no override"),
@@ -121,6 +122,60 @@ fn speed_badge_text(clip: &Clip) -> Option<String> {
         // `Constant(1×)` does above.
         SpeedMap::Keyframed { keys } => (!keys.is_empty()).then(|| "RAMP".to_string()),
     }
+}
+
+fn speed_curve_y(speed: f64, rect: egui::Rect) -> f32 {
+    let normalized = speed.signum() * (1.0 + speed.abs()).ln() / 11.0_f64.ln();
+    rect.center().y - normalized as f32 * rect.height() * 0.42
+}
+
+/// Paint a read-only speed band when the user has expanded a timeline track.
+/// Editing stays in the inspector curve so normal clip trim/move hit targets
+/// retain their established priority.
+fn paint_speed_curve_band(shapes: &mut Vec<egui::Shape>, clip: &Clip, rect: egui::Rect) {
+    let SpeedMap::Keyframed { keys } = &clip.speed else {
+        return;
+    };
+    if keys.is_empty() || rect.height() < 56.0 || rect.width() < 36.0 {
+        return;
+    }
+    let band = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 2.0, rect.bottom() - 42.0),
+        egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
+    );
+    shapes.push(egui::Shape::rect_filled(
+        band,
+        egui::Rounding::same(2.0),
+        egui::Color32::BLACK.gamma_multiply(0.22),
+    ));
+    let zero = speed_curve_y(0.0, band);
+    shapes.push(egui::Shape::line_segment(
+        [
+            egui::pos2(band.left(), zero),
+            egui::pos2(band.right(), zero),
+        ],
+        egui::Stroke::new(1.0, SPEED_BADGE_COLOR.gamma_multiply(0.65)),
+    ));
+    let mut sorted = keys.clone();
+    sorted.sort_by_key(|key| key.at.0);
+    let points: Vec<_> = sorted
+        .iter()
+        .map(|key| {
+            let x = band.left() + band.width() * key.at.0 as f32 / clip.duration.0.max(1) as f32;
+            egui::pos2(x, speed_curve_y(key.ratio.as_f64(), band))
+        })
+        .collect();
+    if points.len() > 1 {
+        shapes.push(egui::Shape::line(
+            points.clone(),
+            egui::Stroke::new(1.2, SPEED_CURVE_COLOR),
+        ));
+    }
+    shapes.extend(
+        points
+            .into_iter()
+            .map(|point| egui::Shape::circle_filled(point, 2.5, SPEED_CURVE_COLOR)),
+    );
 }
 
 /// The visible slice of a track's clips for `[first, last]` lane ticks, via the
@@ -668,6 +723,8 @@ pub(crate) fn paint_lane(
                 shapes.push(egui::Shape::circle_filled(center, r, colors.fx_badge));
             }
         }
+
+        paint_speed_curve_band(&mut shapes, c, rect);
 
         painted.push(PaintedClip { clip: c.id, rect });
     }

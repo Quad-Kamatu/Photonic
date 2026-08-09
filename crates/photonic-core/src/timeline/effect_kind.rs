@@ -24,6 +24,13 @@ pub enum EffectKind {
     LumaKey,
     Invert,
     MaskShapeGen,
+    /// Exposure-drift stabilization (deflicker). Unlike the other kinds this
+    /// one reads a cached whole-range measurement rather than only its own
+    /// frame — see [`photonic-video`'s `graph::deflicker`] for why that keeps
+    /// the evaluator stateless.
+    ///
+    /// [`photonic-video`'s `graph::deflicker`]: https://docs.rs/photonic-video
+    Deflicker,
     /// Forward-compat (39 §2.2): a variant this build does not know. The
     /// original serialized tag is preserved verbatim and re-emitted on save.
     /// Declared last so serde tries the known snake_case tags first.
@@ -38,7 +45,7 @@ impl EffectKind {
     }
 
     /// The stable [`EffectId`](super::effect_manifest::EffectId) this kind maps
-    /// to (spec §10). Total over the seven v1 variants; an unknown variant maps
+    /// to (spec §10). Total over the known variants; an unknown variant maps
     /// to an owned id built from its preserved tag (which has no manifest, so it
     /// loads inert).
     pub fn effect_id(self) -> super::effect_manifest::EffectId {
@@ -51,6 +58,7 @@ impl EffectKind {
             EffectKind::LumaKey => EffectId::new_static("key.luma"),
             EffectKind::Invert => EffectId::new_static("color.invert"),
             EffectKind::MaskShapeGen => EffectId::new_static("util.mask_shape"),
+            EffectKind::Deflicker => EffectId::new_static("color.deflicker"),
             EffectKind::Unknown(tag) => EffectId::new(tag.as_str().to_string()),
         }
     }
@@ -87,9 +95,31 @@ impl EffectParams {
         Self::default()
     }
 
-    /// Seed a param bag from a target kind's registry block, using neutral
-    /// defaults (0 / center-of-range for floats, transparent for colors).
+    /// Seed a param bag for a target kind.
+    ///
+    /// When the kind is an effect with a manifest, the manifest's declared
+    /// defaults win — it is the single source of truth for an effect's data
+    /// (30 §2), and seeding from anywhere else lets the two tables drift. The
+    /// registry's neutral rule (0 / range-min for floats, transparent for
+    /// colours) remains the fallback for non-effect targets and for any kind
+    /// with no manifest.
+    ///
+    /// This is behaviour-preserving for the v1 kinds, whose manifest defaults
+    /// are all the neutral values already; it exists so an effect whose sensible
+    /// default is *not* neutral (deflicker's strength, for instance — seeding it
+    /// to 0 would add an effect that does nothing) can say so in one place.
     pub fn seed(kind: PropTargetKind) -> Self {
+        if let PropTargetKind::Effect(e) = kind {
+            if let Some(m) = super::effect_manifest::manifest(e.effect_id()) {
+                return EffectParams {
+                    entries: m
+                        .params
+                        .iter()
+                        .map(|spec| (PropPath::new(spec.path), spec.default))
+                        .collect(),
+                };
+            }
+        }
         let mut entries = Vec::new();
         for e in prop_registry::entries(kind) {
             let value = match e.kind {

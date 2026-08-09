@@ -7,7 +7,8 @@
 //! - [`prefetch`] — v1 ring pumping for active sources (cut-ahead is a
 //!   documented seam).
 //! - [`policy`] — documented prefill / drop-recovery knobs (32 §4 / E-5).
-//! - [`pcm`] — [`FfmpegPcmSource`](pcm::FfmpegPcmSource), the mixer's
+//! - [`pcm`] — [`FfmpegPcmSource`](pcm::FfmpegPcmSource) and
+//!   [`TimeWarpPcmSource`](pcm::TimeWarpPcmSource), the mixer's
 //!   [`PcmSource`](crate::audio::PcmSource) over an ffmpeg `-f f32le` sidecar
 //!   pipe (documented seam: moves into `decode/` when the parallel PCM pipe
 //!   story lands there).
@@ -22,5 +23,5 @@ pub mod prefetch;
 
 pub use clock::PlaybackClock;
 pub use controller::{FramePresenter, PlaybackController, PresentDecision};
-pub use pcm::FfmpegPcmSource;
+pub use pcm::{FfmpegPcmSource, TimeWarpPcmSource};
 pub use policy::PlaybackPolicy;

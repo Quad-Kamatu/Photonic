@@ -16,7 +16,7 @@ use super::anim::{AnimProps, Interp, Keyframe, KeyframeClipboard, PropPath, Prop
 use super::audio::ClipAudio;
 use super::clip::{
     Clip, ClipEffect, ClipSource, ClipTransform, LinkGroupId, MulticamAngle, MulticamGroup, Ratio,
-    SpeedMap, TextClipContent,
+    SpeedKey, SpeedMap, TextClipContent,
 };
 use super::commands::{
     AnimTarget, AudioCmd, ClipTiming, FormatOp, FxOwner, TimelineCmd, TrackSettings, VfxOwner,
@@ -68,6 +68,10 @@ pub enum EditError {
     /// Manifest `Applicability` forbids attaching this effect to the chosen
     /// scope (clip / track / master / asset). K-B1 residual.
     ApplicabilityDenied,
+    /// A speed map has invalid key timing, ratios, or Bezier handles.
+    InvalidSpeedMap,
+    /// The addressed track is edit-locked.
+    TrackLocked,
 }
 
 impl std::fmt::Display for EditError {
@@ -1804,14 +1808,21 @@ pub fn set_clip_prop(
     p: &TimelineProject,
     id: SequenceId,
     track_id: TrackId,
-    new: Clip,
+    mut new: Clip,
 ) -> Result<TimelineCmd, EditError> {
     let s = seq(p, id)?;
     let t = track(s, track_id)?;
     let old = clip(t, new.id)?.clone();
+    if t.locked {
+        return Err(EditError::TrackLocked);
+    }
     if new.duration.0 <= 0 {
         return Err(EditError::NonPositiveDuration);
     }
+    new.speed.normalize();
+    new.speed
+        .validate_for_duration(new.duration)
+        .map_err(|_| EditError::InvalidSpeedMap)?;
     if overlaps_other(t, new.start, new.end(), Some(new.id)) {
         return Err(EditError::Overlap);
     }
@@ -1821,6 +1832,111 @@ pub fn set_clip_prop(
         old: Box::new(old),
         new: Box::new(new),
     })
+}
+
+/// Replace one clip's complete speed map with validation and undo support.
+pub fn set_speed_map(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    speed: SpeedMap,
+) -> Result<TimelineCmd, EditError> {
+    let mut new = clip(track(seq(p, id)?, track_id)?, clip_id)?.clone();
+    new.speed = speed;
+    set_clip_prop(p, id, track_id, new)
+}
+
+/// Insert or replace a speed key at its clip-relative tick.
+pub fn upsert_speed_key(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    key: SpeedKey,
+) -> Result<TimelineCmd, EditError> {
+    let current = clip(track(seq(p, id)?, track_id)?, clip_id)?;
+    let mut keys = match &current.speed {
+        SpeedMap::Constant(ratio) => vec![SpeedKey::new(Tick::ZERO, *ratio)],
+        SpeedMap::Keyframed { keys } => keys.clone(),
+    };
+    if let Some(existing) = keys.iter_mut().find(|existing| existing.at == key.at) {
+        *existing = key;
+    } else {
+        keys.push(key);
+    }
+    keys.sort_by_key(|entry| entry.at.0);
+    set_speed_map(p, id, track_id, clip_id, SpeedMap::Keyframed { keys })
+}
+
+/// Move an existing speed key to a unique tick and replace its ratio.
+pub fn move_speed_key(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    old_at: Tick,
+    new_at: Tick,
+    ratio: Ratio,
+) -> Result<TimelineCmd, EditError> {
+    let current = clip(track(seq(p, id)?, track_id)?, clip_id)?;
+    let SpeedMap::Keyframed { keys } = &current.speed else {
+        return Err(EditError::InvalidSpeedMap);
+    };
+    let mut keys = keys.clone();
+    let Some(index) = keys.iter().position(|key| key.at == old_at) else {
+        return Err(EditError::InvalidSpeedMap);
+    };
+    if new_at != old_at && keys.iter().any(|key| key.at == new_at) {
+        return Err(EditError::InvalidSpeedMap);
+    }
+    keys[index].at = new_at;
+    keys[index].ratio = ratio;
+    keys.sort_by_key(|entry| entry.at.0);
+    set_speed_map(p, id, track_id, clip_id, SpeedMap::Keyframed { keys })
+}
+
+/// Remove a speed key, preserving a keyframed map so callers can explicitly
+/// distinguish an empty curve from constant speed until they choose to clean it.
+pub fn remove_speed_key(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    at: Tick,
+) -> Result<TimelineCmd, EditError> {
+    let current = clip(track(seq(p, id)?, track_id)?, clip_id)?;
+    let SpeedMap::Keyframed { keys } = &current.speed else {
+        return Err(EditError::InvalidSpeedMap);
+    };
+    let mut keys = keys.clone();
+    let before = keys.len();
+    keys.retain(|key| key.at != at);
+    if keys.len() == before {
+        return Err(EditError::InvalidSpeedMap);
+    }
+    set_speed_map(p, id, track_id, clip_id, SpeedMap::Keyframed { keys })
+}
+
+/// Change the interpolation leaving a speed key.
+pub fn set_speed_key_interp(
+    p: &TimelineProject,
+    id: SequenceId,
+    track_id: TrackId,
+    clip_id: ClipId,
+    at: Tick,
+    interp: Interp,
+) -> Result<TimelineCmd, EditError> {
+    let current = clip(track(seq(p, id)?, track_id)?, clip_id)?;
+    let SpeedMap::Keyframed { keys } = &current.speed else {
+        return Err(EditError::InvalidSpeedMap);
+    };
+    let mut keys = keys.clone();
+    let Some(key) = keys.iter_mut().find(|key| key.at == at) else {
+        return Err(EditError::InvalidSpeedMap);
+    };
+    key.interp = interp;
+    set_speed_map(p, id, track_id, clip_id, SpeedMap::Keyframed { keys })
 }
 
 /// **Replace With Clip / Replace Edit** (G-5, Premiere): swap a clip's SOURCE

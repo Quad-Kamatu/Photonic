@@ -15,7 +15,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-use photonic_core::timeline::Tick;
+use photonic_core::timeline::{SpeedMap, Tick, TICKS_PER_SECOND};
 
 use crate::audio::mixer::PcmSource;
 use crate::media::ffmpeg_locate::FfmpegTools;
@@ -29,6 +29,113 @@ pub struct FfmpegPcmSource {
     buf: Vec<u8>,
     /// End-of-stream reached; subsequent reads return 0 frames.
     finished: bool,
+}
+
+/// A seekable, in-memory PCM source evaluated through a clip [`SpeedMap`].
+///
+/// It is intentionally independent of ffmpeg so preview and export can share
+/// identical interpolation. The owner decides how PCM is cached or decoded;
+/// this type only turns output timeline samples into source positions.
+pub struct TimeWarpPcmSource {
+    pcm: Vec<f32>,
+    sample_rate: u32,
+    source_start: Tick,
+    source_in: Tick,
+    offset: Tick,
+    speed: SpeedMap,
+    elapsed_ticks: f64,
+}
+
+/// Decode at most `frames` from a sequential PCM source into a reusable
+/// seekable window. Short sources simply return the frames available.
+pub fn read_pcm_window(source: &mut dyn PcmSource, frames: usize) -> Vec<f32> {
+    let channels = source.channels() as usize;
+    let mut pcm = Vec::with_capacity(frames.saturating_mul(channels));
+    let mut scratch = vec![0.0; 4096usize.saturating_mul(channels)];
+    while pcm.len() / channels < frames {
+        let remaining = frames - pcm.len() / channels;
+        let requested = remaining.min(4096);
+        let read = source.read(&mut scratch[..requested * channels], requested);
+        if read == 0 {
+            break;
+        }
+        pcm.extend_from_slice(&scratch[..read * channels]);
+        if read < requested {
+            break;
+        }
+    }
+    pcm
+}
+
+impl TimeWarpPcmSource {
+    /// Construct a retimed source from interleaved stereo PCM at `sample_rate`.
+    pub fn new(
+        pcm: Vec<f32>,
+        sample_rate: u32,
+        source_start: Tick,
+        source_in: Tick,
+        offset: Tick,
+        speed: SpeedMap,
+        elapsed: Tick,
+    ) -> Self {
+        Self {
+            pcm,
+            sample_rate: sample_rate.max(1),
+            source_start,
+            source_in,
+            offset,
+            speed,
+            elapsed_ticks: elapsed.0 as f64,
+        }
+    }
+
+    fn sample_at(&self, source_frame: f64, channel: usize) -> f32 {
+        if source_frame < 0.0 {
+            return 0.0;
+        }
+        let first = source_frame.floor() as usize;
+        let last_frame = self.pcm.len() / 2;
+        if first >= last_frame {
+            return 0.0;
+        }
+        let next = (first + 1).min(last_frame.saturating_sub(1));
+        let fraction = (source_frame - first as f64) as f32;
+        let a = self.pcm[first * 2 + channel];
+        let b = self.pcm[next * 2 + channel];
+        a + (b - a) * fraction
+    }
+}
+
+impl PcmSource for TimeWarpPcmSource {
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn read(&mut self, out: &mut [f32], frames: usize) -> usize {
+        let frames = frames.min(out.len() / 2);
+        let ticks_per_sample = TICKS_PER_SECOND as f64 / self.sample_rate as f64;
+        for frame in 0..frames {
+            let elapsed = Tick(self.elapsed_ticks.round() as i64);
+            if self.speed.ratio_at_f64(elapsed).abs() > f64::EPSILON {
+                let source_tick = self.source_in.0 as f64 - self.offset.0 as f64
+                    + self.speed.source_delta_f64(elapsed);
+                let source_frame = (source_tick - self.source_start.0 as f64)
+                    * self.sample_rate as f64
+                    / TICKS_PER_SECOND as f64;
+                out[frame * 2] = self.sample_at(source_frame, 0);
+                out[frame * 2 + 1] = self.sample_at(source_frame, 1);
+            } else {
+                out[frame * 2] = 0.0;
+                out[frame * 2 + 1] = 0.0;
+            }
+            self.elapsed_ticks += ticks_per_sample;
+        }
+        frames
+    }
 }
 
 impl FfmpegPcmSource {
@@ -179,6 +286,8 @@ impl Drop for FfmpegPcmSource {
 mod tests {
     use super::*;
     use crate::media::ffmpeg_locate::locate_for_test;
+    use photonic_core::timeline::clip::SpeedKey;
+    use photonic_core::timeline::{Ratio, SpeedMap};
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -250,5 +359,43 @@ mod tests {
         let on = rms(48_000..48_048); // t=1.0s..+1ms: beep
         assert!(off < 1e-3, "off-beep window ~silent (rms {off})");
         assert!(on > 0.05, "beep window has energy (rms {on})");
+    }
+
+    #[test]
+    fn time_warp_reads_reverse_source_samples() {
+        let pcm: Vec<f32> = (0..8)
+            .flat_map(|sample| [sample as f32, sample as f32])
+            .collect();
+        let mut source = TimeWarpPcmSource::new(
+            pcm,
+            TICKS_PER_SECOND as u32,
+            Tick::ZERO,
+            Tick(5),
+            Tick::ZERO,
+            SpeedMap::Constant(Ratio::new(-1, 1)),
+            Tick::ZERO,
+        );
+        let mut out = [0.0; 6];
+        source.read(&mut out, 3);
+        assert_eq!(out, [5.0, 5.0, 4.0, 4.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn time_warp_silences_zero_rate_interval() {
+        let pcm = vec![1.0; 16];
+        let mut source = TimeWarpPcmSource::new(
+            pcm,
+            TICKS_PER_SECOND as u32,
+            Tick::ZERO,
+            Tick::ZERO,
+            Tick::ZERO,
+            SpeedMap::Keyframed {
+                keys: vec![SpeedKey::new(Tick::ZERO, Ratio::new(0, 1))],
+            },
+            Tick::ZERO,
+        );
+        let mut out = [1.0; 4];
+        source.read(&mut out, 2);
+        assert_eq!(out, [0.0; 4]);
     }
 }
