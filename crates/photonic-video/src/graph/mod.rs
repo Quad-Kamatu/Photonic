@@ -27,6 +27,9 @@ pub mod panorama_gpu;
 pub mod raster_bridge;
 pub mod rolling_bands;
 pub mod source_range;
+/// D-12 gyro-metadata stabilization analysis: bias, integration, smoothing,
+/// horizon lock, lens model and crop solving (22 §6.4).
+pub mod stabilize;
 
 pub use source_range::{
     exceeds_soft_cap, graph_source_range, source_range_for_op, FrameRange, SOURCE_RANGE_SOFT_CAP,
