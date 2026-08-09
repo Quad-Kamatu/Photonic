@@ -105,6 +105,38 @@ pub enum MotionError {
     /// gyro data" rather than "this file is corrupt".
     #[error("no gyro/IMU track found in this media file")]
     NoMotionTrack,
+    /// The container carries telemetry, but at a rate far too low to be an IMU
+    /// stream — a flight log (GPS, altitude, exposure), not angular velocity.
+    ///
+    /// Separate from [`MotionError::NoMotionTrack`] because the two need
+    /// opposite responses from the user, and because "no track found" is
+    /// actively misleading when the file visibly *has* a telemetry track. A
+    /// consumer drone recording a 1 Hz flight log is the single most common
+    /// reason gyro stabilization is impossible for a given clip.
+    #[error(
+        "this clip carries a {hz:.1} Hz telemetry track ({samples} samples over {duration_s:.0}s) \
+         — a flight log, not gyro. Stabilization needs angular velocity at hundreds of Hz. \
+         Re-record with in-camera stabilization (RockSteady/HorizonSteady) OFF on a camera that \
+         logs IMU data, copy the original off the SD card without re-encoding, or supply a \
+         .gcsv sidecar."
+    )]
+    LowRateTelemetryOnly {
+        hz: f64,
+        samples: u64,
+        duration_s: f64,
+    },
+    /// The file was written by a re-encoder, so any telemetry the camera
+    /// recorded has already been stripped.
+    ///
+    /// Worth its own variant because it is *recoverable*: the original still
+    /// exists somewhere, and telling the user that is far more useful than
+    /// telling them this copy is empty.
+    #[error(
+        "this file was re-encoded by {writer} and no longer carries camera telemetry. \
+         Gyro data does not survive transcoding — use the original file straight off \
+         the camera's SD card."
+    )]
+    ReencodedCopy { writer: String },
     #[error("{0}")]
     Unimplemented(&'static str),
 }
@@ -683,20 +715,104 @@ impl MotionMetadataAdapter for GcsvAdapter {
 
 // ── embedded-container dialects ─────────────────────────────────────────────
 
-/// Placeholder for container-embedded telemetry (e.g. a camera's private MP4
-/// box).
+/// Container-embedded telemetry (e.g. a camera's private MP4 track).
 ///
-/// Deliberately inert. 23 §9.1 requires a dependency audit of any binary
-/// telemetry parser (and of its git-sourced transitive dependencies) *before*
-/// the dependency is added, and 23 §14's D-12 disposition leaves that box
-/// unchecked. Until it clears, this adapter reports "no motion track" rather
-/// than silently succeeding or half-parsing a format it cannot verify.
+/// **Extraction is not implemented.** 23 §9.1 requires a dependency audit of any
+/// binary telemetry parser — and of its git-sourced transitive dependencies —
+/// *before* the dependency is added, and 23 §14's D-12 disposition leaves that
+/// box unchecked.
 ///
-/// It is not dead weight: it makes the dispatch path total, gives the GUI a
-/// real diagnostic for the overwhelmingly common case of a re-encoded file
-/// whose telemetry was stripped, and marks exactly where the audited adapter
-/// lands.
+/// What this adapter does instead is *diagnose*, and that turns out to matter
+/// more than it sounds. The overwhelmingly common reason a clip cannot be
+/// gyro-stabilized is not a parser gap; it is that the file never carried IMU
+/// data in the first place — either because a consumer drone logged only a
+/// ~1 Hz flight record, or because the copy in hand is a re-encode that dropped
+/// the camera's telemetry. Both are recoverable situations, and both are
+/// indistinguishable from "unsupported format" unless someone looks. So this
+/// adapter looks, using the `ffprobe` the media pipeline already depends on,
+/// and says which case it is.
 pub struct EmbeddedContainerAdapter;
+
+/// Below this rate a telemetry track is a flight log, not an IMU stream.
+///
+/// Real gyro runs at hundreds of Hz — 200 Hz is a low-end action cam, 8 kHz a
+/// flight controller. Consumer drones log position/exposure at 1 Hz. Anything
+/// under 50 Hz cannot resolve the motion stabilization exists to cancel, so
+/// treating it as gyro would produce confident nonsense rather than a failure.
+const MIN_GYRO_RATE_HZ: f64 = 50.0;
+
+impl EmbeddedContainerAdapter {
+    /// Ask `ffprobe` what non-media tracks this container carries.
+    ///
+    /// Returns `None` when ffprobe is unavailable or fails — in which case the
+    /// caller falls back to the plain "no motion track" answer rather than
+    /// inventing a diagnosis it cannot support.
+    fn inspect(source: &Path) -> Option<ContainerTelemetry> {
+        let tools = super::ffmpeg_locate::locate().ok()?;
+        let out = std::process::Command::new(&tools.ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+            ])
+            .arg(source)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+
+        let duration_s = v
+            .get("format")
+            .and_then(|f| f.get("duration"))
+            .and_then(|d| d.as_str())
+            .and_then(|d| d.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
+        // `encoder` is written by libavformat and friends; a camera original
+        // has no such tag. This is the reliable "someone transcoded this" tell.
+        let writer = v
+            .get("format")
+            .and_then(|f| f.get("tags"))
+            .and_then(|t| t.get("encoder"))
+            .and_then(|e| e.as_str())
+            .map(str::to_string);
+
+        // Widest sample count across any data/subtitle track: those are where
+        // cameras park telemetry, and we want the fastest one.
+        let mut samples = 0u64;
+        if let Some(streams) = v.get("streams").and_then(|s| s.as_array()) {
+            for s in streams {
+                let kind = s.get("codec_type").and_then(|c| c.as_str()).unwrap_or("");
+                if kind != "data" && kind != "subtitle" {
+                    continue;
+                }
+                let n = s
+                    .get("nb_frames")
+                    .and_then(|n| n.as_str())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                samples = samples.max(n);
+            }
+        }
+        Some(ContainerTelemetry {
+            duration_s,
+            samples,
+            writer,
+        })
+    }
+}
+
+/// What [`EmbeddedContainerAdapter::inspect`] found.
+struct ContainerTelemetry {
+    duration_s: f64,
+    samples: u64,
+    writer: Option<String>,
+}
 
 impl MotionMetadataAdapter for EmbeddedContainerAdapter {
     fn name(&self) -> &'static str {
@@ -719,7 +835,43 @@ impl MotionMetadataAdapter for EmbeddedContainerAdapter {
         }
     }
 
-    fn parse(&self, _source: &Path) -> Result<MotionSeries, MotionError> {
+    fn parse(&self, source: &Path) -> Result<MotionSeries, MotionError> {
+        let Some(t) = Self::inspect(source) else {
+            return Err(MotionError::NoMotionTrack);
+        };
+
+        let rate = if t.duration_s > 0.0 {
+            t.samples as f64 / t.duration_s
+        } else {
+            0.0
+        };
+
+        // Order matters. A re-encode is reported first even if it happens to
+        // retain a subtitle track, because "your copy is derived" is the
+        // actionable fact — the original may still have everything.
+        if let Some(writer) = t.writer {
+            if rate < MIN_GYRO_RATE_HZ {
+                return Err(MotionError::ReencodedCopy { writer });
+            }
+        }
+        if t.samples > 0 && rate < MIN_GYRO_RATE_HZ {
+            return Err(MotionError::LowRateTelemetryOnly {
+                hz: rate,
+                samples: t.samples,
+                duration_s: t.duration_s,
+            });
+        }
+        // A high-rate track may well be real IMU data — but extracting it needs
+        // the 23 §9.1 parser gate, so say that plainly rather than pretending
+        // the file is empty.
+        if t.samples > 0 {
+            return Err(MotionError::Unimplemented(
+                "this clip carries a high-rate telemetry track that may contain gyro data, \
+                 but container telemetry extraction is not enabled in this build \
+                 (pending the 23 §9.1 parser dependency audit). Export a .gcsv sidecar \
+                 and import that instead.",
+            ));
+        }
         Err(MotionError::NoMotionTrack)
     }
 }

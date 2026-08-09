@@ -653,7 +653,6 @@ impl<'a> Builder<'a> {
     fn resolved_stabilize_warp(
         &self,
         clip: &Clip,
-        format: &SequenceFormat,
         dt: Tick,
     ) -> Option<crate::graph::ir::StabilizeWarp> {
         let spec = clip.stabilization.as_ref()?;
@@ -1475,7 +1474,7 @@ fn build_clip_chain(
     // zero-strength recipe leaves the source path untouched rather than paying
     // for a pass that resamples to no effect (22 §6.5 — removing stabilization
     // restores the source path).
-    if let Some(warp) = b.resolved_stabilize_warp(clip, format, dt) {
+    if let Some(warp) = b.resolved_stabilize_warp(clip, dt) {
         if warp.is_identity() {
             // Nothing to do; skip the pass entirely.
         } else {

@@ -279,32 +279,79 @@ fn proxy_and_full_resolution_agree_geometrically() {
 
 /// Real-footage adversarial smoke test.
 ///
-/// The clips on this machine are DJI originals carrying a `priv` data track
-/// and a telemetry subtitle track — but the payload is a ~1 Hz flight log
-/// (GPS, altitude, exposure), not an IMU stream. The adapter must refuse it
-/// with "no motion track" rather than misreading a position log as angular
-/// velocity, which is precisely the "hard fail, never guess" rule of 22 §6.6
-/// under real adversarial input.
+/// These are genuine DJI SD-card originals: no `encoder` tag, a `priv` data
+/// track and a telemetry subtitle track. But the payload runs at ~1.0 Hz
+/// (measured: 53 samples over 52 s on DJI_0014) — a flight log of GPS,
+/// altitude and exposure, not angular velocity. A recursive box walk finds no
+/// `uuid` box either, so there is no hidden IMU payload.
 ///
-/// Skips when the sample is absent, so CI on another machine stays green.
+/// The adapter must therefore refuse — and refuse *specifically*, naming the
+/// rate. "No motion track" would be actively misleading for a file that
+/// visibly has a telemetry track, and is what sends someone hunting for a
+/// software bug that isn't there.
+///
+/// Skips when the samples are absent, so CI elsewhere stays green.
 #[test]
-fn dji_flight_log_is_not_mistaken_for_gyro_data() {
+fn dji_flight_log_is_diagnosed_not_mistaken_for_gyro() {
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let candidates = [
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join("Videos/DJI_0014.MP4"),
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join("Videos/DJI_0010.MP4"),
+        home.join("Videos/DJI_0014.MP4"),
+        home.join("Videos/DJI_0010.MP4"),
+        home.join("Videos/DJI_0008.MP4"),
     ];
     let Some(path) = candidates.iter().find(|p| p.is_file()) else {
-        eprintln!("skipping: no DJI sample on this machine");
+        eprintln!("skipping: no DJI original on this machine");
         return;
     };
     match photonic_video::media::parse_motion(path) {
+        Err(photonic_video::media::MotionError::LowRateTelemetryOnly { hz, samples, .. }) => {
+            assert!(hz < 50.0, "a flight log must be reported as low-rate, got {hz} Hz");
+            assert!(samples > 0, "the diagnostic must name the sample count it saw");
+        }
+        // Acceptable when ffprobe is unavailable: the adapter falls back rather
+        // than inventing a diagnosis it cannot support.
         Err(photonic_video::media::MotionError::NoMotionTrack) => {}
-        Err(other) => panic!("expected NoMotionTrack, got {other:?}"),
+        Err(other) => panic!("expected a low-rate telemetry diagnosis, got {other:?}"),
         Ok(series) => panic!(
             "adapter claimed {} gyro samples from a 1 Hz flight log — it must refuse, not guess",
             series.samples.len()
         ),
+    }
+}
+
+/// A transcoded copy must be reported as *derived*, not as empty.
+///
+/// Every DJI file in this machine's Downloads is an FFmpeg re-encode carrying
+/// `encoder=Lavf...`; the camera telemetry did not survive. Saying "no gyro
+/// data here" is true but useless, because the original still has it. Saying
+/// "this is a re-encode, go get the original" is the fact that helps.
+#[test]
+fn reencoded_copy_is_reported_as_recoverable() {
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let dl = home.join("Downloads");
+    let Ok(entries) = std::fs::read_dir(&dl) else {
+        eprintln!("skipping: no Downloads directory");
+        return;
+    };
+    let Some(path) = entries
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("dji_fly_"))
+        })
+    else {
+        eprintln!("skipping: no transcoded DJI sample present");
+        return;
+    };
+    match photonic_video::media::parse_motion(&path) {
+        Err(photonic_video::media::MotionError::ReencodedCopy { writer }) => {
+            assert!(!writer.is_empty(), "the diagnostic must name the writer");
+        }
+        Err(photonic_video::media::MotionError::NoMotionTrack) => {} // ffprobe unavailable
+        Err(other) => panic!("expected ReencodedCopy, got {other:?}"),
+        Ok(_) => panic!("a re-encoded copy cannot contain gyro data"),
     }
 }
