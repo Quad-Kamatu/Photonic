@@ -412,6 +412,121 @@ fn sampling_cpu_gpu_parity() {
     }
 }
 
+// ── StabilizeWarp (D-12) ────────────────────────────────────────────────────────
+
+/// D-12 gyro-stabilization warp parity (22 §6.7: "CPU/GPU warp goldens pass on
+/// grid/lens fixtures").
+///
+/// Note for future maintainers: unlike the enum-driven cases above, adding an
+/// `IrOp` variant does **not** fail this file to compile — the exhaustive
+/// matches here are over *parameter* enums (`Sampling`, `BlendMode`, …), not
+/// over `IrOp`. A new op needs its parity case added deliberately, as this one
+/// was.
+///
+/// Both lens models are covered because they exercise genuinely different
+/// shader paths: the pinhole branch is a few multiplies, the fisheye branch
+/// runs a fixed-count Newton inversion whose `f32` behaviour is the most likely
+/// place for CPU and GPU to diverge.
+#[test]
+fn stabilize_warp_cpu_gpu_parity() {
+    use photonic_video::graph::ir::StabilizeWarp;
+
+    let Some(gpu) = gpu_or_skip("StabilizeWarp parity") else {
+        return;
+    };
+    let image = patterned_image(CANVAS.0, CANVAS.1);
+    let (w, h) = (CANVAS.0 as f32, CANVAS.1 as f32);
+
+    // A rotation big enough to move real pixels around, about all three axes so
+    // no term of the matrix is left untested.
+    let q = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.04, 0.07, 0.03);
+    let m = glam::Mat3::from_quat(q);
+    let rotation = [
+        m.x_axis.x, m.y_axis.x, m.z_axis.x,
+        m.x_axis.y, m.y_axis.y, m.z_axis.y,
+        m.x_axis.z, m.y_axis.z, m.z_axis.z,
+    ];
+
+    let cases = [
+        (
+            "pinhole",
+            StabilizeWarp {
+                rotation,
+                zoom: 1.15,
+                intrinsics: [w * 0.5, w * 0.5, w * 0.5, h * 0.5],
+                k: [0.0; 4],
+                fisheye: false,
+                transparent_edges: false,
+            },
+        ),
+        (
+            "fisheye",
+            StabilizeWarp {
+                rotation,
+                zoom: 1.15,
+                intrinsics: [w * 0.45, w * 0.45, w * 0.5, h * 0.5],
+                k: [0.02, -0.004, 0.0007, -0.00005],
+                fisheye: true,
+                transparent_edges: false,
+            },
+        ),
+        (
+            "transparent-edges",
+            StabilizeWarp {
+                rotation,
+                zoom: 1.0, // no crop, so edges really are exposed
+                intrinsics: [w * 0.5, w * 0.5, w * 0.5, h * 0.5],
+                k: [0.0; 4],
+                fisheye: false,
+                transparent_edges: true,
+            },
+        ),
+    ];
+
+    for (label, warp) in cases {
+        for sampling in ALL_SAMPLING {
+            let graph = FrameGraph {
+                nodes: vec![
+                    IrNode {
+                        op: IrOp::DecodeStill {
+                            asset: AssetId::new(),
+                        },
+                        inputs: vec![],
+                        content_hash: ContentHash(40),
+                    },
+                    IrNode {
+                        op: IrOp::StabilizeWarp { warp, sampling },
+                        inputs: vec![(IrNodeId(0), OutPort::default())],
+                        content_hash: ContentHash(41),
+                    },
+                ],
+                output: Some(IrNodeId(1)),
+            };
+            let cpu = eval_cpu::evaluate(
+                &graph,
+                CANVAS,
+                &mut PatternCpuSource {
+                    image: image.clone(),
+                },
+            );
+            let mut src = PatternGpuSource {
+                frame: GpuFrame::new(upload_pattern(&gpu, &image), image.width, image.height),
+            };
+            let g = eval_gpu(&gpu, &graph, &mut src);
+            // Resampling tier (11 §1.2): PSNR, not the 1e-3 algebraic bound.
+            let metric = measure(&cpu, &g).expect("measurable");
+            assert!(
+                metric.psnr_db >= 35.0,
+                "stabilize/{}/{}: PSNR {:.2} dB < 35 (max_abs {:.5})",
+                label,
+                sampling_label(sampling),
+                metric.psnr_db,
+                metric.max_abs
+            );
+        }
+    }
+}
+
 // ── FitMode (Resize) ────────────────────────────────────────────────────────────
 
 const ALL_FIT_MODES: [FitMode; 3] = [FitMode::Fit, FitMode::Fill, FitMode::Stretch];

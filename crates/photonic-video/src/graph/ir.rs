@@ -135,6 +135,9 @@ pub fn threading_for_op(op: &IrOp) -> Threading {
         // Pure pixel transforms and generators.
         IrOp::SolidColor { .. }
         | IrOp::Transform2D { .. }
+        // Pure per-pixel resample from fully-resolved params; no state, no
+        // neighbouring frames.
+        | IrOp::StabilizeWarp { .. }
         | IrOp::Effect { .. }
         | IrOp::Grade { .. }
         | IrOp::Merge { .. }
@@ -174,6 +177,79 @@ pub enum WipeDirection {
     BottomToTop,
 }
 
+/// Fully-resolved parameters for one frame's stabilization warp (22 §6.4).
+///
+/// Everything here is already reduced to numbers for the current tick, so the
+/// evaluator never touches the motion series, the recipe, or the analysis
+/// cache — which is what lets the warp be [`Threading::Any`] and lets the CPU
+/// reference and the WGSL twin consume byte-identical inputs.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct StabilizeWarp {
+    /// Row-major 3×3: a ray in the virtual (stabilized) camera to the same ray
+    /// in the real camera that captured this frame.
+    pub rotation: [f32; 9],
+    /// Zoom about the frame centre, `>= 1.0`, hiding the edges the rotation
+    /// swings out of frame.
+    pub zoom: f32,
+    /// Source intrinsics `[fx, fy, cx, cy]` in pixels **at this frame's
+    /// resolution**, already rescaled from the profile's calibration size.
+    pub intrinsics: [f32; 4],
+    /// Kannala-Brandt radial coefficients `k1..k4`; all zero for a pinhole.
+    pub k: [f32; 4],
+    /// True for the fisheye projection, false for rectilinear.
+    pub fisheye: bool,
+    /// Leave uncovered pixels transparent instead of clamping to the source
+    /// edge — [`StabilizationCropMode::TransparentEdges`].
+    ///
+    /// [`StabilizationCropMode::TransparentEdges`]: photonic_core::timeline::StabilizationCropMode::TransparentEdges
+    pub transparent_edges: bool,
+}
+
+impl StabilizeWarp {
+    /// The do-nothing warp for a frame of `width`×`height`.
+    pub fn identity(width: f32, height: f32) -> Self {
+        StabilizeWarp {
+            rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            zoom: 1.0,
+            // A 90°-ish pinhole; irrelevant while the rotation is identity,
+            // since unprojection and reprojection cancel exactly.
+            intrinsics: [width * 0.5, width * 0.5, width * 0.5, height * 0.5],
+            k: [0.0; 4],
+            fisheye: false,
+            transparent_edges: false,
+        }
+    }
+
+    /// True when this warp would leave the image untouched, so the compiler can
+    /// skip emitting the pass entirely.
+    pub fn is_identity(&self) -> bool {
+        const I: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        self.zoom == 1.0
+            && self
+                .rotation
+                .iter()
+                .zip(I.iter())
+                .all(|(a, b)| (a - b).abs() < 1e-7)
+    }
+
+    /// False when a parameter would make the warp undefined — non-finite
+    /// values, a non-positive focal length, or a zoom that shrinks.
+    ///
+    /// The counterpart of [`transform_matrix_is_valid`] for this op: an invalid
+    /// warp renders transparent rather than sampling undefined coordinates.
+    ///
+    /// [`transform_matrix_is_valid`]: super::ops::transform_matrix_is_valid
+    pub fn is_valid(&self) -> bool {
+        self.rotation.iter().all(|v| v.is_finite())
+            && self.intrinsics.iter().all(|v| v.is_finite())
+            && self.k.iter().all(|v| v.is_finite())
+            && self.zoom.is_finite()
+            && self.zoom >= 1.0
+            && self.intrinsics[0] > 0.0
+            && self.intrinsics[1] > 0.0
+    }
+}
+
 /// One frame-graph operation. Each op is one wgpu render/compute pass (or a
 /// CPU worker-thread op where noted), with a CPU `eval_cpu` reference
 /// implementation for export determinism and golden tests (02 §2).
@@ -207,6 +283,22 @@ pub enum IrOp {
     // ── ops (unary unless stated) ──────────────────────────────────────────
     Transform2D {
         mat: Mat3,
+        sampling: Sampling,
+    },
+    /// D-12 gyro stabilization warp (22 §6.4): undistort each output pixel to a
+    /// calibrated ray, rotate it into the real camera's frame, reproject, and
+    /// resample.
+    ///
+    /// Sits **beneath** [`IrOp::Transform2D`] in the clip chain, matching the
+    /// render order 22 §6.4 fixes: lens undistort, orientation warp, resample
+    /// source, *then* the ordinary clip transform, effects and grade. It
+    /// corrects what the camera did; the clip transform is what the editor
+    /// chose, and the two must not be conflated.
+    ///
+    /// Params are fully resolved for the current tick by the compiler — the
+    /// evaluator stays time-ignorant.
+    StabilizeWarp {
+        warp: StabilizeWarp,
         sampling: Sampling,
     },
     /// Effect pass; arity 0..N comes from the `EffectKind` registry entry

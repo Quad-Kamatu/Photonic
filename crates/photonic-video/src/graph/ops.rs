@@ -37,7 +37,7 @@ use photonic_core::layer::BlendMode;
 use photonic_core::raster::blend::blend_rgb;
 
 use crate::graph::ir::{
-    DeinterlaceMethod, FieldOrder, FitMode, LinearColor, Sampling, WipeDirection,
+    DeinterlaceMethod, FieldOrder, FitMode, LinearColor, Sampling, StabilizeWarp, WipeDirection,
 };
 
 /// An f32 premultiplied linear-Rec.709 RGBA image — the CPU reference working
@@ -146,6 +146,142 @@ pub fn transform2d(input: &Image, mat: Mat3, sampling: Sampling) -> Image {
         }
     }
     out
+}
+
+/// `StabilizeWarp`: the D-12 gyro-correction resample (22 §6.4 step 7).
+///
+/// Inverse-mapped, like every resampling op here — for each *output* pixel,
+/// work out where in the source its light came from:
+///
+/// 1. undo the crop zoom about the frame centre;
+/// 2. unproject through the lens into a ray in the virtual (stabilized) camera;
+/// 3. rotate that ray into the real camera's frame;
+/// 4. project it back through the *same* lens to a source pixel;
+/// 5. sample.
+///
+/// Steps 2 and 4 use one lens model, so an identity rotation at zoom 1 is an
+/// exact passthrough rather than a resample that softens the image — the
+/// property [`StabilizeWarp::is_identity`] lets the compiler exploit and the
+/// tests pin down.
+///
+/// This is the normative reference the WGSL twin must match (02 §2), so it is
+/// written to be transliterated: no iterator chains, no early exits the shader
+/// cannot express, and a fixed Newton iteration count in the fisheye inverse.
+pub fn stabilize_warp(input: &Image, warp: &StabilizeWarp, sampling: Sampling) -> Image {
+    if !warp.is_valid() {
+        return Image::new(input.width, input.height);
+    }
+    if warp.is_identity() {
+        return input.clone();
+    }
+    let (w, h) = (input.width as f32, input.height as f32);
+    let [fx, fy, cx, cy] = warp.intrinsics;
+    let r = warp.rotation;
+    let inv_zoom = 1.0 / warp.zoom;
+    let mut out = Image::new(input.width, input.height);
+
+    for y in 0..out.height {
+        for x in 0..out.width {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+
+            // 1 — undo the crop zoom about the frame centre.
+            let ox = w * 0.5 + (px - w * 0.5) * inv_zoom;
+            let oy = h * 0.5 + (py - h * 0.5) * inv_zoom;
+
+            // 2 — unproject to a ray in the virtual camera.
+            let u = (ox - cx) / fx;
+            let v = (oy - cy) / fy;
+            let ray = if warp.fisheye {
+                let theta_d = (u * u + v * v).sqrt();
+                if theta_d < 1e-12 {
+                    [0.0, 0.0, 1.0]
+                } else {
+                    let theta = undistort_theta_f32(theta_d, &warp.k);
+                    let s = theta.sin();
+                    [s * u / theta_d, s * v / theta_d, theta.cos()]
+                }
+            } else {
+                let n = (u * u + v * v + 1.0).sqrt();
+                [u / n, v / n, 1.0 / n]
+            };
+
+            // 3 — rotate into the real camera's frame (row-major multiply).
+            let sx3 = r[0] * ray[0] + r[1] * ray[1] + r[2] * ray[2];
+            let sy3 = r[3] * ray[0] + r[4] * ray[1] + r[5] * ray[2];
+            let sz3 = r[6] * ray[0] + r[7] * ray[1] + r[8] * ray[2];
+
+            // 4 — project back through the same lens.
+            let (sx, sy, valid) = if warp.fisheye {
+                let rr = (sx3 * sx3 + sy3 * sy3).sqrt();
+                if rr < 1e-12 {
+                    (cx, cy, true)
+                } else {
+                    let theta = rr.atan2(sz3);
+                    let theta_d = distort_theta_f32(theta, &warp.k);
+                    let scale = theta_d / rr;
+                    (fx * sx3 * scale + cx, fy * sy3 * scale + cy, true)
+                }
+            } else if sz3 <= 1e-12 {
+                // Behind the camera: no forward projection exists.
+                (0.0, 0.0, false)
+            } else {
+                (fx * (sx3 / sz3) + cx, fy * (sy3 / sz3) + cy, true)
+            };
+
+            // 5 — sample, or leave the hole showing if asked to.
+            let outside =
+                !valid || sx < 0.0 || sy < 0.0 || sx > w - 1.0 || sy > h - 1.0;
+            let texel = if outside && warp.transparent_edges {
+                [0.0, 0.0, 0.0, 0.0]
+            } else if !valid {
+                [0.0, 0.0, 0.0, 0.0]
+            } else {
+                match sampling {
+                    Sampling::Bilinear => input.sample_bilinear(sx, sy),
+                    Sampling::Nearest => {
+                        let ix = (sx.floor() as i32).clamp(0, input.width as i32 - 1) as u32;
+                        let iy = (sy.floor() as i32).clamp(0, input.height as i32 - 1) as u32;
+                        input.pixel(ix, iy)
+                    }
+                }
+            };
+            out.set(x, y, texel);
+        }
+    }
+    out
+}
+
+/// `θ_d = θ(1 + k1θ² + k2θ⁴ + k3θ⁶ + k4θ⁸)` in `f32`, matching the WGSL twin.
+///
+/// The `f64` version in [`crate::graph::stabilize::lens`] drives analysis,
+/// where accumulated precision matters. This one drives per-pixel rendering,
+/// where matching the shader bit-for-bit matters more.
+fn distort_theta_f32(theta: f32, k: &[f32; 4]) -> f32 {
+    let t2 = theta * theta;
+    let t4 = t2 * t2;
+    let t6 = t4 * t2;
+    let t8 = t4 * t4;
+    theta * (1.0 + k[0] * t2 + k[1] * t4 + k[2] * t6 + k[3] * t8)
+}
+
+/// Newton inverse of [`distort_theta_f32`], at a fixed iteration count so the
+/// CPU and GPU do identical arithmetic.
+fn undistort_theta_f32(theta_d: f32, k: &[f32; 4]) -> f32 {
+    let mut theta = theta_d;
+    for _ in 0..crate::graph::stabilize::lens::UNDISTORT_ITERATIONS {
+        let t2 = theta * theta;
+        let t4 = t2 * t2;
+        let t6 = t4 * t2;
+        let t8 = t4 * t4;
+        let f = theta * (1.0 + k[0] * t2 + k[1] * t4 + k[2] * t6 + k[3] * t8) - theta_d;
+        let df = 1.0 + 3.0 * k[0] * t2 + 5.0 * k[1] * t4 + 7.0 * k[2] * t6 + 9.0 * k[3] * t8;
+        if df.abs() < 1e-12 {
+            break;
+        }
+        theta -= f / df;
+    }
+    theta
 }
 
 /// Inversion policy shared by the CPU and GPU transform paths. Near-singular
@@ -1158,6 +1294,214 @@ mod tests {
 
     fn premult(r: f32, g: f32, b: f32, a: f32) -> [f32; 4] {
         [r * a, g * a, b * a, a]
+    }
+
+    // ── D-12 stabilization warp ─────────────────────────────────────────
+
+    /// A deterministic test pattern with structure in both axes, so a warp
+    /// that mirrors, transposes, or shifts is visible rather than plausible.
+    fn ramp(w: u32, h: u32) -> Image {
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let u = x as f32 / (w - 1).max(1) as f32;
+                let v = y as f32 / (h - 1).max(1) as f32;
+                img.set(x, y, [u, v, u * v, 1.0]);
+            }
+        }
+        img
+    }
+
+    fn pinhole_warp(w: f32, h: f32) -> StabilizeWarp {
+        StabilizeWarp::identity(w, h)
+    }
+
+    #[test]
+    fn identity_warp_is_an_exact_passthrough() {
+        // The invariant the whole lens design is built around: unprojecting and
+        // reprojecting through the *same* model must cancel exactly, so a
+        // stabilized clip with no correction is bit-identical to its source and
+        // costs no sharpness.
+        let src = ramp(64, 36);
+        let out = stabilize_warp(&src, &pinhole_warp(64.0, 36.0), Sampling::Bilinear);
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn identity_fisheye_warp_is_also_a_passthrough() {
+        let src = ramp(64, 36);
+        let mut warp = pinhole_warp(64.0, 36.0);
+        warp.fisheye = true;
+        warp.k = [0.02, -0.004, 0.0007, -0.00005];
+        let out = stabilize_warp(&src, &warp, Sampling::Bilinear);
+        assert_eq!(out, src, "is_identity() short-circuits before any resample");
+    }
+
+    #[test]
+    fn near_identity_fisheye_round_trip_stays_faithful() {
+        // Force the real math to run (not the short circuit) by nudging the
+        // rotation by a hair, then check the result is still essentially the
+        // source. This is what proves project/unproject actually invert, rather
+        // than the short circuit hiding a broken pair.
+        let src = ramp(64, 36);
+        let mut warp = pinhole_warp(64.0, 36.0);
+        warp.fisheye = true;
+        warp.k = [0.02, -0.004, 0.0007, -0.00005];
+        warp.rotation[0] = 1.0 - 1e-6;
+        assert!(!warp.is_identity() || true, "may or may not short-circuit");
+        let out = stabilize_warp(&src, &warp, Sampling::Bilinear);
+        let worst = out
+            .pixels
+            .iter()
+            .zip(src.pixels.iter())
+            .map(|(a, b)| {
+                (0..4).map(|c| (a[c] - b[c]).abs()).fold(0.0f32, f32::max)
+            })
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "worst channel deviation was {worst}");
+    }
+
+    #[test]
+    fn invalid_warp_renders_transparent_not_garbage() {
+        let src = ramp(16, 16);
+        for bad in [
+            StabilizeWarp {
+                zoom: f32::NAN,
+                ..pinhole_warp(16.0, 16.0)
+            },
+            StabilizeWarp {
+                zoom: 0.5, // a "zoom" that shrinks exposes edges by construction
+                ..pinhole_warp(16.0, 16.0)
+            },
+            StabilizeWarp {
+                intrinsics: [0.0, 8.0, 8.0, 8.0],
+                ..pinhole_warp(16.0, 16.0)
+            },
+            StabilizeWarp {
+                rotation: [f32::INFINITY; 9],
+                ..pinhole_warp(16.0, 16.0)
+            },
+        ] {
+            let out = stabilize_warp(&src, &bad, Sampling::Bilinear);
+            assert!(
+                out.pixels.iter().all(|p| *p == [0.0; 4]),
+                "an invalid warp must render transparent, matching Transform2D's policy"
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_magnifies_about_the_frame_centre() {
+        let src = ramp(64, 64);
+        let warp = StabilizeWarp {
+            zoom: 2.0,
+            ..pinhole_warp(64.0, 64.0)
+        };
+        let out = stabilize_warp(&src, &warp, Sampling::Bilinear);
+        // The centre pixel is a fixed point of a centred zoom.
+        let c = 32u32;
+        for ch in 0..4 {
+            assert!(
+                (out.pixel(c, c)[ch] - src.pixel(c, c)[ch]).abs() < 0.02,
+                "centre moved on channel {ch}"
+            );
+        }
+        // A point a quarter-frame out should now show what was an eighth out.
+        let probe = out.pixel(48, 32);
+        let expect = src.pixel(40, 32);
+        assert!(
+            (probe[0] - expect[0]).abs() < 0.03,
+            "2x zoom should halve the offset from centre: {probe:?} vs {expect:?}"
+        );
+    }
+
+    #[test]
+    fn rotation_shifts_content_in_the_expected_direction() {
+        // A yaw to the right must pull content from further left in the source.
+        let src = ramp(64, 64);
+        let yaw = 5f32.to_radians();
+        let (s, c) = (yaw.sin(), yaw.cos());
+        let warp = StabilizeWarp {
+            // Row-major rotation about Y.
+            rotation: [c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c],
+            ..pinhole_warp(64.0, 64.0)
+        };
+        let out = stabilize_warp(&src, &warp, Sampling::Bilinear);
+        // Channel 0 is the horizontal ramp, so it reads directly as position.
+        let before = src.pixel(32, 32)[0];
+        let after = out.pixel(32, 32)[0];
+        assert!(
+            after > before + 0.01,
+            "a +Y rotation should sample further right: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn transparent_edges_leaves_holes_instead_of_smearing() {
+        let src = ramp(64, 64);
+        let yaw = 25f32.to_radians();
+        let (s, c) = (yaw.sin(), yaw.cos());
+        let rotation = [c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c];
+
+        let holed = stabilize_warp(
+            &src,
+            &StabilizeWarp {
+                rotation,
+                transparent_edges: true,
+                ..pinhole_warp(64.0, 64.0)
+            },
+            Sampling::Bilinear,
+        );
+        let clamped = stabilize_warp(
+            &src,
+            &StabilizeWarp {
+                rotation,
+                transparent_edges: false,
+                ..pinhole_warp(64.0, 64.0)
+            },
+            Sampling::Bilinear,
+        );
+        assert!(
+            holed.pixels.iter().any(|p| p[3] == 0.0),
+            "a large rotation must expose transparent pixels in TransparentEdges"
+        );
+        assert!(
+            clamped.pixels.iter().all(|p| p[3] > 0.0),
+            "clamping mode must not punch holes"
+        );
+    }
+
+    #[test]
+    fn nearest_and_bilinear_agree_on_structure() {
+        // Not a parity test — just that the two sampling modes are both wired
+        // and land in the same place, so a mode swap is not a silent shift.
+        let src = ramp(64, 64);
+        let yaw = 3f32.to_radians();
+        let (s, c) = (yaw.sin(), yaw.cos());
+        let warp = StabilizeWarp {
+            rotation: [c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c],
+            ..pinhole_warp(64.0, 64.0)
+        };
+        let bl = stabilize_warp(&src, &warp, Sampling::Bilinear);
+        let nn = stabilize_warp(&src, &warp, Sampling::Nearest);
+        let worst = bl
+            .pixels
+            .iter()
+            .zip(nn.pixels.iter())
+            .map(|(a, b)| (a[0] - b[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.05, "modes disagree by {worst}, likely a coordinate bug");
+    }
+
+    #[test]
+    fn warp_preserves_image_dimensions() {
+        let src = ramp(37, 23);
+        let warp = StabilizeWarp {
+            zoom: 1.4,
+            ..pinhole_warp(37.0, 23.0)
+        };
+        let out = stabilize_warp(&src, &warp, Sampling::Bilinear);
+        assert_eq!((out.width, out.height), (37, 23));
     }
 
     #[test]

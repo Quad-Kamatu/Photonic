@@ -153,6 +153,10 @@ fn eval_op(
             Some(input) => ops::transform2d(input, *mat, *sampling),
             None => Image::new(cw, ch),
         },
+        IrOp::StabilizeWarp { warp, sampling } => match inputs.first() {
+            Some(input) => ops::stabilize_warp(input, warp, *sampling),
+            None => Image::new(cw, ch),
+        },
         // Real kernels for all seven v1 effects (08 §3 / K-0.2). An
         // unknown/forward-compat kind passes through (39 §2.2).
         IrOp::Effect { kind, params } => match kind {

@@ -91,6 +91,11 @@ pub fn source_range_for_op(op: &IrOp, out: Tick) -> FrameRange {
         | IrOp::RasterVector { .. }
         | IrOp::SolidColor { .. }
         | IrOp::Transform2D { .. }
+        // D-12 stabilization corrects *within* a frame — it never reaches for
+        // a neighbour. Rolling-shutter correction would still not change this:
+        // it samples the orientation curve at sub-frame times, not other
+        // frames' pixels.
+        | IrOp::StabilizeWarp { .. }
         | IrOp::Effect { .. }
         | IrOp::Grade { .. }
         | IrOp::Merge { .. }

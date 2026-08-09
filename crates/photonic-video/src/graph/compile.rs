@@ -145,6 +145,23 @@ pub trait DeflickerGains {
     }
 }
 
+/// Resolved D-12 stabilization analysis for a clip (22 §6.4), threaded into
+/// compile as `&dyn StabilizationProvider`.
+///
+/// **Hot-path invariant**, identical to [`LutProvider`]'s: this is called during
+/// compile, which runs per frame, so it MUST be a lock-free read of an
+/// already-computed analysis — never parse a motion file or run the integrator
+/// here. A `None` result (unanalyzed, analysis in flight, cache miss) leaves
+/// the clip on its unstabilized source path rather than stalling the frame or
+/// rendering black, matching how an unresolvable LUT stays inert.
+pub trait StabilizationProvider {
+    /// The analysis for `clip`, if one is warm.
+    fn analysis(
+        &self,
+        clip: ClipId,
+    ) -> Option<std::sync::Arc<crate::graph::stabilize::StabilizationAnalysis>>;
+}
+
 /// A stable diagnostic code for the coded compile/load conditions 38 registers
 /// (§1.2 / §2.2 / §2.4 / §3.5). Kept as a compiler-local enum until 36 §3's
 /// `DiagCode` registry lands; the variant names are byte-identical to 36's
@@ -555,6 +572,9 @@ struct Builder<'a> {
     /// Compile-resolved deflicker gains (see [`DeflickerGains`]). `None` = no
     /// measurement available, so every `Deflicker` effect lowers inert.
     deflicker: Option<&'a dyn DeflickerGains>,
+    /// D-12 resolved stabilization analyses (22 §6.4). `None` = no provider, so
+    /// every clip stays on its unstabilized path.
+    stabilization: Option<&'a dyn StabilizationProvider>,
     /// K-E2 scope taps: each lowered clip's post-`Grade` node (07 §5).
     clip_taps: Vec<(ClipId, IrNodeId)>,
     /// K-E2: the folded program before `CaptionOverlay` (03 §3.6).
@@ -574,6 +594,7 @@ impl<'a> Builder<'a> {
             view_index: HashMap::new(),
             luts: None,
             deflicker: None,
+            stabilization: None,
             clip_taps: Vec::new(),
             program_tap: None,
             skip_clip_looks: false,
@@ -582,6 +603,40 @@ impl<'a> Builder<'a> {
 
     fn diag(&mut self, d: CompileDiagnostic) {
         self.diagnostics.push(d);
+    }
+
+    /// The resolved D-12 warp for `clip` at clip-relative time `dt`, or `None`
+    /// when the clip is unstabilized or its analysis is not warm (22 §6.4).
+    ///
+    /// Indexed by **source** time, not sequence time: the correction belongs to
+    /// the recorded frame, so trimming a clip, moving it, or retiming it must
+    /// keep each frame paired with the orientation the camera actually had when
+    /// it was captured. Indexing by sequence position would desynchronise the
+    /// stabilization the moment anyone slipped the clip.
+    fn resolved_stabilize_warp(
+        &self,
+        clip: &Clip,
+        format: &SequenceFormat,
+        dt: Tick,
+    ) -> Option<crate::graph::ir::StabilizeWarp> {
+        let spec = clip.stabilization.as_ref()?;
+        // An unanalyzed or zero-strength recipe is not an error — it just means
+        // there is nothing to apply yet.
+        if spec.is_identity() {
+            return None;
+        }
+        let analysis = self.stabilization?.analysis(clip.id)?;
+        let src_time = clip.source_in + clip.speed.source_delta(dt);
+        let frame = analysis.frame_index(src_time.as_seconds_f64());
+        Some(analysis.warp_at(
+            frame,
+            format.width as f32,
+            format.height as f32,
+            matches!(
+                spec.crop_mode,
+                photonic_core::timeline::StabilizationCropMode::TransparentEdges
+            ),
+        ))
     }
 
     /// Whether a coded diagnostic with this `(code, clip)` subject was already
@@ -1372,6 +1427,33 @@ fn build_clip_chain(
 
     // Remainder of step 2's chain, applied on top of the source/composition.
     let mut cur = source;
+
+    // D-12 (22 §6.4): the stabilization warp goes here — in SOURCE space,
+    // beneath the clip's own `Transform2D`. The order is not incidental: the
+    // warp corrects what the *camera* did, so it must resolve against the
+    // original framing, while `Transform2D` is what the *editor* chose and
+    // applies to the already-corrected image. Swapping them would make the
+    // correction depend on the edit, so re-framing a shot would break its
+    // stabilization.
+    //
+    // Emitted only when a resolved, non-identity warp exists: an unanalyzed or
+    // zero-strength recipe leaves the source path untouched rather than paying
+    // for a pass that resamples to no effect (22 §6.5 — removing stabilization
+    // restores the source path).
+    if let Some(warp) = b.resolved_stabilize_warp(clip, format, dt) {
+        if warp.is_identity() {
+            // Nothing to do; skip the pass entirely.
+        } else {
+            cur = b.push(
+                IrOp::StabilizeWarp {
+                    warp,
+                    sampling: Sampling::Bilinear,
+                },
+                vec![(cur, OutPort::default())],
+            );
+        }
+    }
+
     cur = b.push(
         IrOp::Transform2D {
             mat: clip_transform_matrix(&xf, format),
@@ -2884,6 +2966,25 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             for v in mat.to_cols_array() {
                 f32b(h, v);
             }
+            h.update(&[*sampling as u8]);
+        }
+        // Tag 20: the next free byte in this namespace (0..=19 are taken).
+        // Every field is hashed — two frames of a stabilized clip differ only
+        // in these numbers, so omitting any one of them would alias distinct
+        // frames onto a single cache entry and freeze the correction.
+        IrOp::StabilizeWarp { warp, sampling } => {
+            h.update(&[20]);
+            for v in warp.rotation {
+                f32b(h, v);
+            }
+            f32b(h, warp.zoom);
+            for v in warp.intrinsics {
+                f32b(h, v);
+            }
+            for v in warp.k {
+                f32b(h, v);
+            }
+            h.update(&[warp.fisheye as u8, warp.transparent_edges as u8]);
             h.update(&[*sampling as u8]);
         }
         IrOp::Effect { kind, params } => {
@@ -4489,6 +4590,7 @@ mod tests {
             IrOp::RasterVector { .. } => "RasterVector",
             IrOp::SolidColor { .. } => "SolidColor",
             IrOp::Transform2D { .. } => "Transform2D",
+            IrOp::StabilizeWarp { .. } => "StabilizeWarp",
             IrOp::Effect { .. } => "Effect",
             IrOp::Grade { .. } => "Grade",
             IrOp::Merge { .. } => "Merge",

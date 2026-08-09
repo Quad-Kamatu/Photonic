@@ -1318,6 +1318,20 @@ impl Evaluator {
                 ),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
+            IrOp::StabilizeWarp { warp, sampling } => match inputs.first() {
+                Some(src) => self.passes.stabilize(
+                    &self.gpu,
+                    &src.texture,
+                    warp,
+                    *sampling,
+                    logical_w,
+                    logical_h,
+                    src.width,
+                    src.height,
+                    target,
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
             // Real grade kernel: run the resolved stack through the WGSL twins of
             // `eval_cpu`'s `apply_grade_cpu`, then blit the result into the pooled
             // cache target (07 §3, GPU/CPU parity 03 §4.4). An empty stack falls
@@ -1388,6 +1402,9 @@ struct Passes {
     blit_bgl: wgpu::BindGroupLayout,
     transform_pipeline: wgpu::RenderPipeline,
     transform_bgl: wgpu::BindGroupLayout,
+    /// D-12 stabilization warp (22 §6.4); WGSL twin of `ops::stabilize_warp`.
+    stabilize_pipeline: wgpu::RenderPipeline,
+    stabilize_bgl: wgpu::BindGroupLayout,
     /// `Effect{Invert}` (08 §3): shares the blit bind-group layout (tex + sampler).
     invert_pipeline: wgpu::RenderPipeline,
     deflicker_pipeline: wgpu::RenderPipeline,
@@ -1534,6 +1551,105 @@ impl Passes {
             "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct T {{ c0: vec4<f32>, c1: vec4<f32>, c2: vec4<f32>, info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> u: T;\nfn at(p: vec2<i32>) -> vec4<f32> {{\n  let hi = vec2<i32>(u.info.zw) - vec2<i32>(1);\n  return textureLoad(t, clamp(p, vec2<i32>(0), hi), 0);\n}}\nfn nearest(p: vec2<f32>) -> vec4<f32> {{ return at(vec2<i32>(floor(p))); }}\nfn bilinear(p: vec2<f32>) -> vec4<f32> {{\n  let q = p - vec2<f32>(0.5);\n  let p0f = floor(q);\n  let p0 = vec2<i32>(p0f);\n  let f = q - p0f;\n  let p00 = at(p0);\n  let p10 = at(p0 + vec2<i32>(1, 0));\n  let p01 = at(p0 + vec2<i32>(0, 1));\n  let p11 = at(p0 + vec2<i32>(1, 1));\n  return mix(mix(p00, p10, f.x), mix(p01, p11, f.x), f.y);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  if (pos.x >= u.info.x || pos.y >= u.info.y) {{ return vec4<f32>(0.0); }}\n  let canvas_src = u.c0.xy * pos.x + u.c1.xy * pos.y + u.c2.xy;\n  let src = canvas_src * u.info.zw / u.info.xy;\n  if (u.c0.w > 0.5) {{ return nearest(src); }}\n  return bilinear(src);\n}}\n"
         );
         let transform_pipeline = make_pipeline(device, &transform_bgl, &transform_src, "fs");
+
+        // D-12 StabilizeWarp: the WGSL twin of `ops::stabilize_warp`. Same
+        // five steps in the same order, same fixed Newton iteration count, and
+        // `textureLoad` with explicit clamping for the same reason the
+        // Transform2D pass uses it — sampler-dependent edge and padding
+        // behaviour would make CPU/GPU parity a function of the driver.
+        //
+        // Uniform layout mirrors the CPU struct:
+        //   r0 = rot[0..3],           r1 = rot[3..6],        r2 = rot[6..9]
+        //   k  = k1..k4
+        //   intr = [fx, fy, cx, cy]
+        //   info = [logical_w, logical_h, source_w, source_h]
+        //   flags = [zoom, fisheye, transparent_edges, sampling]
+        let stabilize_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stabilize_bgl"),
+            entries: &[tex_entry(0), uniform_entry(1)],
+        });
+        let stabilize_src = format!(
+            "{QUAD_VS}\n\
+@group(0) @binding(0) var t: texture_2d<f32>;\n\
+struct S {{ r0: vec4<f32>, r1: vec4<f32>, r2: vec4<f32>, k: vec4<f32>, intr: vec4<f32>, info: vec4<f32>, flags: vec4<f32> }}\n\
+@group(0) @binding(1) var<uniform> u: S;\n\
+fn at(p: vec2<i32>) -> vec4<f32> {{\n\
+  let hi = vec2<i32>(u.info.zw) - vec2<i32>(1);\n\
+  return textureLoad(t, clamp(p, vec2<i32>(0), hi), 0);\n\
+}}\n\
+fn bilinear(p: vec2<f32>) -> vec4<f32> {{\n\
+  let q = p - vec2<f32>(0.5);\n\
+  let p0f = floor(q);\n\
+  let p0 = vec2<i32>(p0f);\n\
+  let f = q - p0f;\n\
+  let p00 = at(p0);\n\
+  let p10 = at(p0 + vec2<i32>(1, 0));\n\
+  let p01 = at(p0 + vec2<i32>(0, 1));\n\
+  let p11 = at(p0 + vec2<i32>(1, 1));\n\
+  return mix(mix(p00, p10, f.x), mix(p01, p11, f.x), f.y);\n\
+}}\n\
+fn distort_theta(th: f32) -> f32 {{\n\
+  let t2 = th * th; let t4 = t2 * t2; let t6 = t4 * t2; let t8 = t4 * t4;\n\
+  return th * (1.0 + u.k.x * t2 + u.k.y * t4 + u.k.z * t6 + u.k.w * t8);\n\
+}}\n\
+fn undistort_theta(td: f32) -> f32 {{\n\
+  var th = td;\n\
+  for (var i = 0u; i < {iters}u; i = i + 1u) {{\n\
+    let t2 = th * th; let t4 = t2 * t2; let t6 = t4 * t2; let t8 = t4 * t4;\n\
+    let f = th * (1.0 + u.k.x * t2 + u.k.y * t4 + u.k.z * t6 + u.k.w * t8) - td;\n\
+    let df = 1.0 + 3.0 * u.k.x * t2 + 5.0 * u.k.y * t4 + 7.0 * u.k.z * t6 + 9.0 * u.k.w * t8;\n\
+    if (abs(df) < 1e-12) {{ break; }}\n\
+    th = th - f / df;\n\
+  }}\n\
+  return th;\n\
+}}\n\
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n\
+  if (pos.x >= u.info.x || pos.y >= u.info.y) {{ return vec4<f32>(0.0); }}\n\
+  let w = u.info.z; let h = u.info.w;\n\
+  let fx = u.intr.x; let fy = u.intr.y; let cx = u.intr.z; let cy = u.intr.w;\n\
+  let zoom = u.flags.x; let is_fish = u.flags.y > 0.5; let transp = u.flags.z > 0.5;\n\
+  let nearest = u.flags.w > 0.5;\n\
+  // 1 - undo the crop zoom about the frame centre.\n\
+  let o = vec2<f32>(w, h) * 0.5 + (pos.xy - vec2<f32>(w, h) * 0.5) / zoom;\n\
+  // 2 - unproject to a ray in the virtual camera.\n\
+  let uu = (o.x - cx) / fx;\n\
+  let vv = (o.y - cy) / fy;\n\
+  var ray: vec3<f32>;\n\
+  if (is_fish) {{\n\
+    let td = sqrt(uu * uu + vv * vv);\n\
+    if (td < 1e-12) {{ ray = vec3<f32>(0.0, 0.0, 1.0); }}\n\
+    else {{ let th = undistort_theta(td); let s = sin(th);\n\
+           ray = vec3<f32>(s * uu / td, s * vv / td, cos(th)); }}\n\
+  }} else {{\n\
+    let n = sqrt(uu * uu + vv * vv + 1.0);\n\
+    ray = vec3<f32>(uu / n, vv / n, 1.0 / n);\n\
+  }}\n\
+  // 3 - rotate into the real camera's frame (row-major).\n\
+  let sx3 = dot(u.r0.xyz, ray);\n\
+  let sy3 = dot(u.r1.xyz, ray);\n\
+  let sz3 = dot(u.r2.xyz, ray);\n\
+  // 4 - project back through the same lens.\n\
+  var sp: vec2<f32>;\n\
+  var valid = true;\n\
+  if (is_fish) {{\n\
+    let rr = sqrt(sx3 * sx3 + sy3 * sy3);\n\
+    if (rr < 1e-12) {{ sp = vec2<f32>(cx, cy); }}\n\
+    else {{ let th = atan2(rr, sz3); let td = distort_theta(th); let sc = td / rr;\n\
+           sp = vec2<f32>(fx * sx3 * sc + cx, fy * sy3 * sc + cy); }}\n\
+  }} else {{\n\
+    if (sz3 <= 1e-12) {{ sp = vec2<f32>(0.0); valid = false; }}\n\
+    else {{ sp = vec2<f32>(fx * (sx3 / sz3) + cx, fy * (sy3 / sz3) + cy); }}\n\
+  }}\n\
+  // 5 - sample, or leave the hole showing.\n\
+  let outside = !valid || sp.x < 0.0 || sp.y < 0.0 || sp.x > w - 1.0 || sp.y > h - 1.0;\n\
+  if (!valid) {{ return vec4<f32>(0.0); }}\n\
+  if (outside && transp) {{ return vec4<f32>(0.0); }}\n\
+  if (nearest) {{ return at(vec2<i32>(floor(sp))); }}\n\
+  return bilinear(sp);\n\
+}}\n",
+            iters = crate::graph::stabilize::lens::UNDISTORT_ITERATIONS,
+        );
+        let stabilize_pipeline = make_pipeline(device, &stabilize_bgl, &stabilize_src, "fs");
 
         // Invert (08 §3): invert straight (unpremult) color, keep alpha, then
         // re-premultiply — the WGSL twin of `ops::invert`. Reuses the blit BGL.
@@ -1926,6 +2042,8 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
             blit_bgl,
             transform_pipeline,
             transform_bgl,
+            stabilize_pipeline,
+            stabilize_bgl,
             invert_pipeline,
             deflicker_pipeline,
             deinterlace_pipeline,
@@ -2080,6 +2198,73 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
             ],
         });
         self.run(gpu, &self.transform_pipeline, &bind, target);
+    }
+
+    /// `StabilizeWarp` pass (D-12, 22 §6.4).
+    ///
+    /// One pass per frame, as 22 §6.6 requires, and the same pass serves proxy
+    /// preview at proxy dimensions — the intrinsics are already scaled for the
+    /// delivered size by [`StabilizationAnalysis::warp_at`].
+    ///
+    /// [`StabilizationAnalysis::warp_at`]: crate::graph::stabilize::StabilizationAnalysis::warp_at
+    #[allow(clippy::too_many_arguments)]
+    fn stabilize(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        warp: &crate::graph::ir::StabilizeWarp,
+        sampling: crate::graph::ir::Sampling,
+        logical_w: u32,
+        logical_h: u32,
+        source_w: u32,
+        source_h: u32,
+        target: &wgpu::Texture,
+    ) {
+        use crate::graph::ir::Sampling;
+        let r = warp.rotation;
+        let uniform: [f32; 28] = [
+            // r0, r1, r2 — row-major rotation, one row per vec4 (w unused).
+            r[0], r[1], r[2], 0.0,
+            r[3], r[4], r[5], 0.0,
+            r[6], r[7], r[8], 0.0,
+            // k1..k4
+            warp.k[0], warp.k[1], warp.k[2], warp.k[3],
+            // fx, fy, cx, cy
+            warp.intrinsics[0], warp.intrinsics[1], warp.intrinsics[2], warp.intrinsics[3],
+            // logical / source dimensions
+            logical_w as f32, logical_h as f32, source_w as f32, source_h as f32,
+            // zoom, fisheye, transparent_edges, sampling
+            warp.zoom,
+            if warp.fisheye { 1.0 } else { 0.0 },
+            if warp.transparent_edges { 1.0 } else { 0.0 },
+            match sampling {
+                Sampling::Nearest => 1.0,
+                Sampling::Bilinear => 0.0,
+            },
+        ];
+        let buffer = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("stabilize_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let view = src.create_view(&Default::default());
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stabilize_bg"),
+            layout: &self.stabilize_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.stabilize_pipeline, &bind, target);
     }
 
     /// `Effect{Invert}` pass — same bind group as `blit` (tex + sampler), the

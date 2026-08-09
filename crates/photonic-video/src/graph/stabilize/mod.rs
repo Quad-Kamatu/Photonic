@@ -36,6 +36,8 @@ pub mod orientation;
 pub mod sync;
 
 use glam::{DMat3, DQuat};
+
+use crate::graph::ir::StabilizeWarp;
 use photonic_core::timeline::{
     MotionSample, StabilizationCropMode, StabilizationError, StabilizationSpec,
 };
@@ -94,10 +96,24 @@ pub struct StabilizationDiagnostics {
 }
 
 /// The analysis result: one correction per frame plus diagnostics.
+///
+/// Carries the camera geometry it was computed against, so the compiler can
+/// build a [`StabilizeWarp`] for any delivery resolution without re-reading the
+/// lens profile on the per-frame compile path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StabilizationAnalysis {
     pub frames: Vec<FrameCorrection>,
     pub diagnostics: StabilizationDiagnostics,
+    /// Frame rate the corrections are indexed at.
+    pub fps: f64,
+    /// Resolution the intrinsics below are expressed at.
+    pub width: f32,
+    pub height: f32,
+    /// Source intrinsics `[fx, fy, cx, cy]` at `width`×`height`.
+    pub intrinsics: [f32; 4],
+    /// Kannala-Brandt coefficients; all zero for a pinhole.
+    pub k: [f32; 4],
+    pub fisheye: bool,
 }
 
 impl StabilizationAnalysis {
@@ -108,6 +124,44 @@ impl StabilizationAnalysis {
     /// unstabilized, not freeze on the final correction.
     pub fn at(&self, frame: usize) -> FrameCorrection {
         self.frames.get(frame).copied().unwrap_or(FrameCorrection::IDENTITY)
+    }
+
+    /// The frame index covering source time `seconds`.
+    pub fn frame_index(&self, seconds: f64) -> usize {
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return 0;
+        }
+        (seconds * self.fps).round().max(0.0) as usize
+    }
+
+    /// Build the resolved warp for `frame` at a delivery size of `out_w`×`out_h`.
+    ///
+    /// Intrinsics are rescaled from the analysis resolution, so a proxy preview
+    /// and a full-resolution export produce the *same* geometry — 22 §6.6
+    /// requires the proxy path go through this same warp at proxy dimensions,
+    /// and a preview that disagreed with the export would be worse than none.
+    pub fn warp_at(
+        &self,
+        frame: usize,
+        out_w: f32,
+        out_h: f32,
+        transparent_edges: bool,
+    ) -> StabilizeWarp {
+        let c = self.at(frame);
+        let (sx, sy) = (out_w / self.width, out_h / self.height);
+        StabilizeWarp {
+            rotation: c.rotation,
+            zoom: c.zoom,
+            intrinsics: [
+                self.intrinsics[0] * sx,
+                self.intrinsics[1] * sy,
+                self.intrinsics[2] * sx,
+                self.intrinsics[3] * sy,
+            ],
+            k: self.k,
+            fisheye: self.fisheye,
+            transparent_edges,
+        }
     }
 }
 
@@ -234,8 +288,20 @@ pub fn analyze(
         })
         .collect();
 
+    let (fx, fy, cx, cy) = lens.intrinsics_for(geom.width, geom.height);
     Ok(StabilizationAnalysis {
         frames,
+        fps: geom.fps,
+        width: geom.width as f32,
+        height: geom.height as f32,
+        intrinsics: [fx as f32, fy as f32, cx as f32, cy as f32],
+        k: [
+            lens.k[0] as f32,
+            lens.k[1] as f32,
+            lens.k[2] as f32,
+            lens.k[3] as f32,
+        ],
+        fisheye: lens.model == DistortionModel::Fisheye,
         diagnostics: StabilizationDiagnostics {
             bias,
             sample_rate_hz: mean_rate_hz(samples),
