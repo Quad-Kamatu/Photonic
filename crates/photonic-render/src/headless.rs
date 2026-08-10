@@ -1517,7 +1517,7 @@ mod blend_tests {
     use super::*;
     use photonic_core::{
         color::Color,
-        node::{PathNode, SceneNode, SceneNodeKind},
+        node::{GroupNode, PathNode, SceneNode, SceneNodeKind},
         path::PathData,
         style::Fill,
         Document,
@@ -1778,6 +1778,54 @@ mod blend_tests {
             (p[0] as i32 - 127).abs() < 32 && p[1] < 32 && (p[2] as i32 - 127).abs() < 32,
             "half-opacity blue over red should be ~purple, got {p:?}"
         );
+    }
+
+    #[test]
+    fn group_opacity_is_not_applied_twice_to_css_style_background_path() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping group-opacity test");
+            return;
+        };
+        let mut doc = Document::new("css-opacity", 20.0, 20.0);
+        let layer = doc.active_layer_id.unwrap();
+        doc.add_node(
+            SceneNode::new(
+                "backdrop",
+                layer,
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                        .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+                ),
+            ),
+            None,
+        );
+        let mut background = SceneNode::new(
+            "element/background",
+            layer,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_fill(Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0))),
+            ),
+        );
+        background.opacity = 1.0;
+        let background_id = background.id;
+        doc.add_node(background, None);
+        let mut group = GroupNode::new();
+        group.children.push(background_id);
+        let mut element = SceneNode::new("element", layer, SceneNodeKind::Group(group));
+        element.opacity = 0.5;
+        doc.add_node(element, None);
+
+        let png = r.render_png_at_size(&doc, 20, 20);
+        let pixel = image::load_from_memory(&png)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(10, 10)
+            .0;
+        // The render target is sRGB, so a 50% source-over blend is not 127 in
+        // byte space. Double application would instead leave the pixel mostly
+        // red (roughly 224/137 for red/blue).
+        assert!(pixel[0] < 180 && pixel[2] > 180, "pixel: {pixel:?}");
     }
 
     /// P4 (headless): a Color Overlay layer style recolours the shape. A RED

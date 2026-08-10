@@ -372,7 +372,11 @@ fn build_element(
             path,
             fill,
             stroke: Stroke::none(),
-            opacity,
+            // Element opacity is applied by the containing group. Keeping
+            // paths opaque avoids applying CSS opacity a second time after
+            // scene-graph lowering (the renderer propagates group opacity to
+            // every descendant path).
+            opacity: 1.0,
         }));
     }
     if let Some((color, border_width)) = border(&props, selector, diagnostics) {
@@ -382,7 +386,7 @@ fn build_element(
             path,
             fill: Fill::none(),
             stroke: Stroke::solid(color, border_width),
-            opacity,
+            opacity: 1.0,
         }));
     }
     let child_origin = CssOrigin { x, y };
