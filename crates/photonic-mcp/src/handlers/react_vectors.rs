@@ -1821,18 +1821,38 @@ async fn create_connect_page(state: &AppState, args: &CreateVectorsFromReactArgs
     create_connect_nodes(state, args, &page).await
 }
 
+fn connect_page_card_height(viewport_height: f64, link_count: usize) -> f64 {
+    let base_height = (viewport_height - 236.0).max(360.0);
+    let link_count = link_count.max(1) as f64;
+    // Social rows begin 116px below the card top. Leave 24px of bottom
+    // breathing room after the final 54px row so every accepted link stays
+    // inside the card instead of silently overflowing it.
+    let required_height = 116.0 + (link_count - 1.0) * 70.0 + 54.0 + 24.0;
+    base_height.max(required_height)
+}
+
+fn connect_page_canvas_height(viewport_height: f64, card_height: f64) -> f64 {
+    // The original layout placed cards 188px below the page top and left 48px
+    // below them. Keep that framing when an accepted social-link list makes a
+    // card taller than the requested viewport.
+    viewport_height.max(188.0 + card_height + 48.0)
+}
+
 async fn create_connect_nodes(
     state: &AppState,
     args: &CreateVectorsFromReactArgs,
     page: &ConnectPageSnapshot,
 ) -> ToolResult {
-    let (doc_w, doc_h, board_origin, active_layer) = {
+    let (document_w, document_h, doc_w, doc_h, board_origin, active_artboard_id, active_layer) = {
         let doc = state.document.lock().await;
         let board = doc.active_artboard();
         (
+            doc.width,
+            doc.height,
             board.map_or(doc.width, |artboard| artboard.width),
             board.map_or(doc.height, |artboard| artboard.height),
             board.map_or((0., 0.), |artboard| (artboard.x, artboard.y)),
+            board.map(|artboard| artboard.id),
             doc.active_layer_id,
         )
     };
@@ -1870,7 +1890,12 @@ async fn create_connect_nodes(
     let gap = 24.0;
     let card_w = (content_w - gap) / 2.0;
     let card_y = origin.1 + 188.0;
-    let card_h = (viewport.1 - 236.0).max(360.0);
+    let card_h = connect_page_card_height(viewport.1, page.links.len());
+    let canvas_h = connect_page_canvas_height(viewport.1, card_h);
+    let page_right = origin.0 + viewport.0;
+    let page_bottom = origin.1 + canvas_h;
+    let document_width = document_w.max(page_right);
+    let document_height = document_h.max(page_bottom);
     let mut nodes = Vec::new();
     let mut children = Vec::new();
     children.push(rect_node(
@@ -1878,7 +1903,7 @@ async fn create_connect_nodes(
         origin.0,
         origin.1,
         viewport.0,
-        viewport.1,
+        canvas_h,
         0.0,
         "#f2f2f3",
         "#f2f2f3",
@@ -2125,9 +2150,9 @@ async fn create_connect_nodes(
         "root_node_ids":if args.dry_run { serde_json::json!([]) } else { serde_json::json!([root]) },
         "created_node_ids":created,
         "planned_node_count":planned_node_count,
-        "node_counts":{"nodes":planned_node_count,"text":5 + page.links.len() * 2,"links":page.links.len(),"interactions_stripped":0},
+        "node_counts":{"nodes":planned_node_count,"text":6 + page.links.len() * 2,"links":page.links.len(),"interactions_stripped":0},
         "visible_text":visible_text,
-        "layout":{"container_width_px":content_w,"card_width_px":card_w,"card_gap_px":gap,"card_radius_px":12.0,"card_padding_px":24.0},
+        "layout":{"container_width_px":content_w,"canvas_height_px":canvas_h,"document_width_px":document_width,"document_height_px":document_height,"card_width_px":card_w,"card_height_px":card_h,"card_gap_px":gap,"card_radius_px":12.0,"card_padding_px":24.0},
         "styles":{"background":"#f2f2f3","card":"#ffffff","accent":"#ff9d76","foreground":"#171717","muted":"#6b7280"},
         "semantic_tree":semantic_tree,
         "resolved_files":page.resolved_files,
@@ -2142,14 +2167,42 @@ async fn create_connect_nodes(
     }
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
-    history.execute_discrete(
-        Command::AddSubtree {
-            layer_id: layer,
-            roots: vec![root],
-            nodes,
-        },
-        &mut doc,
-    );
+    let old_artboards = doc.artboards.clone();
+    let mut new_artboards = old_artboards.clone();
+    if let Some(active_artboard_id) = active_artboard_id {
+        if let Some(artboard) = new_artboards
+            .iter_mut()
+            .find(|artboard| artboard.id == active_artboard_id)
+        {
+            let right = (artboard.x + artboard.width).max(page_right);
+            let bottom = (artboard.y + artboard.height).max(page_bottom);
+            artboard.x = artboard.x.min(origin.0);
+            artboard.y = artboard.y.min(origin.1);
+            artboard.width = right - artboard.x;
+            artboard.height = bottom - artboard.y;
+        }
+    }
+    let mut commands = Vec::new();
+    if document_width != doc.width || document_height != doc.height {
+        commands.push(Command::ResizeCanvas {
+            old_width: doc.width,
+            old_height: doc.height,
+            new_width: document_width,
+            new_height: document_height,
+        });
+    }
+    if new_artboards != old_artboards {
+        commands.push(Command::SetArtboards {
+            old: old_artboards,
+            new: new_artboards,
+        });
+    }
+    commands.push(Command::AddSubtree {
+        layer_id: layer,
+        roots: vec![root],
+        nodes,
+    });
+    history.execute_discrete(Command::Batch(commands), &mut doc);
     ToolResult::text("Created editable One Day Dance ConnectPage vectors from React sources")
         .with_data(data)
 }
@@ -4387,5 +4440,118 @@ export function ModeSelector() { return (
         let debug = format!("{result:?}");
         assert!(debug.contains("ASSET_NOT_FOUND"), "{debug}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn connect_page_card_height_contains_all_accepted_social_rows() {
+        let final_row_bottom = 116.0 + 7.0 * 70.0 + 54.0;
+        let card_height = connect_page_card_height(768.0, 8);
+        assert!(
+            card_height >= final_row_bottom + 24.0,
+            "eight-link layout exceeds card: height={card_height}, required={}",
+            final_row_bottom + 24.0
+        );
+        assert_eq!(connect_page_card_height(768.0, 4), 532.0);
+    }
+
+    #[test]
+    fn connect_page_canvas_contains_the_tallest_accepted_card() {
+        let card_height = connect_page_card_height(768.0, 8);
+        let canvas_height = connect_page_canvas_height(768.0, card_height);
+
+        assert_eq!(canvas_height, 920.0);
+        assert!(188.0 + card_height <= canvas_height - 48.0);
+        assert_eq!(
+            connect_page_canvas_height(768.0, connect_page_card_height(768.0, 4)),
+            768.0
+        );
+    }
+
+    fn connect_page_test_asset() -> LucideAsset {
+        let mut document = Document::new("test icon", 24.0, 24.0);
+        let layer = document.active_layer_id.unwrap();
+        let path = PathNode::new(PathData::from_svg("M 0 0 L 24 24").unwrap());
+        document.add_node(
+            SceneNode::new("test icon path", layer, SceneNodeKind::Path(path)),
+            Some(layer),
+        );
+        LucideAsset {
+            name: "Instagram".into(),
+            source_path: PathBuf::from("test-icon.svg"),
+            document,
+        }
+    }
+
+    fn eight_link_connect_page() -> ConnectPageSnapshot {
+        let asset = connect_page_test_asset();
+        ConnectPageSnapshot {
+            title: "Connect".into(),
+            subtitle: "Stay in touch".into(),
+            mailing_title: "Stay in the Loop".into(),
+            mailing_body: "Newsletter".into(),
+            follow_title: "Follow along".into(),
+            follow_body: "Social links".into(),
+            links: (0..8)
+                .map(|index| ImportedSocialLink {
+                    href: format!("https://example.com/{index}"),
+                    label: format!("Link {index}"),
+                    handle: format!("@link{index}"),
+                    icon: "Instagram".into(),
+                    asset: Some(asset.clone()),
+                })
+                .collect(),
+            resolved_files: vec![],
+            fingerprint: "test".into(),
+        }
+    }
+
+    fn connect_page_args() -> CreateVectorsFromReactArgs {
+        CreateVectorsFromReactArgs {
+            jsx: None,
+            source: None,
+            snapshot: None,
+            source_path: None,
+            export_name: Some("ConnectPage".into()),
+            props: None,
+            module_roots: vec![],
+            theme_tokens: None,
+            interaction_policy: None,
+            dynamic_content: None,
+            origin: None,
+            viewport: Some(CssViewportArg {
+                width: 1024.0,
+                height: 768.0,
+            }),
+            layer_id: None,
+            group_name: None,
+            strict: true,
+            dry_run: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn eight_link_connect_page_expands_export_bounds_with_the_card() {
+        let state = source_test_state();
+        let result =
+            create_connect_nodes(&state, &connect_page_args(), &eight_link_connect_page()).await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+
+        let doc = state.document.lock().await;
+        assert_eq!(doc.height, 920.0);
+        let artboard = doc.active_artboard().unwrap();
+        assert_eq!(artboard.height, 920.0);
+        assert_eq!(
+            188.0 + connect_page_card_height(768.0, 8),
+            artboard.height - 48.0
+        );
+        drop(doc);
+
+        let mut doc = state.document.lock().await;
+        let mut history = state.history.lock().await;
+        assert_eq!(history.undo_depth(), 1);
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.height, 720.0);
+        assert_eq!(doc.active_artboard().unwrap().height, 720.0);
+        assert!(doc.nodes.is_empty());
     }
 }

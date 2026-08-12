@@ -260,6 +260,17 @@ fn build_element(
             ));
         }
     }
+    // Hidden CSS boxes must not become visible editable paths. Returning an
+    // empty group also prevents descendants from being lowered: `display:none`
+    // and `visibility:hidden` both suppress the element's rendered subtree.
+    if css_element_hidden(&props) {
+        return Ok(CssVectorGroup {
+            name: selector_name(selector),
+            children: vec![],
+            opacity: 1.0,
+            provenance: selector.into(),
+        });
+    }
     if let Some(value) = props.get("z-index") {
         let value = value.trim();
         if value != "auto" && value.parse::<i32>().is_err() {
@@ -498,6 +509,20 @@ fn supported_property(k: &str) -> bool {
             | "visibility"
             | "box-sizing"
     )
+}
+
+fn css_element_hidden(props: &BTreeMap<String, String>) -> bool {
+    let first_token = |property: &str| {
+        props
+            .get(property)
+            .and_then(|value| value.split_whitespace().next())
+            .unwrap_or("")
+    };
+    first_token("display").eq_ignore_ascii_case("none")
+        || matches!(
+            first_token("visibility").to_ascii_lowercase().as_str(),
+            "hidden" | "collapse"
+        )
 }
 fn selector_name(s: &str) -> String {
     s.trim_matches('.')
@@ -782,5 +807,33 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "CSS_INVALID_Z_INDEX"));
+    }
+
+    #[test]
+    fn hidden_elements_do_not_lower_paths_or_descendants() {
+        let css = ".root { width: 100px; height: 100px; background: red; }\
+            .root > .display-hidden { width: 20px; height: 20px; display: none; background: blue; }\
+            .root > .display-hidden > .nested { width: 10px; height: 10px; background: green; }\
+            .root > .visibility-hidden { width: 20px; height: 20px; visibility: hidden; background: blue; }\
+            .root > .visibility-hidden > .nested { width: 10px; height: 10px; background: green; }\
+            .root > .shown { width: 20px; height: 20px; background: blue; }";
+        let plan = compile_css_vectors(
+            css,
+            Some(".root"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap();
+        let mut names = Vec::new();
+        visit_paths(&plan.roots, &mut |path| names.push(path.name.clone()));
+        assert_eq!(
+            names,
+            vec!["root/background", "root/.shown/background"],
+            "hidden elements and their descendants must not lower to paths"
+        );
     }
 }
