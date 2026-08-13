@@ -557,18 +557,45 @@ fn border(
     sel: &str,
     ds: &mut Vec<CssDiagnostic>,
 ) -> Option<(Color, f64)> {
-    let v = props.get("border")?;
-    let mut it = v.split_whitespace();
-    let width = length(it.next(), 1.0, 16.0)?;
-    let _style = it.next();
-    let c = it.next().and_then(color);
+    if !props.keys().any(|property| {
+        matches!(
+            property.as_str(),
+            "border" | "border-width" | "border-color"
+        )
+    }) {
+        return None;
+    }
+    let shorthand = props.get("border");
+    let shorthand_tokens = shorthand
+        .map(|value| value.split_whitespace().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let shorthand_width = shorthand_tokens
+        .iter()
+        .find_map(|token| length(Some(token), 1.0, 16.0));
+    let shorthand_color = shorthand_tokens.iter().find_map(|token| color(token));
+    let width = props
+        .get("border-width")
+        .and_then(|value| length(Some(value), 1.0, 16.0))
+        .or(shorthand_width)
+        .unwrap_or(1.0);
+    let c = props
+        .get("border-color")
+        .and_then(|value| color(value))
+        .or(shorthand_color);
     if c.is_none() {
+        let value = shorthand
+            .map(String::as_str)
+            .or_else(|| props.get("border-color").map(String::as_str));
         ds.push(diag(
             "CSS_UNSUPPORTED_BORDER",
             "border requires a supported solid color",
             sel,
-            Some("border"),
-            Some(v),
+            if shorthand.is_some() {
+                Some("border")
+            } else {
+                Some("border-color")
+            },
+            value,
         ));
     }
     c.map(|c| (c, width))
@@ -717,6 +744,50 @@ mod tests {
         assert!((a.bounds.2 - 240.).abs() < 1e-9);
         assert!((a.bounds.3 - 96.).abs() < 1e-9);
         assert_eq!(a.fingerprint,compile_css_vectors(".badge { width: 240px; height:96px; background:#6941c6; border:3px solid #fff; border-radius:24px; }",Some(".badge"),CssOrigin{x:100.,y:100.},CssViewport{width:512.,height:512.},true).unwrap().fingerprint);
+    }
+
+    #[test]
+    fn strict_mode_lowers_border_longhands() {
+        let plan = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; border-width: 3px; border-color: #fff; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap();
+        let CssVectorNode::Group(group) = &plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        assert_eq!(group.children.len(), 1);
+        assert!(matches!(group.children[0], CssVectorNode::Path(_)));
+        assert!(plan.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn border_longhands_override_matching_shorthand_components() {
+        let plan = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; border: 1px solid red; border-width: 4px; border-color: blue; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap();
+        let CssVectorNode::Group(group) = &plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        let CssVectorNode::Path(border) = &group.children[0] else {
+            panic!("border must be a path")
+        };
+        assert_eq!(border.stroke.width, 4.0);
+        assert_eq!(border.stroke.color, Color::from_hex("#0000ff").unwrap());
     }
 
     #[test]
