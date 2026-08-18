@@ -60,16 +60,21 @@ pub struct DecodeSource {
     // restart drops (kills) and re-creates them together.
     sidecar: Option<Sidecar>,
     reader: Option<FrameReader<ChildStdout>>,
+    /// True while CUDA is still usable for this source. A failed CUDA decode
+    /// permanently falls back to software for the lifetime of the source.
+    cuda_enabled: bool,
 }
 
 impl DecodeSource {
     pub fn new(tools: FfmpegTools, params: SourceParams, ring: SharedRing) -> Self {
+        let cuda_enabled = super::sidecar::cuda_hwaccel_listed(&tools.ffmpeg);
         DecodeSource {
             tools,
             params,
             ring,
             sidecar: None,
             reader: None,
+            cuda_enabled,
         }
     }
 
@@ -108,7 +113,7 @@ impl DecodeSource {
 
     /// Start (or restart) the ffmpeg process seeked to `kf_tick` and rebuild the
     /// reader with a pts model whose origin is that keyframe.
-    fn start_process(&mut self, kf_tick: Tick) -> Result<(), DecodeError> {
+    fn start_process(&mut self, kf_tick: Tick, use_cuda: bool) -> Result<(), DecodeError> {
         // Drop the old process/reader first (kill-on-drop) before respawning.
         self.reader = None;
         self.sidecar = None;
@@ -118,7 +123,7 @@ impl DecodeSource {
             seek: kf_tick,
             pix_fmt: self.params.pix_fmt,
         };
-        let (sidecar, stdout) = Sidecar::spawn(&self.tools, &cfg)?;
+        let (sidecar, stdout) = Sidecar::spawn(&self.tools, &cfg, use_cuda)?;
         let model = self.pts_model(self.start_frame(kf_tick));
         let reader = FrameReader::new(
             stdout,
@@ -142,17 +147,52 @@ impl DecodeSource {
         let kf = self.params.keyframes.keyframe_before(target);
         self.ring.clear();
 
+        let mut last_err = None;
+        let mut modes = [false, false];
+        let mode_count = if self.cuda_enabled { 2 } else { 1 };
+        if self.cuda_enabled {
+            modes[0] = true;
+        }
+        for mode in modes.into_iter().take(mode_count) {
+            match self.seek_mode(kf, target, mode) {
+                Ok(frame) => {
+                    self.ring.set_playhead(frame.pts);
+                    return Ok(frame);
+                }
+                Err(DecodeError::EmptyDecode) => {
+                    last_err = Some(DecodeError::EmptyDecode);
+                }
+                Err(e) => last_err = Some(e),
+            }
+            if mode {
+                // `-hwaccel cuda` can be listed by ffmpeg while the runtime
+                // driver/device is unavailable. Retry the exact seek in
+                // software and keep that choice for later seeks.
+                self.cuda_enabled = false;
+            }
+        }
+        Err(DecodeError::RestartsExhausted {
+            max: MAX_RESTARTS,
+            last: last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
+    fn seek_mode(
+        &mut self,
+        kf: Tick,
+        target: Tick,
+        use_cuda: bool,
+    ) -> Result<Arc<DecodedFrame>, DecodeError> {
         let mut last_err: Option<DecodeError> = None;
         for attempt in 0..=MAX_RESTARTS {
             if attempt > 0 {
                 // Exponential-ish backoff: 20ms, 40ms, 80ms.
                 std::thread::sleep(Duration::from_millis(20u64 << (attempt - 1)));
             }
-            match self.seek_attempt(kf, target) {
-                Ok(frame) => {
-                    self.ring.set_playhead(frame.pts);
-                    return Ok(frame);
-                }
+            match self.seek_attempt(kf, target, use_cuda) {
+                Ok(frame) => return Ok(frame),
                 Err(DecodeError::EmptyDecode) => return Err(DecodeError::EmptyDecode),
                 Err(e) => last_err = Some(e),
             }
@@ -167,8 +207,13 @@ impl DecodeSource {
 
     /// One seek attempt: spawn at `kf`, decode-forward discarding `pts < target`,
     /// ring the first `pts >= target` frame and return it.
-    fn seek_attempt(&mut self, kf: Tick, target: Tick) -> Result<Arc<DecodedFrame>, DecodeError> {
-        self.start_process(kf)?;
+    fn seek_attempt(
+        &mut self,
+        kf: Tick,
+        target: Tick,
+        use_cuda: bool,
+    ) -> Result<Arc<DecodedFrame>, DecodeError> {
+        self.start_process(kf, use_cuda)?;
         let reader = self.reader.as_mut().expect("reader set by start_process");
 
         loop {
@@ -206,16 +251,45 @@ impl DecodeSource {
     /// keyframe itself), skipping the `pts < target` discard loop.
     fn seek_keyframe(&mut self, kf: Tick) -> Result<Arc<DecodedFrame>, DecodeError> {
         self.ring.clear();
+        let mut last_err = None;
+        let mut modes = [false, false];
+        let mode_count = if self.cuda_enabled { 2 } else { 1 };
+        if self.cuda_enabled {
+            modes[0] = true;
+        }
+        for mode in modes.into_iter().take(mode_count) {
+            match self.seek_keyframe_mode(kf, mode) {
+                Ok(frame) => {
+                    self.ring.set_playhead(frame.pts);
+                    return Ok(frame);
+                }
+                Err(DecodeError::EmptyDecode) => last_err = Some(DecodeError::EmptyDecode),
+                Err(e) => last_err = Some(e),
+            }
+            if mode {
+                self.cuda_enabled = false;
+            }
+        }
+        Err(DecodeError::RestartsExhausted {
+            max: MAX_RESTARTS,
+            last: last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        })
+    }
+
+    fn seek_keyframe_mode(
+        &mut self,
+        kf: Tick,
+        use_cuda: bool,
+    ) -> Result<Arc<DecodedFrame>, DecodeError> {
         let mut last_err: Option<DecodeError> = None;
         for attempt in 0..=MAX_RESTARTS {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(20u64 << (attempt - 1)));
             }
-            match self.seek_keyframe_attempt(kf) {
-                Ok(frame) => {
-                    self.ring.set_playhead(frame.pts);
-                    return Ok(frame);
-                }
+            match self.seek_keyframe_attempt(kf, use_cuda) {
+                Ok(frame) => return Ok(frame),
                 Err(DecodeError::EmptyDecode) => return Err(DecodeError::EmptyDecode),
                 Err(e) => last_err = Some(e),
             }
@@ -228,8 +302,12 @@ impl DecodeSource {
         })
     }
 
-    fn seek_keyframe_attempt(&mut self, kf: Tick) -> Result<Arc<DecodedFrame>, DecodeError> {
-        self.start_process(kf)?;
+    fn seek_keyframe_attempt(
+        &mut self,
+        kf: Tick,
+        use_cuda: bool,
+    ) -> Result<Arc<DecodedFrame>, DecodeError> {
+        self.start_process(kf, use_cuda)?;
         let reader = self.reader.as_mut().expect("reader set by start_process");
         match reader.next_frame()? {
             Some(frame) => {
@@ -245,9 +323,24 @@ impl DecodeSource {
     /// (sequential playback fill). Returns how many were decoded; fewer than
     /// `n` (possibly 0) at end-of-stream or with no active process.
     pub fn pump(&mut self, n: usize) -> Result<usize, DecodeError> {
-        let Some(reader) = self.reader.as_mut() else {
+        if self.reader.is_none() {
             return Ok(0);
-        };
+        }
+        let result = self.pump_mode(n);
+        if result.is_err() && self.cuda_enabled {
+            // A CUDA process can initialize successfully and still fail once
+            // the first frame is read (for example when the driver disappears
+            // or the decoder cannot allocate a surface). Drop the dead process
+            // so the worker's next iteration seeks again in software mode.
+            self.cuda_enabled = false;
+            self.reader = None;
+            self.sidecar = None;
+        }
+        result
+    }
+
+    fn pump_mode(&mut self, n: usize) -> Result<usize, DecodeError> {
+        let reader = self.reader.as_mut().expect("reader checked by pump");
         let mut count = 0;
         for _ in 0..n {
             match reader.next_frame()? {

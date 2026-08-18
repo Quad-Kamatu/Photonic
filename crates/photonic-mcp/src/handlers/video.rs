@@ -13056,7 +13056,7 @@ pub async fn analyze_stabilization(
     state: &AppState,
     args: AnalyzeStabilizationArgs,
 ) -> ToolResult {
-    use photonic_video::graph::stabilize::{analyze_clip, ClipGeometry};
+    use photonic_video::graph::stabilize::{analyze_clip, geometry_for_clip};
 
     tracing::debug!("tool: analyze_stabilization {}", args.clip_id);
     let doc = state.document.lock().await;
@@ -13080,13 +13080,7 @@ pub async fn analyze_stabilization(
     let format = seq.format();
     let rate = seq.frame_rate;
     let fps = rate.num as f64 / rate.den.max(1) as f64;
-    let frame_count = ((clip.duration.as_seconds_f64() * fps).ceil() as usize).max(1);
-    let geom = ClipGeometry {
-        width: format.width as f64,
-        height: format.height as f64,
-        fps,
-        frame_count,
-    };
+    let geom = geometry_for_clip(format.width as f64, format.height as f64, fps, clip);
 
     match analyze_clip(&spec, geom, |p| p.to_path_buf()) {
         Ok(a) => {

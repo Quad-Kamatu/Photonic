@@ -31,7 +31,7 @@ impl ClockMap {
         offset_ns: 0.0,
     };
 
-    /// Map a clip-relative video time to the sensor clock.
+    /// Map a source-video time to the sensor clock.
     pub fn sensor_ns(&self, video_ns: f64) -> f64 {
         self.scale * video_ns + self.offset_ns
     }

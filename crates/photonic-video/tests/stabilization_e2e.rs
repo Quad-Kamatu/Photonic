@@ -80,6 +80,8 @@ fn geom() -> ClipGeometry {
         height: 360.0,
         fps: 30.0,
         frame_count: 60,
+        source_start_s: 0.0,
+        source_end_s: 2.0,
     }
 }
 

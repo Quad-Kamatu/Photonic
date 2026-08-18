@@ -46,11 +46,19 @@ impl Sidecar {
     pub fn spawn(
         tools: &FfmpegTools,
         cfg: &SidecarConfig,
+        use_cuda: bool,
     ) -> Result<(Self, ChildStdout), DecodeError> {
         let seek_secs = format!("{:.6}", cfg.seek.as_seconds_f64());
         let mut command = Command::new(&tools.ffmpeg);
+        command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
+        // Prefer NVDEC only after the caller has opted into the capability.
+        // Capability probing is not enough to prove that a driver/device can
+        // initialize; the scheduler owns the software fallback when a decode
+        // attempt fails.
+        if use_cuda {
+            command.args(["-hwaccel", "cuda"]);
+        }
         command
-            .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
             .arg("-ss")
             .arg(&seek_secs)
             .arg("-i")
@@ -130,4 +138,37 @@ impl Drop for Sidecar {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Whether `ffmpeg -hwaccels` lists `cuda` (NVDEC), cached per executable.
+pub(crate) fn cuda_hwaccel_listed(ffmpeg: &std::path::Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = ffmpeg.to_path_buf();
+    if let Some(value) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .copied()
+    {
+        return value;
+    }
+    let value = Command::new(ffmpeg)
+        .args(["-hide_banner", "-hwaccels"])
+        .output()
+        .map(|out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .any(|line| line.trim() == "cuda")
+        })
+        .unwrap_or(false);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, value);
+    value
 }

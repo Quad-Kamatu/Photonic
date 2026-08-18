@@ -1454,7 +1454,7 @@ impl EngineThread {
     /// means the clip keeps rendering from its unstabilized source rather than
     /// going black — the same posture an unresolvable LUT takes.
     fn run_stabilization_analysis(&mut self, clip_id: photonic_core::timeline::ClipId) {
-        use crate::graph::stabilize::{analyze_clip, ClipGeometry};
+        use crate::graph::stabilize::{analyze_clip, geometry_for_clip};
 
         let Some(project) = self.snapshot.clone() else {
             return;
@@ -1482,19 +1482,16 @@ impl EngineThread {
         // would misindex the corrections near the end.
         let rate = seq.frame_rate;
         let fps = rate.num as f64 / rate.den.max(1) as f64;
-        let frame_count = ((clip.duration.as_seconds_f64() * fps).ceil() as usize).max(1);
-        let geom = ClipGeometry {
-            width: format.width as f64,
-            height: format.height as f64,
-            fps,
-            frame_count,
-        };
+        let geom = geometry_for_clip(format.width as f64, format.height as f64, fps, clip);
+        let analysis_key = stabilization_analysis_key(clip, &spec, &geom);
 
         // Sidecar paths are stored as the user gave them; project-relative
         // resolution is the caller's job, and the session is the caller.
         match analyze_clip(&spec, geom, |p| p.to_path_buf()) {
             Ok(analysis) => {
-                self.stabilization.insert(clip_id, analysis);
+                self.stabilization
+                    .insert(clip_id, analysis_key.clone(), analysis);
+                self.mark_stabilization_analyzed(clip_id, &spec, analysis_key);
             }
             Err(e) => {
                 self.stabilization
@@ -1503,6 +1500,44 @@ impl EngineThread {
                 self.stabilization.invalidate(clip_id);
             }
         }
+    }
+
+    /// Publish the generation-only analysis key to the shared document and the
+    /// engine snapshot. It is skipped if the user changed the recipe while the
+    /// analysis was running, so a late result can never mark a newer recipe as
+    /// analyzed.
+    fn mark_stabilization_analyzed(
+        &mut self,
+        clip_id: photonic_core::timeline::ClipId,
+        analyzed_spec: &photonic_core::timeline::StabilizationSpec,
+        key: String,
+    ) {
+        let mut doc = self.doc.lock().expect("engine document lock poisoned");
+        let Some(project) = doc.timeline.as_mut() else {
+            return;
+        };
+        let Some(clip) = project
+            .sequences
+            .values_mut()
+            .flat_map(|seq| seq.tracks_for_mut(photonic_core::timeline::TrackKind::Video))
+            .flat_map(|track| track.clips.iter_mut())
+            .find(|clip| clip.id == clip_id)
+        else {
+            return;
+        };
+        let Some(spec) = clip.stabilization.as_mut() else {
+            return;
+        };
+        if spec.binding != analyzed_spec.binding
+            || spec.smoothness != analyzed_spec.smoothness
+            || spec.horizon_lock != analyzed_spec.horizon_lock
+            || spec.crop_mode != analyzed_spec.crop_mode
+            || spec.max_zoom != analyzed_spec.max_zoom
+        {
+            return;
+        }
+        spec.analysis_key = Some(key);
+        self.snapshot = Some(Arc::new(project.clone()));
     }
 
     fn effective_sequence(&self, project: &TimelineProject) -> Option<SequenceId> {
@@ -1881,6 +1916,24 @@ pub fn decode_stats() -> (u64, u64) {
         RING_HITS.load(Ordering::Relaxed),
         INLINE_SEEKS.load(Ordering::Relaxed),
     )
+}
+
+fn stabilization_analysis_key(
+    clip: &Clip,
+    spec: &photonic_core::timeline::StabilizationSpec,
+    geom: &crate::graph::stabilize::ClipGeometry,
+) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    clip.source_in.0.hash(&mut h);
+    clip.duration.0.hash(&mut h);
+    format!("{clip:?}").hash(&mut h);
+    format!("{spec:?}").hash(&mut h);
+    geom.source_start_s.to_bits().hash(&mut h);
+    geom.source_end_s.to_bits().hash(&mut h);
+    geom.fps.to_bits().hash(&mut h);
+    format!("stabilization:{:016x}", h.finish())
 }
 
 // ── Media sources (GpuFrameSource over decode rings) ─────────────────────────

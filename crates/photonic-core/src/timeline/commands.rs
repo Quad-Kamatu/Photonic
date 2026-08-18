@@ -991,9 +991,16 @@ fn apply_timing_changes(
         for (id, _old, new) in changes {
             if let Some(c) = t.clips.iter_mut().find(|c| c.id == *id) {
                 new.apply_to(c);
+                clear_stabilization_analysis(c);
             }
         }
         t.clips.sort_by_key(|c| c.start.0);
+    }
+}
+
+fn clear_stabilization_analysis(clip: &mut Clip) {
+    if let Some(spec) = clip.stabilization.as_mut() {
+        spec.analysis_key = None;
     }
 }
 
@@ -2078,6 +2085,7 @@ impl TimelineCmd {
                 if let Some(t) = find_track_mut(p, *track) {
                     if let Some(c) = t.clips.iter_mut().find(|c| c.id == *clip) {
                         new.apply_to(c);
+                        clear_stabilization_analysis(c);
                     }
                     // A trim can move `start`; keep the track sorted (mirrors
                     // SetClipProp). Non-overlap is guaranteed by the op.
@@ -2099,11 +2107,13 @@ impl TimelineCmd {
                             let mut right = left.clone();
                             let right_dur = left.end() - *at;
                             left.duration = left_dur;
+                            clear_stabilization_analysis(left);
                             left.transition_out = None;
                             right.id = *new_clip_id;
                             right.start = *at;
                             right.duration = right_dur;
                             right.source_in = right.source_in + left_dur.max(Tick::ZERO);
+                            clear_stabilization_analysis(&mut right);
                             right.transition_in = None;
                             // Clip markers (35 §1.5) are CLIP-RELATIVE, so a
                             // split has to partition them, not copy them: a
@@ -2147,6 +2157,7 @@ impl TimelineCmd {
                             }
                             sort_markers(&mut l.markers);
                             l.duration = right_clip.end() - l.start;
+                            clear_stabilization_analysis(l);
                         }
                     }
                 }
@@ -2164,6 +2175,7 @@ impl TimelineCmd {
             } => {
                 if let Some(c) = find_clip_in_track(p, *track, *clip) {
                     c.source_in = *new_source_in;
+                    clear_stabilization_analysis(c);
                 }
             }
             TimelineCmd::SetClipProp { track, new, .. } => {

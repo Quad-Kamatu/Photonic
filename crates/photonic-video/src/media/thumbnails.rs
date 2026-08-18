@@ -333,19 +333,89 @@ impl ThumbnailSource for DecodeThumbnailSource {
         source_tick: Tick,
         target_px: u32,
     ) -> Option<RgbaThumb> {
-        use crate::decode::{DecodeSource, SharedRing};
-
         let spec = (self.resolve)(asset)?;
-        let mut src = DecodeSource::new(spec.tools, spec.params, SharedRing::preview());
-        // Seek to the requested tick; if it lands past the end, fall back to the
-        // first frame so a clip always shows *something*.
-        let frame = match src.seek(source_tick) {
-            Ok(f) => f,
-            Err(_) => src.seek(Tick::ZERO).ok()?,
+        // One-shot scaled ffmpeg: seek + single frame + scale to `target_px`
+        // tall, RGBA straight out of the pipe. Avoids the old path of opening a
+        // full-res DecodeSource, decoding a 4K YUV frame into the process, then
+        // software-box-scaling it — that was multi-second per thumb on 4K60
+        // drone footage and starved the playback decode workers.
+        let use_cuda = crate::decode::sidecar::cuda_hwaccel_listed(&spec.tools.ffmpeg);
+        let decode = |tick| {
+            decode_thumbnail_scaled(&spec, tick, target_px, use_cuda).or_else(|| {
+                use_cuda
+                    .then(|| decode_thumbnail_scaled(&spec, tick, target_px, false))
+                    .flatten()
+            })
         };
-        let full = planes_to_rgba(&frame.planes);
-        Some(downscale_rgba(&full, target_px))
+        decode(source_tick).or_else(|| decode(Tick::ZERO))
     }
+}
+
+/// Spawn a short-lived ffmpeg that seeks near `source_tick`, grabs one frame,
+/// scales it to `target_px` tall (even width), and writes RGBA to stdout.
+fn decode_thumbnail_scaled(
+    spec: &ThumbnailDecodeSpec,
+    source_tick: Tick,
+    target_px: u32,
+    use_cuda: bool,
+) -> Option<RgbaThumb> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let th = target_px.max(16);
+    let src_w = spec.params.width.max(1);
+    let src_h = spec.params.height.max(1);
+    // Same rounding as the old box-downscale path: nearest width that keeps
+    // aspect at height `th` (half-up). RGBA has no even-width requirement.
+    let tw = ((((src_w as u64 * th as u64) + src_h as u64 / 2) / src_h as u64) as u32).max(1);
+    let seek_secs = format!("{:.6}", source_tick.as_seconds_f64().max(0.0));
+    let vf = format!("scale={tw}:{th}");
+
+    let mut cmd = Command::new(&spec.tools.ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
+    // `-hwaccel cuda` without a cuda filter chain still accelerates the decode
+    // then downloads frames to system memory — enough for one thumb frame.
+    if use_cuda {
+        cmd.args(["-hwaccel", "cuda"]);
+    }
+    cmd.arg("-ss")
+        .arg(&seek_secs)
+        .arg("-i")
+        .arg(&spec.params.input)
+        .args([
+            "-frames:v",
+            "1",
+            "-an",
+            "-vf",
+            &vf,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+        ])
+        .arg("pipe:1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::media::child_registry::arm_parent_death_signal(&mut cmd);
+
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let need = (tw as usize).checked_mul(th as usize)?.checked_mul(4)?;
+    let mut rgba = vec![0u8; need];
+    if stdout.read_exact(&mut rgba).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    if !child.wait().ok()?.success() {
+        return None;
+    }
+    Some(RgbaThumb {
+        width: tw,
+        height: th,
+        rgba,
+    })
 }
 
 // ── YUV → RGBA + box downscale ──────────────────────────────────────────────
@@ -353,6 +423,7 @@ impl ThumbnailSource for DecodeThumbnailSource {
 /// Convert one decoded frame's planes to full-resolution RGBA8 (BT.601
 /// limited-range coefficients — exact colorimetry is immaterial at thumbnail
 /// scale). Alpha comes from the `a` plane for 4:4:4:A sources, else opaque.
+#[cfg(test)]
 fn planes_to_rgba(planes: &crate::decode::DecodedPlanes) -> RgbaThumb {
     use crate::decode::DecodedPlanes;
 
@@ -393,6 +464,7 @@ fn planes_to_rgba(planes: &crate::decode::DecodedPlanes) -> RgbaThumb {
 }
 
 #[inline]
+#[cfg(test)]
 fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
     let yf = (y as f32 - 16.0) * 1.164;
     let uf = u as f32 - 128.0;
@@ -405,6 +477,7 @@ fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
 }
 
 #[inline]
+#[cfg(test)]
 fn clamp8(x: f32) -> u8 {
     x.clamp(0.0, 255.0) as u8
 }
@@ -412,6 +485,7 @@ fn clamp8(x: f32) -> u8 {
 /// Box-filter downscale `src` so its height is `target_h` (width scaled to keep
 /// aspect). Never upscales — if the source is already ≤ `target_h` tall it is
 /// returned unchanged.
+#[cfg(test)]
 fn downscale_rgba(src: &RgbaThumb, target_h: u32) -> RgbaThumb {
     let th = target_h.max(1);
     if src.width == 0 || src.height == 0 {

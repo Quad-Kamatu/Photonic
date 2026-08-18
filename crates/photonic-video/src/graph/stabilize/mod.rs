@@ -39,7 +39,8 @@ use glam::{DMat3, DQuat};
 
 use crate::graph::ir::StabilizeWarp;
 use photonic_core::timeline::{
-    MotionSample, StabilizationCropMode, StabilizationError, StabilizationSpec,
+    Clip, MotionSample, StabilizationCropMode, StabilizationError, StabilizationSpec,
+    TICKS_PER_SECOND,
 };
 
 pub use crop::{CropMode, CropSolution};
@@ -106,6 +107,9 @@ pub struct StabilizationAnalysis {
     pub diagnostics: StabilizationDiagnostics,
     /// Frame rate the corrections are indexed at.
     pub fps: f64,
+    /// Inclusive source-time range covered by `frames`, in seconds.
+    pub source_start_s: f64,
+    pub source_end_s: f64,
     /// Resolution the intrinsics below are expressed at.
     pub width: f32,
     pub height: f32,
@@ -128,10 +132,10 @@ impl StabilizationAnalysis {
 
     /// The frame index covering source time `seconds`.
     pub fn frame_index(&self, seconds: f64) -> usize {
-        if !seconds.is_finite() || seconds <= 0.0 {
+        if !seconds.is_finite() || seconds <= self.source_start_s {
             return 0;
         }
-        (seconds * self.fps).round().max(0.0) as usize
+        ((seconds - self.source_start_s) * self.fps).round().max(0.0) as usize
     }
 
     /// Build the resolved warp for `frame`.
@@ -163,7 +167,7 @@ impl StabilizationAnalysis {
 pub struct StabilizationCache {
     entries: std::collections::HashMap<
         photonic_core::timeline::ClipId,
-        std::sync::Arc<StabilizationAnalysis>,
+        (String, std::sync::Arc<StabilizationAnalysis>),
     >,
     /// Diagnostics from the most recent analyses, surfaced alongside the frame.
     pub failures: Vec<String>,
@@ -174,9 +178,11 @@ impl StabilizationCache {
     pub fn insert(
         &mut self,
         clip: photonic_core::timeline::ClipId,
+        key: String,
         analysis: StabilizationAnalysis,
     ) {
-        self.entries.insert(clip, std::sync::Arc::new(analysis));
+        self.entries
+            .insert(clip, (key, std::sync::Arc::new(analysis)));
     }
 
     /// Drop a clip's analysis, e.g. when its recipe changed.
@@ -193,8 +199,18 @@ impl crate::graph::compile::StabilizationProvider for StabilizationCache {
     fn analysis(
         &self,
         clip: photonic_core::timeline::ClipId,
+        key: &str,
+        source_start_s: f64,
+        source_end_s: f64,
     ) -> Option<std::sync::Arc<StabilizationAnalysis>> {
-        self.entries.get(&clip).cloned()
+        let (cached_key, analysis) = self.entries.get(&clip)?;
+        if cached_key != key
+            || (analysis.source_start_s - source_start_s).abs() > 1e-9
+            || (analysis.source_end_s - source_end_s).abs() > 1e-9
+        {
+            return None;
+        }
+        Some(std::sync::Arc::clone(analysis))
     }
 }
 
@@ -211,6 +227,8 @@ pub enum AnalyzeError {
     BadFrameRate,
     #[error("frame dimensions must be positive")]
     BadDimensions,
+    #[error("source-time range must be finite and non-decreasing")]
+    BadSourceRange,
     #[error("motion metadata: {0}")]
     Motion(String),
     #[error("lens profile: {0}")]
@@ -224,6 +242,34 @@ pub struct ClipGeometry {
     pub height: f64,
     pub fps: f64,
     pub frame_count: usize,
+    /// Inclusive source-time range covered by the requested clip, in seconds.
+    pub source_start_s: f64,
+    pub source_end_s: f64,
+}
+
+/// The source-time interval sampled by a clip, including trims, reverse playback,
+/// and speed ramps. The compiler and analysis path must use the same interval or
+/// a cached correction can be silently paired with the wrong source frame.
+pub fn source_time_range(clip: &Clip) -> (f64, f64) {
+    let (lo, hi) = clip.speed.source_delta_range(clip.duration);
+    let source_in = clip.source_in.as_seconds_f64();
+    let ticks = TICKS_PER_SECOND as f64;
+    (source_in + lo / ticks, source_in + hi / ticks)
+}
+
+/// Build analysis geometry for one clip at the sequence's delivery rate.
+pub fn geometry_for_clip(width: f64, height: f64, fps: f64, clip: &Clip) -> ClipGeometry {
+    let (source_start_s, source_end_s) = source_time_range(clip);
+    let source_span_s = (source_end_s - source_start_s).max(0.0);
+    let frame_count = ((source_span_s * fps).ceil() as usize).max(1);
+    ClipGeometry {
+        width,
+        height,
+        fps,
+        frame_count,
+        source_start_s,
+        source_end_s,
+    }
 }
 
 /// End-to-end: read the motion source and lens profile named by `spec`, then
@@ -302,6 +348,12 @@ pub fn analyze(
     if !(geom.width > 0.0 && geom.height > 0.0) {
         return Err(AnalyzeError::BadDimensions);
     }
+    if !geom.source_start_s.is_finite()
+        || !geom.source_end_s.is_finite()
+        || geom.source_end_s < geom.source_start_s
+    {
+        return Err(AnalyzeError::BadSourceRange);
+    }
 
     // 2 — bias.
     let bias = orientation::estimate_bias(samples);
@@ -314,7 +366,7 @@ pub fn analyze(
     let dt_s = 1.0 / geom.fps;
     let raw: Vec<DQuat> = (0..geom.frame_count)
         .map(|f| {
-            let video_ns = f as f64 * dt_s * 1e9;
+            let video_ns = (geom.source_start_s + f as f64 * dt_s) * 1e9;
             curve.sample(fit.map.sensor_ns(video_ns) as i64)
         })
         .collect();
@@ -329,7 +381,7 @@ pub fn analyze(
     if spec.horizon_lock > 0.0 {
         let mut any_accel = false;
         for (f, q) in desired.iter_mut().enumerate() {
-            let video_ns = f as f64 * dt_s * 1e9;
+            let video_ns = (geom.source_start_s + f as f64 * dt_s) * 1e9;
             let t = fit.map.sensor_ns(video_ns) as i64;
             let Some(accel) = nearest_accel(samples, t) else {
                 continue;
@@ -380,6 +432,8 @@ pub fn analyze(
     let (fx, fy, cx, cy) = lens.intrinsics_for(geom.width, geom.height);
     Ok(StabilizationAnalysis {
         frames,
+        source_start_s: geom.source_start_s,
+        source_end_s: geom.source_end_s,
         fps: geom.fps,
         width: geom.width as f32,
         height: geom.height as f32,
@@ -457,7 +511,8 @@ fn nearest_accel(samples: &[MotionSample], t_ns: i64) -> Option<[f64; 3]> {
 mod tests {
     use super::*;
     use photonic_core::timeline::{
-        LensProfileRef, MotionBinding, MotionFormat, MotionSourceRef, MotionSync,
+        ClipId, ClipSource, LensProfileRef, MotionBinding, MotionFormat, MotionSourceRef,
+        MotionSync, Ratio, SpeedMap, Tick,
     };
     use std::path::PathBuf;
 
@@ -467,6 +522,8 @@ mod tests {
             height: 1080.0,
             fps: 30.0,
             frame_count: 60,
+            source_start_s: 0.0,
+            source_end_s: 2.0,
         }
     }
 
@@ -495,6 +552,44 @@ mod tests {
                 orientation: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn geometry_tracks_trim_and_playback_speed_source_range() {
+        let mut clip = Clip::new(
+            ClipSource::SolidColor {
+                color: photonic_core::Color::WHITE,
+            },
+            Tick::ZERO,
+            Tick::from_seconds(2),
+        );
+        clip.source_in = Tick::from_seconds(10);
+        clip.speed = SpeedMap::Constant(Ratio::new(2, 1));
+
+        let geometry = geometry_for_clip(1920.0, 1080.0, 30.0, &clip);
+        assert!((geometry.source_start_s - 10.0).abs() < 1e-9);
+        assert!((geometry.source_end_s - 14.0).abs() < 1e-9);
+        assert_eq!(geometry.frame_count, 120);
+    }
+
+    #[test]
+    fn frame_index_is_relative_to_the_analyzed_source_range() {
+        let mut geometry = geom();
+        geometry.source_start_s = 10.0;
+        geometry.source_end_s = 12.0;
+        let samples = samples([0.0; 3], None, 500.0, 2.0);
+        let analysis = analyze(
+            &samples,
+            &spec(0.5),
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geometry,
+        )
+        .unwrap();
+
+        assert_eq!(analysis.source_start_s, 10.0);
+        assert_eq!(analysis.source_end_s, 12.0);
+        assert_eq!(analysis.frame_index(10.0), 0);
+        assert_eq!(analysis.frame_index(11.0), 30);
     }
 
     #[test]
@@ -616,6 +711,27 @@ mod tests {
         let a = analyze(&s, &spec(0.7), &l, geom()).unwrap();
         let b = analyze(&s, &spec(0.7), &l, geom()).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cached_analysis_requires_matching_generation_and_source_range() {
+        let s = samples([0.0; 3], None, 500.0, 2.0);
+        let analysis = analyze(
+            &s,
+            &spec(0.5),
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
+        let clip = ClipId::new();
+        let key = "generation-1".to_owned();
+        let mut cache = StabilizationCache::default();
+        cache.insert(clip, key.clone(), analysis);
+        let provider: &dyn crate::graph::compile::StabilizationProvider = &cache;
+
+        assert!(provider.analysis(clip, &key, 0.0, 2.0).is_some());
+        assert!(provider.analysis(clip, "generation-0", 0.0, 2.0).is_none());
+        assert!(provider.analysis(clip, &key, 0.0, 3.0).is_none());
     }
 
     #[test]

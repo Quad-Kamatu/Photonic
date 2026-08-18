@@ -108,7 +108,9 @@ impl MotionSourceRef {
 /// and, over a long clip, by rate.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MotionSyncAnchor {
-    /// Clip-relative video position.
+    /// Source-video position, in the media timeline. The analysis range carries
+    /// the clip's trim/speed mapping so corrections remain paired with frames
+    /// after slipping, trimming, or reversing a clip.
     pub video_tick: Tick,
     /// The sensor timestamp that corresponds to `video_tick`.
     pub sensor_time_ns: i64,

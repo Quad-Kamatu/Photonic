@@ -159,6 +159,9 @@ pub trait StabilizationProvider {
     fn analysis(
         &self,
         clip: ClipId,
+        key: &str,
+        source_start_s: f64,
+        source_end_s: f64,
     ) -> Option<std::sync::Arc<crate::graph::stabilize::StabilizationAnalysis>>;
 }
 
@@ -661,7 +664,11 @@ impl<'a> Builder<'a> {
         if spec.is_identity() {
             return None;
         }
-        let analysis = self.stabilization?.analysis(clip.id)?;
+        let key = spec.analysis_key.as_deref()?;
+        let (source_start_s, source_end_s) = crate::graph::stabilize::source_time_range(clip);
+        let analysis = self
+            .stabilization?
+            .analysis(clip.id, key, source_start_s, source_end_s)?;
         let src_time = clip.source_in + clip.speed.source_delta(dt);
         let frame = analysis.frame_index(src_time.as_seconds_f64());
         Some(analysis.warp_at(

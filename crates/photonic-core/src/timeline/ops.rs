@@ -1826,6 +1826,19 @@ pub fn set_clip_prop(
     if overlaps_other(t, new.start, new.end(), Some(new.id)) {
         return Err(EditError::Overlap);
     }
+    // A generated stabilization path is tied to the recipe and source range.
+    // Any user-visible clip/source change must force a fresh generation rather
+    // than leaving a stale analysis key attached to the edited clip.
+    if old.source != new.source
+        || old.source_in != new.source_in
+        || old.duration != new.duration
+        || old.speed != new.speed
+        || old.stabilization != new.stabilization
+    {
+        if let Some(spec) = new.stabilization.as_mut() {
+            spec.analysis_key = None;
+        }
+    }
     Ok(TimelineCmd::SetClipProp {
         seq: id,
         track: track_id,
