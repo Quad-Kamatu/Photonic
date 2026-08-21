@@ -4,7 +4,7 @@
 //! All undoable mutations route through `ops_bridge`; the one direct write is the
 //! height-drag (`height_px` is a persisted-but-non-undoable UI field, 04 §2.3).
 
-use super::{ops_bridge, put_fixed};
+use super::{ops_bridge, put_fixed, put_icon};
 use egui_phosphor::regular as ph;
 use photonic_core::document::Document;
 use photonic_core::history::{Command, CommandHistory};
@@ -116,6 +116,14 @@ pub(crate) fn draw_header(
     let btn = 18.0;
     let top = rect.top() + pad;
 
+    // The bottom row's rect is clipped where the "+ Track" footer begins. Its
+    // *background* is clipped by the painter, but widgets are not — so on a
+    // sliver of a row the toggles and the wrench would still draw at full size
+    // and spill over the footer. Nothing useful fits in a sliver anyway.
+    if rect.height() < pad + btn {
+        return;
+    }
+
     // Enable/hide (video) or mute (audio) toggle.
     let enable_rect =
         egui::Rect::from_min_size(egui::pos2(rect.left() + pad, top), egui::vec2(btn, btn));
@@ -129,7 +137,7 @@ pub(crate) fn draw_header(
         TrackKind::Video | TrackKind::Text => "Show / hide track",
         TrackKind::Audio => "Mute / unmute track",
     };
-    if put_fixed(ui, enable_rect, egui::Button::new(enable_glyph).small())
+    if put_icon(ui, enable_rect, egui::Button::new(enable_glyph).small())
         .on_hover_text(enable_tip)
         .clicked()
     {
@@ -142,7 +150,7 @@ pub(crate) fn draw_header(
     let mut next_x = enable_rect.right() + 2.0;
     if row.kind == TrackKind::Audio {
         let solo_rect = egui::Rect::from_min_size(egui::pos2(next_x, top), egui::vec2(btn, btn));
-        if put_fixed(ui, solo_rect, egui::SelectableLabel::new(solo, "S"))
+        if put_icon(ui, solo_rect, egui::SelectableLabel::new(solo, "S"))
             .on_hover_text("Solo (solo-safe)")
             .clicked()
         {
@@ -153,7 +161,7 @@ pub(crate) fn draw_header(
 
     // Lock toggle.
     let lock_rect = egui::Rect::from_min_size(egui::pos2(next_x, top), egui::vec2(btn, btn));
-    if put_fixed(
+    if put_icon(
         ui,
         lock_rect,
         egui::Button::new(if locked { "L" } else { "·" }).small(),
@@ -172,7 +180,7 @@ pub(crate) fn draw_header(
         egui::pos2(lock_rect.right() + 2.0, top),
         egui::vec2(btn, btn),
     );
-    if put_fixed(
+    if put_icon(
         ui,
         sync_rect,
         egui::Button::new(if sync_lock {
@@ -196,7 +204,7 @@ pub(crate) fn draw_header(
         egui::pos2(sync_rect.right() + 2.0, top),
         egui::vec2(btn, btn),
     );
-    if put_fixed(
+    if put_icon(
         ui,
         patch_rect,
         egui::SelectableLabel::new(is_target, ph::TARGET),
@@ -213,7 +221,7 @@ pub(crate) fn draw_header(
         egui::pos2(rect.right() - pad - btn, top),
         egui::vec2(btn, btn),
     );
-    let wrench_resp = put_fixed(ui, wrench_rect, egui::Button::new(ph::WRENCH).small())
+    let wrench_resp = put_icon(ui, wrench_rect, egui::Button::new(ph::WRENCH).small())
         .on_hover_text("Track display");
     let wrench_popup_id = wrench_resp.id.with("track_display_popup");
     if wrench_resp.clicked() {
@@ -381,28 +389,42 @@ pub(crate) fn draw_add_controls(
     // the header column is too narrow to fit three "+ Word" labels without
     // wrapping/clipping (they read as "Vide"/"Text"/"Audi"). The menu scales and
     // matches the "+ Add corrector" pattern used elsewhere (color_page.rs).
-    let inner = rect.shrink(4.0);
-    ui.allocate_ui_at_rect(inner, |ui| {
-        ui.menu_button(format!("{} Track", ph::PLUS), |ui| {
-            if ui
-                .button(format!("{} Video track", ph::FILM_STRIP))
-                .clicked()
-            {
-                ops_bridge::add_track(doc, history, seq_id, TrackKind::Video);
-                ui.close_menu();
-            }
-            if ui.button(format!("{} Text track", ph::TEXT_T)).clicked() {
-                ops_bridge::add_track(doc, history, seq_id, TrackKind::Text);
-                ui.close_menu();
-            }
-            if ui.button(format!("{} Audio track", ph::WAVEFORM)).clicked() {
-                ops_bridge::add_track(doc, history, seq_id, TrackKind::Audio);
-                ui.close_menu();
-            }
-        })
-        .response
-        .on_hover_text("Add a video, text (title), or audio track");
-    });
+    // Bottom-anchored: the navigator strip is painted *after* this, directly
+    // below `rect`, so a button laid out top-down would have its lower border
+    // covered whenever it is taller than the reserved strip (which it is at any
+    // raised UI scale). Growing upwards from the strip's floor keeps the whole
+    // button visible instead.
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 4.0, rect.top()),
+        egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0),
+    );
+    ui.allocate_new_ui(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::bottom_up(egui::Align::Min)),
+        |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.menu_button(format!("{} Track", ph::PLUS), |ui| {
+                if ui
+                    .button(format!("{} Video track", ph::FILM_STRIP))
+                    .clicked()
+                {
+                    ops_bridge::add_track(doc, history, seq_id, TrackKind::Video);
+                    ui.close_menu();
+                }
+                if ui.button(format!("{} Text track", ph::TEXT_T)).clicked() {
+                    ops_bridge::add_track(doc, history, seq_id, TrackKind::Text);
+                    ui.close_menu();
+                }
+                if ui.button(format!("{} Audio track", ph::WAVEFORM)).clicked() {
+                    ops_bridge::add_track(doc, history, seq_id, TrackKind::Audio);
+                    ui.close_menu();
+                }
+            })
+            .response
+            .on_hover_text("Add a video, text (title), or audio track");
+        },
+    );
 }
 
 /// Flip an audio track's `TrackAudio::solo` flag (14-nle-parity QW-6). The

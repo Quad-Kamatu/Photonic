@@ -52,6 +52,19 @@ pub(crate) const BG: wgpu::Color = wgpu::Color {
     b: 0.005,
     a: 1.0,
 };
+/// [`BG`] as the **swapchain** expects it.
+///
+/// `BG` is a linear-light value, correct for the sRGB scene target where the
+/// hardware re-encodes on write. The surface is a plain `*Unorm` view (see
+/// `choose_surface_config`), so a clear written there lands raw — feeding it
+/// `BG` would paint near-black instead of the window fill. These are the same
+/// colour, sRGB-encoded: `#07070B`, matching the dark theme's `window_fill`.
+pub(crate) const SURFACE_BG: wgpu::Color = wgpu::Color {
+    r: 7.0 / 255.0,
+    g: 7.0 / 255.0,
+    b: 11.0 / 255.0,
+    a: 1.0,
+};
 const MSAA_SAMPLES: u32 = 4;
 
 fn adapter_rank(device_type: wgpu::DeviceType) -> u8 {
@@ -148,6 +161,19 @@ pub struct PhotonicRenderer {
     /// export path (`headless::FORMAT`, the same sRGB format). Read back via
     /// [`scene_format`](Self::scene_format); guarded sRGB by the invariant test.
     pub(crate) scene_format: wgpu::TextureFormat,
+    /// Physical-pixel `(x, y, w, h)` the document is allowed to present into,
+    /// or `None` for the whole surface (the default, and what headless/offscreen
+    /// renderers use).
+    ///
+    /// The document pass covers the entire window, but the GUI only *shows* a
+    /// slice of it: egui's panels paint over the rest. That was fine while the
+    /// panels tiled the window edge-to-edge, and wrong once the rails and
+    /// drawers became floating cards with deliberate gaps between them — the
+    /// document (a white artboard, most of the time) showed through those gaps
+    /// as a bright bar beside the canvas. Clipping the present to the canvas
+    /// viewport leaves the gaps on the clear colour, which is the window fill
+    /// they are meant to show.
+    pub(crate) canvas_scissor: Option<(u32, u32, u32, u32)>,
 
     pub(crate) fill_pipeline: wgpu::RenderPipeline,
     /// One fill-pipeline variant per separable blend mode (Multiply/Screen/
@@ -756,6 +782,7 @@ impl PhotonicRenderer {
             surface_config,
             surface_format,
             scene_format,
+            canvas_scissor: None,
             fill_pipeline,
             blend_pipelines,
             camera_buffer,
@@ -839,6 +866,18 @@ impl PhotonicRenderer {
             Some(ExportBackground::Transparent) => wgpu::Color::TRANSPARENT,
             _ => BG,
         }
+    }
+
+    /// Restrict presentation of the document to `rect` in physical pixels
+    /// (`(x, y, w, h)`), or `None` for the whole surface.
+    ///
+    /// See [`canvas_scissor`](Self::canvas_scissor). The host sets this each
+    /// frame from the GUI's canvas viewport; anything outside stays on the clear
+    /// colour so the floating panel cards read against the window fill instead
+    /// of against the artboard.
+    pub fn set_canvas_scissor(&mut self, rect: Option<(u32, u32, u32, u32)>) {
+        // A zero-area scissor is invalid in wgpu; treat it as "nothing to show".
+        self.canvas_scissor = rect.filter(|&(_, _, w, h)| w > 0 && h > 0);
     }
 
     // ── Public accessors ──────────────────────────────────────────────────────

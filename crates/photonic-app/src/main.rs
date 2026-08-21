@@ -738,6 +738,11 @@ impl ApplicationHandler for PhotonicWinitApp {
             }
             WindowEvent::Resized(PhysicalSize { width, height }) => {
                 state.renderer.resize(width, height);
+                // The canvas-clip rect the GUI last reported belongs to the old
+                // window size. Drop it rather than clip the document with it —
+                // an unclipped frame just lets the artboard reach a few pixels
+                // it shouldn't; a wrongly clipped one blanks most of the canvas.
+                state.renderer.set_canvas_scissor(None);
                 self.window_state.update_normal_bounds(&state.window);
                 state.window.request_redraw();
             }
@@ -820,6 +825,17 @@ impl PhotonicWinitApp {
         let gui_path_before = state.gui.current_file.clone();
 
         // 1. Build document geometry + push camera
+        //
+        // Clip the document present to the canvas viewport the GUI reported last
+        // frame. The document pass covers the whole window; egui's panels used to
+        // hide all of it that isn't canvas, but the rails and drawers are floating
+        // cards now and the gaps between them let the (usually white) artboard
+        // show through as a bright bar. One frame of lag is harmless — on the very
+        // first frame, and for a frame after a resize, the scissor is simply the
+        // previous viewport.
+        state
+            .renderer
+            .set_canvas_scissor(state.gui.canvas_viewport_px());
         let (verts, idxs) = state.renderer.update();
 
         // 2. Acquire surface frame

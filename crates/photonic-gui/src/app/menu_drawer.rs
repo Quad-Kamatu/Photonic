@@ -7,13 +7,16 @@ impl PhotonicApp {
         doc: &mut Document,
         view: &mut CanvasView,
         history: &mut CommandHistory,
-        toolbar_resp: &egui::InnerResponse<()>,
+        toolbar_rect: egui::Rect,
         mut doc_modified: bool,
     ) -> bool {
+        // Height the open menu drawer occupies, used by the left rail/drawer to
+        // step out from under it (they are created later in the same frame).
+        self.menu_drawer_height = 0.0;
         if let Some(drawer_kind) = self.active_drawer {
             let screen = ctx.screen_rect();
             // Open the drawer just below the top toolbar.
-            let toolbar_bottom = toolbar_resp.response.rect.bottom();
+            let toolbar_bottom = toolbar_rect.bottom();
             let drawer_height = (screen.height() * 0.6).max(300.0);
             let content_height = drawer_height - 24.0; // subtract Frame::popup inner_margin (12 * 2)
             let drawer_width = screen.width();
@@ -188,15 +191,25 @@ impl PhotonicApp {
                                         ui.label(RichText::new("Appearance").strong());
                                         ui.add_space(4.0);
                                         ui.horizontal(|ui| {
+                                            use crate::preferences::ThemeMode;
                                             ui.label("Theme");
                                             ui.add_space(4.0);
-                                            if ui.selectable_label(self.prefs.dark_mode, format!("{} Dark", ph::MOON)).clicked() {
-                                                self.prefs.dark_mode = true;
+                                            let mode = self.prefs.theme_mode;
+                                            for (opt, label) in [
+                                                (ThemeMode::System, format!("{} System", ph::DESKTOP)),
+                                                (ThemeMode::Dark, format!("{} Dark", ph::MOON)),
+                                                (ThemeMode::Light, format!("{} Light", ph::SUN)),
+                                            ] {
+                                                if ui.selectable_label(mode == opt, label).clicked() {
+                                                    self.prefs.theme_mode = opt;
+                                                }
                                             }
-                                            if ui.selectable_label(!self.prefs.dark_mode, format!("{} Light", ph::SUN)).clicked() {
-                                                self.prefs.dark_mode = false;
-                                            }
-                                        });
+                                        })
+                                        .response
+                                        .on_hover_text(
+                                            "System follows the desktop's light/dark setting; \
+                                             Dark and Light pin the palette regardless.",
+                                        );
                                         ui.horizontal(|ui| {
                                             ui.label("UI Scale");
                                             egui::ComboBox::from_id_salt("ui_scale")
@@ -359,7 +372,13 @@ impl PhotonicApp {
                                                 .clicked()
                                             {
                                                 self.prefs.video_coach_dismissed = false;
+                                                self.prefs.video_coach_shown_once = false;
                                                 self.prefs.video_coach_step = 0;
+                                                // Re-arm the session latch too,
+                                                // so "show it again" means this
+                                                // run, not the next launch.
+                                                self.coach_allowed_this_session = true;
+                                                self.prefs.save();
                                             }
                                         });
                                         ui.add_space(4.0);
@@ -871,6 +890,9 @@ impl PhotonicApp {
                         }); // Frame::popup
                 }); // Area inner
 
+            // Publish the measured height for this frame's left rail/drawer.
+            self.menu_drawer_height = drawer_resp.response.rect.height();
+
             // Close when the user clicks outside the drawer.
             // Also exclude the toolbar and pull-tab strip so their own buttons
             // can handle toggle state without fighting this "click outside" path.
@@ -879,7 +901,7 @@ impl PhotonicApp {
                     .input(|i| i.pointer.interact_pos())
                     .map(|pos| {
                         drawer_resp.response.rect.contains(pos)
-                            || toolbar_resp.response.rect.contains(pos)
+                            || toolbar_rect.contains(pos)
                     })
                     .unwrap_or(false);
                 if !clicked_inside {

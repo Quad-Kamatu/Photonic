@@ -136,7 +136,8 @@ impl PhotonicApp {
                 }
                 PanelAction::MediaRelink { asset } => {
                     use photonic_core::timeline::ops;
-                    let picked = rfd::FileDialog::new().set_title("Relink media").pick_file();
+                    let dialog = rfd::FileDialog::new().set_title("Relink media");
+                    let picked = super::run_file_dialog(move || dialog.pick_file());
                     if let Some(new_path) = picked {
                         if let Some(p) = doc.timeline.as_ref() {
                             if let Ok(cmd) = ops::relink_asset(p, asset, new_path) {
@@ -183,10 +184,10 @@ impl PhotonicApp {
                         continue;
                     };
                     let original = original.clone();
-                    let picked = rfd::FileDialog::new()
+                    let dialog = rfd::FileDialog::new()
                         .set_title("Attach Proxy")
-                        .add_filter("Video", &["mp4", "mov", "mxf", "mkv", "m4v", "avi", "webm"])
-                        .pick_file();
+                        .add_filter("Video", &["mp4", "mov", "mxf", "mkv", "m4v", "avi", "webm"]);
+                    let picked = super::run_file_dialog(move || dialog.pick_file());
                     let Some(proxy_path) = picked else {
                         continue;
                     };
@@ -2876,11 +2877,10 @@ impl PhotonicApp {
                     // rejected while the user is still looking at the picker,
                     // rather than surfacing later as a mysterious failed
                     // analysis. 22 §6.6 — report, never guess.
-                    if let Some(path) = rfd::FileDialog::new()
+                    let dialog = rfd::FileDialog::new()
                         .add_filter("Gyro metadata", &["gcsv", "json"])
-                        .set_title("Select gyro/IMU sidecar")
-                        .pick_file()
-                    {
+                        .set_title("Select gyro/IMU sidecar");
+                    if let Some(path) = super::run_file_dialog(move || dialog.pick_file()) {
                         match photonic_video::media::parse_motion(&path) {
                             Ok(series) => {
                                 let spec = photonic_core::timeline::StabilizationSpec::new(
@@ -7323,17 +7323,18 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         bin: Option<photonic_core::timeline::BinId>,
     ) -> bool {
-        let files = rfd::FileDialog::new()
-            .set_title("Import media")
-            .add_filter(
-                "Media",
-                &[
-                    "mp4", "mov", "mkv", "avi", "webm", "m4v", "mts", "mxf", "mp3", "wav", "aac",
-                    "flac", "ogg", "m4a", "opus", "png", "jpg", "jpeg", "gif", "webp", "bmp",
-                    "tiff", "tif", "exr", "svg", "photon", "cube",
-                ],
-            )
-            .pick_files();
+        // Off the render thread — see `run_file_dialog_multi`. Called inline
+        // here, the portal never replies and the app hangs hard enough to be
+        // force-quit mid-import.
+        let dialog = rfd::FileDialog::new().set_title("Import media").add_filter(
+            "Media",
+            &[
+                "mp4", "mov", "mkv", "avi", "webm", "m4v", "mts", "mxf", "mp3", "wav", "aac",
+                "flac", "ogg", "m4a", "opus", "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff",
+                "tif", "exr", "svg", "photon", "cube",
+            ],
+        );
+        let files = super::run_file_dialog_multi(move || dialog.pick_files());
         let Some(paths) = files else {
             return false;
         };

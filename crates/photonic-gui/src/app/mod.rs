@@ -891,6 +891,12 @@ pub struct PhotonicApp {
     /// §1.2 First-run hint). Session state; the "has this been shown before"
     /// bit is `prefs.video_shortcuts_intro_shown` (persisted).
     pub(crate) show_video_shortcut_sheet: bool,
+    /// This session may still show the first-run video coach card. Latched from
+    /// `!prefs.video_coach_shown_once` at startup so the guide is a *first-run*
+    /// guide: once it has appeared on one launch it never returns, whether or
+    /// not the user pressed Next/Skip before quitting. The "Reset video coach
+    /// marks" preference re-arms both this and the persisted bit.
+    pub(crate) coach_allowed_this_session: bool,
     /// First frame's CLI/double-click auto-enter check (04 §1.2 "Auto-enter on
     /// open") has run. Guards `ensure_initial_tab`'s one-shot sibling check so
     /// it only inspects `doc.timeline` once, on the very first `draw` call.
@@ -936,6 +942,12 @@ pub struct PhotonicApp {
     pub(crate) node_canvas_active: bool,
     /// [audio_mixer, 09] Track strips whose EQ/comp/automation are expanded.
     pub(crate) mixer_expanded_tracks: std::collections::HashSet<TrackId>,
+    /// [audio_mixer, 09] The mixer is a floating window, not a right-rail
+    /// drawer. A channel strip is 88 px wide and its fader column alone is
+    /// ~140 px tall, so a rack of them plus the master bus never fitted the
+    /// 220–480 px drawer — every strip past the first was clipped. The rail
+    /// button toggles this instead.
+    pub(crate) audio_mixer_window_open: bool,
     /// [clip_inspector, 04 §4.1 / 01 §6] Clip whose animated props the keyframe
     /// editor targets.
     pub(crate) keyframe_editor_target: Option<ClipId>,
@@ -1161,6 +1173,10 @@ pub struct PhotonicApp {
     /// Canvas viewport rect captured this frame — used to recenter the view
     /// when the Navigator emits a `CenterViewOn` action.
     last_canvas_rect: Option<egui::Rect>,
+    /// [`last_canvas_rect`](Self::last_canvas_rect) in physical pixels, captured
+    /// with the `pixels_per_point` in force when it was laid out. Read by the
+    /// host through [`canvas_viewport_px`](Self::canvas_viewport_px).
+    last_canvas_rect_px: Option<(u32, u32, u32, u32)>,
     /// egui time (seconds) of the last throttled history size-cap check, so
     /// size-mode enforcement runs ~every 1.5 s instead of every frame.
     last_history_size_check: f64,
@@ -1242,6 +1258,12 @@ pub struct PhotonicApp {
     pub prefs: AppPreferences,
     /// Which top-bar drawer is open, if any.
     pub active_drawer: Option<DrawerKind>,
+    /// Height of the open File/Edit/Tools menu drawer this frame, 0 when none is
+    /// open. That drawer is a full-width foreground strip anchored under the top
+    /// toolbar, so it lands squarely on top of the left rail and left drawer —
+    /// its own option list ends up stacked over the rail's icons. The left
+    /// panels step down by this much while it is open.
+    pub(crate) menu_drawer_height: f32,
     /// Which option is selected in the currently open drawer (index into the options list).
     /// Resets to None whenever active_drawer changes.
     selected_drawer_option: Option<usize>,
@@ -1608,6 +1630,7 @@ impl Default for PhotonicApp {
             monitor_comp_grid: 0,
             monitor_transform_tool: false,
             show_video_shortcut_sheet: false,
+            coach_allowed_this_session: false,
             initial_mode_checked: false,
             engine: None,
             /// K-F1 shared multi-job export queue (marker multi-export / multi-format).
@@ -1623,6 +1646,7 @@ impl Default for PhotonicApp {
             selected_graph_node: None,
             node_canvas_active: false,
             mixer_expanded_tracks: std::collections::HashSet::new(),
+            audio_mixer_window_open: false,
             keyframe_editor_target: None,
             caption_edit_cue: None,
             export_dialog_open: false,
@@ -1710,6 +1734,7 @@ impl Default for PhotonicApp {
             fill_swatch_dirty: false,
             hotbar_cache: None,
             last_canvas_rect: None,
+            last_canvas_rect_px: None,
             last_history_size_check: 0.0,
             history_pressure_warned: false,
             cached_history_bytes: (f64::NEG_INFINITY, 0),
@@ -1737,6 +1762,7 @@ impl Default for PhotonicApp {
             smooth: SmoothViewState::default(),
             prefs: AppPreferences::default(),
             active_drawer: None,
+            menu_drawer_height: 0.0,
             selected_drawer_option: None,
 
             show_welcome: false,
@@ -1849,9 +1875,26 @@ impl Default for PhotonicApp {
 /// .../request/...ashpd_...`). Spawning the dialog on a dedicated thread gives
 /// the portal its own context and avoids the re-entrancy. The UI thread blocks
 /// on `join()` while the dialog is open, which is the expected modal behaviour.
-fn run_file_dialog<F>(f: F) -> Option<std::path::PathBuf>
+pub(crate) fn run_file_dialog<F>(f: F) -> Option<std::path::PathBuf>
 where
     F: FnOnce() -> Option<std::path::PathBuf> + Send + 'static,
+{
+    std::thread::spawn(f).join().unwrap_or(None)
+}
+
+/// [`run_file_dialog`] for a multi-select picker.
+///
+/// Every native dialog **must** go through one of these two. `rfd` on Linux
+/// talks to `xdg-desktop-portal` over D-Bus and blocks on the reply; called
+/// straight from the render thread that reply never comes, because the portal
+/// handshake needs the app to keep servicing its own event loop. The window
+/// then stops responding and the desktop offers to force-quit it, which reads
+/// as "importing media crashes the app" (and leaves a `SI_USER` SIGABRT core,
+/// not a panic). Handing the call to a scratch thread keeps the portal
+/// conversation off the thread that has to answer it.
+pub(crate) fn run_file_dialog_multi<F>(f: F) -> Option<Vec<std::path::PathBuf>>
+where
+    F: FnOnce() -> Option<Vec<std::path::PathBuf>> + Send + 'static,
 {
     std::thread::spawn(f).join().unwrap_or(None)
 }
@@ -2175,6 +2218,19 @@ fn write_photon_file(
 
 impl PhotonicApp {
     /// Take a palette MCP request for execution by the application host.
+    /// The canvas viewport in **physical pixels** `(x, y, w, h)` as laid out on
+    /// the previous frame, or `None` before the first frame.
+    ///
+    /// The host clips the document present to this so the artboard cannot bleed
+    /// into the gutters between the floating panel cards. Converted here rather
+    /// than in the host because the conversion must use the same
+    /// `pixels_per_point` egui laid the rect out with — reading it a frame later
+    /// can pick up a different value across a DPI or zoom change and clip the
+    /// canvas to the wrong box.
+    pub fn canvas_viewport_px(&self) -> Option<(u32, u32, u32, u32)> {
+        self.last_canvas_rect_px
+    }
+
     pub fn take_mcp_operation_request(&mut self) -> Option<String> {
         self.mcp_operation_request.take()
     }
@@ -2192,6 +2248,8 @@ impl PhotonicApp {
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
         s.timeline_snap_enabled = s.prefs.timeline_snap_enabled;
+        // First-run coach: allowed only on a launch that has never shown it.
+        s.coach_allowed_this_session = !s.prefs.video_coach_shown_once;
         s.open_drawer = open_drawer;
         if let Some(g) = open_drawer {
             s.last_drawer_group = g;
@@ -2205,6 +2263,15 @@ impl PhotonicApp {
         s.open_right_drawer = s.prefs.open_right_drawer;
         if let Some(g) = s.prefs.open_right_drawer {
             s.last_right_drawer_group = g;
+        }
+        // The mixer moved out of the right drawer into a floating window; a
+        // preferences file from before that would otherwise open an empty
+        // drawer with no way to notice it was the mixer.
+        if s.open_right_drawer == Some(RightDrawerGroup::AudioMixer) {
+            s.open_right_drawer = None;
+            s.prefs.open_right_drawer = None;
+            s.last_right_drawer_group = RightDrawerGroup::Layers;
+            s.audio_mixer_window_open = true;
         }
         s
     }
@@ -2223,6 +2290,8 @@ impl PhotonicApp {
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
         s.timeline_snap_enabled = s.prefs.timeline_snap_enabled;
+        // First-run coach: allowed only on a launch that has never shown it.
+        s.coach_allowed_this_session = !s.prefs.video_coach_shown_once;
         s.open_drawer = open_drawer;
         if let Some(g) = open_drawer {
             s.last_drawer_group = g;
@@ -2236,6 +2305,15 @@ impl PhotonicApp {
         s.open_right_drawer = s.prefs.open_right_drawer;
         if let Some(g) = s.prefs.open_right_drawer {
             s.last_right_drawer_group = g;
+        }
+        // The mixer moved out of the right drawer into a floating window; a
+        // preferences file from before that would otherwise open an empty
+        // drawer with no way to notice it was the mixer.
+        if s.open_right_drawer == Some(RightDrawerGroup::AudioMixer) {
+            s.open_right_drawer = None;
+            s.prefs.open_right_drawer = None;
+            s.last_right_drawer_group = RightDrawerGroup::Layers;
+            s.audio_mixer_window_open = true;
         }
         s
     }
@@ -2930,11 +3008,20 @@ impl PhotonicApp {
         }
 
         // ── Apply theme ───────────────────────────────────────────────────────
-        if self.prefs.dark_mode {
-            ctx.set_visuals(crate::theme::build_dark_theme());
-        } else {
-            ctx.set_visuals(crate::theme::build_light_theme());
-        }
+        // Install *both* palettes, then let the preference pick between them.
+        //
+        // `Context::set_visuals` writes only the slot for the theme that happens
+        // to be active, and egui's `theme_preference` defaults to `System`. So
+        // writing one palette left the other slot holding egui's stock visuals,
+        // and on a light desktop the app came up in egui's default light theme no
+        // matter what the preference said. Filling both slots makes the palette
+        // correct whichever way the preference — or the desktop — resolves.
+        ctx.set_visuals_of(egui::Theme::Dark, crate::theme::build_dark_theme());
+        ctx.set_visuals_of(egui::Theme::Light, crate::theme::build_light_theme());
+        ctx.set_theme(self.prefs.theme_mode.to_egui());
+        // Mirror the *resolved* choice so the hand-picked colours elsewhere
+        // (rulers, scrims, canvas overlays) follow a System resolution too.
+        self.prefs.dark_mode = ctx.theme() == egui::Theme::Dark;
         // Apply the user's UI scale as a *zoom factor* composed on top of the
         // window's native scale factor — NOT as an absolute pixels-per-point.
         // Using an absolute ppp here decouples egui's layout/hit-testing from the
@@ -3307,7 +3394,8 @@ impl PhotonicApp {
             self.selected_drawer_option = None;
         }
 
-        doc_modified = self.draw_menu_drawer(ctx, doc, view, history, &toolbar_resp, doc_modified);
+        let toolbar_rect = toolbar_resp.response.rect;
+        doc_modified = self.draw_menu_drawer(ctx, doc, view, history, toolbar_rect, doc_modified);
 
         // ── Bottom status bar ────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("statusbar")
@@ -3408,8 +3496,11 @@ impl PhotonicApp {
         // A group with no content for the current context is DISABLED, and an
         // open drawer whose content disappears animates closed (and reappears
         // when the context returns) via `effective_open` — no state churn.
-        let sel_count = doc.selection.node_ids.len();
-        let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
+        let node_sel_count = doc.selection.node_ids.len();
+        let clip_sel_count = self.timeline_selection.len();
+        let effective_open =
+            self.open_drawer
+                .filter(|g| g.has_content(node_sel_count, clip_sel_count));
         // ── Rail / drawer card layout ─────────────────────────────────────────
         // Shared knobs for the floating rail + drawer "cards". Both use the same
         // corner radius, border, and vertical float; the rail stays flush with
@@ -3422,7 +3513,13 @@ impl PhotonicApp {
         const RAIL_PAD_Y: f32 = 4.0; // rail inner top/bottom padding
         const RAIL_GAP: f32 = 4.0; // gap on the rail's right, before the drawer
         const DRAWER_GAP: f32 = 3.0; // gap on the drawer's left, after the rail
-        const DRAWER_FLOAT_X: f32 = 4.0; // gap on the drawer's right, off the canvas
+        // Gap on the drawer's right, off the canvas. Kept at 0 so the floating
+        // card does not leave a pure-black window-fill strip between the left
+        // drawer and the preview — that strip stacked with the monitor's
+        // pillarbox and read as a stubborn "black box" when flipping tabs.
+        // Top/bottom float (`CARD_FLOAT_Y`) still gives the card its rounded
+        // corners against the window fill.
+        const DRAWER_FLOAT_X: f32 = 0.0;
         const DRAWER_PAD_X: f32 = 10.0; // drawer inner left/right content gutter
         const DRAWER_PAD_Y: f32 = 8.0; // drawer inner top/bottom content gutter
                                        // Rail width is fully determined by its padding, icon size and right gap.
@@ -3449,7 +3546,7 @@ impl PhotonicApp {
             f.outer_margin = egui::Margin {
                 left: 0.0,
                 right: RAIL_GAP,
-                top: CARD_FLOAT_Y,
+                top: CARD_FLOAT_Y + self.menu_drawer_height,
                 bottom: CARD_FLOAT_Y,
             };
             // Round only the two right corners; the left edge is the window edge.
@@ -3477,7 +3574,7 @@ impl PhotonicApp {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     for group in DrawerGroup::all_for_mode(self.mode).iter().copied() {
                         let active = effective_open == Some(group);
-                        let enabled = group.has_content(sel_count);
+                        let enabled = group.has_content(node_sel_count, clip_sel_count);
                         let resp = ui
                             .add_enabled(
                                 enabled,
@@ -3552,7 +3649,9 @@ impl PhotonicApp {
         // `animate_bool_with_time_and_easing` requests repaint while in flight.
         // Reduced-motion makes the transition instant.
         // Recompute after the rail click so opening/closing animates this frame.
-        let effective_open = self.open_drawer.filter(|g| g.has_content(sel_count));
+        let effective_open =
+            self.open_drawer
+                .filter(|g| g.has_content(node_sel_count, clip_sel_count));
         let drawer_open = effective_open.is_some();
         let anim_time = if self.prefs.reduced_motion { 0.0 } else { 0.18 };
         let t = ctx.animate_bool_with_time_and_easing(
@@ -3590,13 +3689,25 @@ impl PhotonicApp {
                 f.outer_margin = egui::Margin {
                     left: DRAWER_GAP,
                     right: DRAWER_FLOAT_X,
-                    top: CARD_FLOAT_Y,
+                    top: CARD_FLOAT_Y + self.menu_drawer_height,
                     bottom: CARD_FLOAT_Y,
                 };
                 f.rounding = egui::Rounding::same(CARD_ROUNDING);
                 f.stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
                 f
             };
+            // Hold the panel at the user's width; content is never allowed to
+            // widen it (see `pin_side_panel_width`).
+            let drawer_id = egui::Id::new("properties");
+            let dragging_width = pin_side_panel_width(
+                ctx,
+                drawer_id,
+                if fully_open {
+                    target_w
+                } else {
+                    (target_w * t).max(1.0)
+                },
+            );
             let mut panel = egui::SidePanel::left("properties")
                 .frame(drawer_frame)
                 // No default separator line — the card's own border defines its edge.
@@ -3613,11 +3724,47 @@ impl PhotonicApp {
                 panel.resizable(false).exact_width((target_w * t).max(1.0))
             };
             let resp = panel.show(ctx, |ui| {
+                // Fill the panel. `Frame` sizes itself to its *content*, so a
+                // drawer whose widest row is narrower than the panel painted a
+                // card that stopped short of the panel's right edge — leaving a
+                // wide unpainted band between the card and the canvas. (Before
+                // the width was pinned this hid itself, because egui fed that
+                // short frame rect back as the panel's next width and the panel
+                // just crept narrower every frame instead.)
+                // Use `max_rect` (not `available_width`) so the first widget in
+                // the drawer can't shrink the reported width before we pin it.
+                let fill = ui.max_rect().size();
+                ui.set_min_size(fill);
                 // Cross-fade the content with the slide (alpha tracks the eased
                 // width factor) so the transition clearly reads as an animation
                 // rather than a pop.
                 ui.set_opacity(t);
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                // Both axes scrollable, `auto_shrink` off on both. A scroll
+                // area only bounds an axis it can actually scroll: a
+                // `vertical()` one still reports its *content's* width, which is
+                // the whole problem here. `auto_shrink` off on BOTH axes is what actually pins the
+                // drawer's width. A `Frame` reports its content's size, and a
+                // `SidePanel` re-reads that as its own width next frame — so a
+                // single intrinsically-wide row (a long media filename plus its
+                // metadata is ~570 px) drags the whole panel out to match,
+                // overriding the width the user picked. A scroll area with
+                // `auto_shrink[0] == false` reports the viewport width instead
+                // of the content width, which severs that feedback loop; content
+                // wider than the drawer now scrolls rather than widening it.
+                // Disable drag-to-scroll while the speed-ramp handles are
+                // being dragged — otherwise `ScrollArea::both` steals the
+                // pointer and the curve never tracks the mouse.
+                let speed_dragging = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<bool>(egui::Id::new("speed_curve_dragging")))
+                    .unwrap_or(false);
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new("speed_curve_dragging"), false);
+                });
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .drag_to_scroll(!speed_dragging)
+                    .show(ui, |ui| {
                     if render_group == DrawerGroup::Tools {
                         // Tools drawer: render the tool palette + apply selection.
                         if let Some(tool) =
@@ -3643,8 +3790,10 @@ impl PhotonicApp {
                 });
             });
             // Capture a user resize of the fully-open drawer so it persists
-            // (in-memory now; flushed to disk on the next toggle/close).
-            if fully_open {
+            // (in-memory now; flushed to disk on the next toggle/close). Only a
+            // real handle drag counts — otherwise a content-driven width bump
+            // would be written back as if the user had asked for it.
+            if fully_open && dragging_width {
                 let w = resp.response.rect.width();
                 if (w - self.prefs.drawer_width).abs() > 0.5 {
                     self.prefs.drawer_width = w;
@@ -3691,7 +3840,16 @@ impl PhotonicApp {
                 ui.add_space(6.0);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     for group in RightDrawerGroup::all_for_mode(self.mode).iter().copied() {
-                        let active = self.open_right_drawer == Some(group);
+                        // The mixer is the one group that does not fit a drawer
+                        // (see `audio_mixer_window_open`); its rail button toggles
+                        // the floating window instead, keeping the entry point
+                        // exactly where it has always been.
+                        let is_mixer = group == RightDrawerGroup::AudioMixer;
+                        let active = if is_mixer {
+                            self.audio_mixer_window_open
+                        } else {
+                            self.open_right_drawer == Some(group)
+                        };
                         let resp = ui
                             .add(
                                 egui::Button::new(RichText::new(group.icon()).size(18.0))
@@ -3700,12 +3858,16 @@ impl PhotonicApp {
                             )
                             .on_hover_text(group.title());
                         if resp.clicked() {
-                            self.open_right_drawer = if active { None } else { Some(group) };
-                            if let Some(g) = self.open_right_drawer {
-                                self.last_right_drawer_group = g;
+                            if is_mixer {
+                                self.audio_mixer_window_open = !active;
+                            } else {
+                                self.open_right_drawer = if active { None } else { Some(group) };
+                                if let Some(g) = self.open_right_drawer {
+                                    self.last_right_drawer_group = g;
+                                }
+                                self.prefs.open_right_drawer = self.open_right_drawer;
+                                self.prefs.save();
                             }
-                            self.prefs.open_right_drawer = self.open_right_drawer;
-                            self.prefs.save();
                         }
                         ui.add_space(4.0);
                     }
@@ -3746,6 +3908,15 @@ impl PhotonicApp {
                 f.stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
                 f
             };
+            let right_dragging_width = pin_side_panel_width(
+                ctx,
+                egui::Id::new("right_properties"),
+                if fully_open {
+                    right_target_w
+                } else {
+                    (right_target_w * rt).max(1.0)
+                },
+            );
             let mut panel = egui::SidePanel::right("right_properties")
                 .frame(right_drawer_frame)
                 .show_separator_line(false);
@@ -3764,6 +3935,9 @@ impl PhotonicApp {
             // SetGrade → CommandHistory) marks the document dirty.
             let right_rev_before = history.revision();
             let resp = panel.show(ctx, |ui| {
+                // Fill the panel — see the left drawer for why.
+                let fill = ui.max_rect().size();
+                ui.set_min_size(fill);
                 ui.set_opacity(rt);
                 match right_render_group {
                     RightDrawerGroup::Layers => {
@@ -3796,10 +3970,10 @@ impl PhotonicApp {
                             &mut self.scopes_panel_open,
                         );
                     }
-                    RightDrawerGroup::AudioMixer => {
-                        let mut vid = self.video_panel_ui();
-                        panels::video::audio_mixer::draw_audio_mixer(ui, &mut vid);
-                    }
+                    // Hosted in a floating window instead — a stale
+                    // `open_right_drawer` from an older build is migrated away
+                    // in `PhotonicApp::new`, so this arm draws nothing.
+                    RightDrawerGroup::AudioMixer => {}
                     RightDrawerGroup::History => {
                         egui::ScrollArea::vertical()
                             .id_salt("right_history_scroll")
@@ -3818,7 +3992,7 @@ impl PhotonicApp {
                     RightDrawerGroup::Unknown => {}
                 }
             });
-            if fully_open {
+            if fully_open && right_dragging_width {
                 let w = resp.response.rect.width();
                 if (w - self.prefs.right_drawer_width).abs() > 0.5 {
                     self.prefs.right_drawer_width = w;
@@ -3858,6 +4032,31 @@ impl PhotonicApp {
                 .show(ctx, |ui| {
                     self.draw_timeline_panel(ui, doc, history);
                 });
+        }
+
+        // ── Audio mixer (floating window, 09) ────────────────────────────────
+        // A rack of 88 px channel strips plus the master bus needs far more
+        // room than the right drawer can give, so the mixer floats. Foreground
+        // order keeps it above every panel (it is a monitoring surface — it has
+        // to stay legible while you drive the timeline underneath it), and both
+        // axes scroll so a narrow app window clips nothing.
+        if self.mode == AppMode::Video && self.audio_mixer_window_open {
+            let mut open = true;
+            egui::Window::new(format!("{}  Audio Mixer", ph::SLIDERS))
+                .id(egui::Id::new("audio_mixer_window"))
+                .order(egui::Order::Foreground)
+                .open(&mut open)
+                .collapsible(true)
+                .resizable(true)
+                .default_size(egui::vec2(620.0, 460.0))
+                .min_width(260.0)
+                .min_height(240.0)
+                .default_pos(ctx.screen_rect().center() - egui::vec2(310.0, 230.0))
+                .show(ctx, |ui| {
+                    let mut vid = self.video_panel_ui();
+                    panels::video::audio_mixer::draw_audio_mixer(ui, &mut vid);
+                });
+            self.audio_mixer_window_open = open;
         }
 
         // ── Audit panel (floating window) ────────────────────────────────────
@@ -3983,6 +4182,26 @@ impl PhotonicApp {
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 self.last_canvas_rect = Some(rect);
+                {
+                    let ppp = ui.ctx().pixels_per_point();
+                    let x = (rect.min.x * ppp).floor().max(0.0) as u32;
+                    let y = (rect.min.y * ppp).floor().max(0.0) as u32;
+                    let w = (rect.width() * ppp).ceil().max(0.0) as u32;
+                    let h = (rect.height() * ppp).ceil().max(0.0) as u32;
+                    let px = Some((x, y, w, h));
+                    // The host clips the document to this, but it only learns
+                    // about it on the *next* frame — so the frame a panel opens,
+                    // closes, or is dragged, the document is still clipped to the
+                    // old viewport. Left alone that would be permanent, not
+                    // transient: egui stops repainting the moment the UI settles,
+                    // so the mis-clipped frame is the one left on screen. Asking
+                    // for one more frame whenever the viewport moves guarantees
+                    // the last frame drawn is always a correctly clipped one.
+                    if px != self.last_canvas_rect_px {
+                        ui.ctx().request_repaint();
+                    }
+                    self.last_canvas_rect_px = px;
+                }
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
                 // ── Deferred fit-to-viewport on new/open ─────────────────────
@@ -6531,6 +6750,43 @@ impl PhotonicApp {
 /// every viewport shortcut so typing never accidentally mutates the canvas.
 fn viewport_kb(ctx: &egui::Context) -> bool {
     !ctx.wants_keyboard_input()
+}
+
+/// Force the width `egui` remembers for `panel_id` to `want`, and report whether
+/// the user is currently dragging that panel's resize handle.
+///
+/// `SidePanel` derives its width from the rect it stored on the previous frame,
+/// and that stored rect is the *frame* rect — which is the content's minimum
+/// size, not the size we asked for. So any drawer whose widest row needs more
+/// room than the panel currently has silently widens the panel, permanently.
+/// Our drawers trip that on every single open, because the width tween renders
+/// real content into a panel only a few pixels wide; the panel then settles at
+/// whatever that group's content demanded rather than at the user's width, which
+/// is why flipping between rail tabs appeared to resize the drawer at random.
+///
+/// Overwriting the stored width before egui reads it makes a deliberate drag the
+/// only thing that can change the width. Returns `true` while such a drag is in
+/// flight (the caller must leave the width alone, and only then persist it).
+fn pin_side_panel_width(ctx: &egui::Context, panel_id: egui::Id, want: f32) -> bool {
+    let resizing = ctx
+        .read_response(panel_id.with("__resize"))
+        .is_some_and(|r| r.dragged());
+    if resizing {
+        return true;
+    }
+    // Only the width of the stored rect is read back; its position is recomputed
+    // from the available area each frame, so anchoring at `min.x` is fine for a
+    // right-hand panel too.
+    if let Some(state) = egui::containers::panel::PanelState::load(ctx, panel_id) {
+        if (state.rect.width() - want).abs() > 0.01 {
+            let mut rect = state.rect;
+            rect.max.x = rect.min.x + want;
+            ctx.data_mut(|d| {
+                d.insert_persisted(panel_id, egui::containers::panel::PanelState { rect })
+            });
+        }
+    }
+    false
 }
 
 /// Flatten a kurbo `BezPath` into screen-space egui points, approximating

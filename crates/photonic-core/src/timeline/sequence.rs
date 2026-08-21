@@ -186,7 +186,11 @@ fn default_audio_rate() -> u32 {
 impl Default for ProjectVideoSettings {
     fn default() -> Self {
         ProjectVideoSettings {
-            generate_proxies: false,
+            // On by default: 4K60 high-bitrate phone/drone clips (DJI, etc.)
+            // cannot real-time software-decode, so Draft/playback needs the
+            // half-res all-intra proxy. Users can still turn this off per
+            // project in the media-pool settings.
+            generate_proxies: true,
             cache_limit_mb: None,
             default_frame_rate: default_frame_rate(),
             audio_sample_rate: default_audio_rate(),

@@ -1061,25 +1061,31 @@ impl PhotonicApp {
         );
 
         // Background + letterbox/pillarbox bars (04 §3.3).
-        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(12, 12, 14));
+        // Use window_fill (`surface-base`) so residual bars match the floating
+        // card gutters instead of reading as a separate pure-black slab.
+        painter.rect_filled(rect, 0.0, ui.visuals().window_fill);
         let target_aspect = format.width.max(1) as f32 / format.height.max(1) as f32;
         let avail_w = image_area.width().max(1.0);
         let avail_h = image_area.height().max(1.0);
+        let avail_aspect = avail_w / avail_h;
 
         // Image zoom (14 §M-5 polish): `Fit` letterboxes into the available
         // area exactly as before; `Actual` shows the frame at native pixels,
         // draggable when it overflows the content area.
         let mut zoom = self.monitor_zoom_state(ctx);
-        let video_size = match zoom.mode {
+        let (video_size, fit_pillarbox) = match zoom.mode {
             ImageZoomMode::Fit => {
-                let avail_aspect = avail_w / avail_h;
                 if avail_aspect > target_aspect {
-                    egui::vec2(avail_h * target_aspect, avail_h) // pillarbox
+                    // Image is narrower than the area → side bars (pillarbox).
+                    (egui::vec2(avail_h * target_aspect, avail_h), true)
                 } else {
-                    egui::vec2(avail_w, avail_w / target_aspect) // letterbox
+                    // Image is shorter than the area → top/bottom bars (letterbox).
+                    (egui::vec2(avail_w, avail_w / target_aspect), false)
                 }
             }
-            ImageZoomMode::Actual => egui::vec2(format.width as f32, format.height as f32),
+            ImageZoomMode::Actual => {
+                (egui::vec2(format.width as f32, format.height as f32), false)
+            }
         };
         if zoom.mode == ImageZoomMode::Fit {
             zoom.pan = egui::Vec2::ZERO;
@@ -1107,7 +1113,21 @@ impl PhotonicApp {
             }
         }
         self.set_monitor_zoom_state(ctx, zoom);
-        let video_rect = egui::Rect::from_center_size(image_area.center() + zoom.pan, video_size);
+        // Fit + pillarbox: pin the frame to the LEFT of `image_area` so the
+        // leftover bar sits on the right (next to the meter / right rail)
+        // instead of splitting into a dead black box between the left drawer
+        // and the preview — that gap is what reads as a UI defect when flipping
+        // aspect-ratio tabs (Social 16:9 / 9:16 / 1:1 …). Letterbox (top/bottom
+        // bars) and Actual mode stay centered.
+        let video_rect = if fit_pillarbox {
+            let top = image_area.center().y - video_size.y * 0.5;
+            egui::Rect::from_min_size(
+                egui::pos2(image_area.left(), top) + zoom.pan,
+                video_size,
+            )
+        } else {
+            egui::Rect::from_center_size(image_area.center() + zoom.pan, video_size)
+        };
         // Clipped to `image_area` (not `content_rect`) so a zoomed-in
         // (Actual) frame can't paint over the format/scrub/transport bars
         // above and below it, nor over the master-meter column beside it.
@@ -1380,6 +1400,10 @@ impl PhotonicApp {
                 // aspect/reframe controls above. Added in reverse (right_to_
                 // left) order so Resolution reads before Zoom, left to right.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Right gutter, mirroring the `add_space(4.0)` on the left:
+                    // without it the zoom combo's right border lands exactly on
+                    // the panel's clip edge and gets shaved off.
+                    ui.add_space(4.0);
                     self.draw_zoom_selector(ui);
                     ui.separator();
                     self.draw_resolution_selector(ui);
@@ -1451,6 +1475,10 @@ impl PhotonicApp {
     ) {
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.horizontal_centered(|ui| {
+                // The transport plate starts flush against the panel's clip
+                // edge, so without a gutter the first button's left border is
+                // shaved off. Same gutter the format bar above already uses.
+                ui.add_space(4.0);
                 if ui
                     .button(ph::SKIP_BACK)
                     .on_hover_text("Playhead to Start (Home)")
@@ -1938,8 +1966,19 @@ impl PhotonicApp {
     /// Three-step coach: Import → Split → Export (proposal 213 §4).
     /// Dismissible; reset from Preferences → Behavior.
     pub(crate) fn draw_video_coach_marks(&mut self, ctx: &egui::Context, doc: &Document) {
-        if self.prefs.video_coach_dismissed || self.mode != AppMode::Video {
+        if self.prefs.video_coach_dismissed
+            || !self.coach_allowed_this_session
+            || self.mode != AppMode::Video
+        {
             return;
+        }
+        // Burn the persisted "first run" bit the moment the card is about to be
+        // drawn, not when it is dismissed. Quitting mid-guide used to leave the
+        // bit unset, so the guide reappeared on every launch; recording it here
+        // makes "first time" mean the first launch that actually showed it.
+        if !self.prefs.video_coach_shown_once {
+            self.prefs.video_coach_shown_once = true;
+            self.prefs.save();
         }
         // Reduced motion: still show the card (static), just no tween elsewhere.
         let mut step = self.prefs.video_coach_step.min(2);
@@ -1997,7 +2036,14 @@ impl PhotonicApp {
                         ui.label(body);
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button(next_label).clicked() {
+                            // Skip and Next are peers, so they get one shared
+                            // size — the old `small_button` made Skip visibly
+                            // shorter than its neighbour.
+                            let btn = egui::vec2(72.0, ui.spacing().interact_size.y);
+                            if ui
+                                .add_sized(btn, egui::Button::new(next_label))
+                                .clicked()
+                            {
                                 let (new_step, dismissed) =
                                     crate::preferences::coach_advance_button(step);
                                 if dismissed {
@@ -2007,7 +2053,7 @@ impl PhotonicApp {
                                 }
                                 self.prefs.save();
                             }
-                            if ui.small_button("Skip").clicked()
+                            if ui.add_sized(btn, egui::Button::new("Skip")).clicked()
                                 && crate::preferences::coach_skip_dismisses()
                             {
                                 self.prefs.video_coach_dismissed = true;

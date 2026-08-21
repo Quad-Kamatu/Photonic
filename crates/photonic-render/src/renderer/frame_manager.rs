@@ -96,8 +96,11 @@ impl PhotonicRenderer {
                 view: target,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // The full-screen quad writes every pixel, so the load is moot.
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    // The quad is full-screen, but `canvas_scissor` may clip it
+                    // to the GUI's canvas viewport — so the load *is* what shows
+                    // outside that viewport. Clear to the window fill, which is
+                    // what the gaps between the floating panel cards should be.
+                    load: wgpu::LoadOp::Clear(super::SURFACE_BG),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -107,6 +110,18 @@ impl PhotonicRenderer {
         });
         pass.set_pipeline(&self.blit_pipeline);
         pass.set_bind_group(0, &bind, &[]);
+        // Clip the document to the canvas viewport so it cannot bleed into the
+        // panel gutters (see `PhotonicRenderer::canvas_scissor`). Clamped to the
+        // surface: wgpu rejects a scissor that leaves the attachment.
+        if let Some((x, y, w, h)) = self.canvas_scissor {
+            let x = x.min(self.width);
+            let y = y.min(self.height);
+            let w = w.min(self.width - x);
+            let h = h.min(self.height - y);
+            if w > 0 && h > 0 {
+                pass.set_scissor_rect(x, y, w, h);
+            }
+        }
         pass.draw(0..6, 0..1);
     }
 

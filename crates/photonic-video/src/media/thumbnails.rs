@@ -34,7 +34,7 @@
 //! owns (this module calls `audio::waveform`'s public API but never decodes
 //! audio itself).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -139,6 +139,7 @@ impl Default for ThumbnailConfig {
 pub struct ThumbnailCache {
     store: AsyncStore<ThumbKey, RgbaThumb>,
     bucket_ticks: i64,
+    cache_dir: Arc<Mutex<PathBuf>>,
 }
 
 /// In-memory + disk cache key. `bucket` = `source_tick / bucket_ticks`; `px` is
@@ -165,8 +166,11 @@ impl ThumbnailCache {
         cfg: ThumbnailConfig,
     ) -> Self {
         let bucket_ticks = cfg.bucket_ticks.max(1);
+        let cache_dir = Arc::new(Mutex::new(cache_dir));
+        let producer_cache_dir = Arc::clone(&cache_dir);
         let producer: Producer<ThumbKey, RgbaThumb> = Box::new(move |key: &ThumbKey| {
             let hash = source.asset_hash(key.asset);
+            let cache_dir = producer_cache_dir.lock().unwrap().clone();
             // Disk before decode: a sidecar-cached thumbnail survives reopen and
             // is orders of magnitude cheaper than an ffmpeg seek.
             if let Some(h) = &hash {
@@ -184,6 +188,7 @@ impl ThumbnailCache {
         ThumbnailCache {
             store: AsyncStore::new(cfg.capacity, cfg.retry_cooldown, cfg.max_inflight, producer),
             bucket_ticks,
+            cache_dir,
         }
     }
 
@@ -225,6 +230,20 @@ impl ThumbnailCache {
     pub fn has_pending(&self) -> bool {
         self.store.has_pending()
     }
+
+    /// Switch the sidecar directory used by future jobs and discard all
+    /// resident or failed entries. In-flight jobs from the previous identity
+    /// are allowed to finish but their results are discarded by `AsyncStore`.
+    pub fn set_cache_dir(&self, cache_dir: PathBuf) {
+        *self.cache_dir.lock().unwrap() = cache_dir;
+        self.store.invalidate();
+    }
+
+    /// Invalidate resident and failed entries without changing the sidecar
+    /// directory.
+    pub fn invalidate(&self) {
+        self.store.invalidate();
+    }
 }
 
 // ── Waveform cache (thin helper) ────────────────────────────────────────────
@@ -241,14 +260,18 @@ const WAVEFORM_CAPACITY: usize = 64;
 /// project reopen.
 pub struct WaveformCache {
     store: AsyncStore<AssetId, WaveformPyramid>,
+    cache_dir: Arc<Mutex<PathBuf>>,
 }
 
 impl WaveformCache {
     /// Build with `cache_dir` = the project sidecar dir.
     pub fn new(source: Arc<dyn WaveformSource>, cache_dir: PathBuf) -> Self {
+        let cache_dir = Arc::new(Mutex::new(cache_dir));
+        let producer_cache_dir = Arc::clone(&cache_dir);
         let producer: Producer<AssetId, WaveformPyramid> = Box::new(move |asset: &AssetId| {
             let asset = *asset;
             let hash = source.asset_hash(asset);
+            let cache_dir = producer_cache_dir.lock().unwrap().clone();
             if let Some(h) = &hash {
                 if let Ok(Some(p)) = waveform::load_from_dir(&cache_dir, h) {
                     return Some(Arc::new(p));
@@ -265,6 +288,7 @@ impl WaveformCache {
         });
         WaveformCache {
             store: AsyncStore::new(WAVEFORM_CAPACITY, Duration::from_secs(2), 4, producer),
+            cache_dir,
         }
     }
 
@@ -283,6 +307,19 @@ impl WaveformCache {
     /// Whether waveform sidecar loading/building is still in flight.
     pub fn has_pending(&self) -> bool {
         self.store.has_pending()
+    }
+
+    /// Switch the sidecar directory used by future jobs and discard all
+    /// resident or failed entries.
+    pub fn set_cache_dir(&self, cache_dir: PathBuf) {
+        *self.cache_dir.lock().unwrap() = cache_dir;
+        self.store.invalidate();
+    }
+
+    /// Invalidate resident and failed entries without changing the sidecar
+    /// directory.
+    pub fn invalidate(&self) {
+        self.store.invalidate();
     }
 }
 
@@ -603,7 +640,7 @@ struct AsyncStore<K, V> {
     shared: Arc<Shared<K, V>>,
     cooldown: Duration,
     max_inflight: usize,
-    tx: Option<Sender<K>>,
+    tx: Option<Sender<Job<K>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -615,9 +652,16 @@ struct Shared<K, V> {
 struct State<K, V> {
     lru: Lru<K, V>,
     /// Keys queued or being produced right now (single-flight).
-    inflight: HashSet<K>,
+    inflight: HashMap<K, u64>,
     /// Keys whose last production failed, with the time it failed (cooldown).
     failed: HashMap<K, Instant>,
+    /// Results from an older cache identity must not repopulate the cache.
+    generation: u64,
+}
+
+struct Job<K> {
+    key: K,
+    generation: u64,
 }
 
 impl<K, V> AsyncStore<K, V>
@@ -634,28 +678,33 @@ where
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 lru: Lru::new(capacity),
-                inflight: HashSet::new(),
+                inflight: HashMap::new(),
                 failed: HashMap::new(),
+                generation: 0,
             }),
             idle: Condvar::new(),
         });
-        let (tx, rx) = unbounded::<K>();
+        let (tx, rx) = unbounded::<Job<K>>();
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name("photonic-thumbnail-worker".into())
             .spawn(move || {
-                while let Ok(key) = rx.recv() {
+                while let Ok(job) = rx.recv() {
                     // Run the (possibly slow) producer OUTSIDE the lock.
-                    let produced = producer(&key);
+                    let produced = producer(&job.key);
                     let mut st = worker_shared.state.lock().unwrap();
-                    st.inflight.remove(&key);
-                    match produced {
-                        Some(v) => {
-                            st.failed.remove(&key);
-                            st.lru.insert(key, v);
-                        }
-                        None => {
-                            st.failed.insert(key, Instant::now());
+                    if st.inflight.get(&job.key).copied() == Some(job.generation) {
+                        st.inflight.remove(&job.key);
+                    }
+                    if job.generation == st.generation {
+                        match produced {
+                            Some(v) => {
+                                st.failed.remove(&job.key);
+                                st.lru.insert(job.key, v);
+                            }
+                            None => {
+                                st.failed.insert(job.key, Instant::now());
+                            }
                         }
                     }
                     if st.inflight.is_empty() {
@@ -680,7 +729,7 @@ where
         if let Some(v) = st.lru.get(&key) {
             return Some(v);
         }
-        if st.inflight.contains(&key) {
+        if st.inflight.contains_key(&key) {
             return None; // already queued — don't double-enqueue
         }
         if let Some(&at) = st.failed.get(&key) {
@@ -692,14 +741,23 @@ where
         if st.inflight.len() >= self.max_inflight {
             return None; // bounded background work; a later visible frame retries
         }
-        st.inflight.insert(key.clone());
+        let generation = st.generation;
+        st.inflight.insert(key.clone(), generation);
         drop(st);
         // Unbounded channel: send never blocks. If the worker is gone (shutdown),
         // undo the inflight bookkeeping so `block_until_idle` can't hang.
         if let Some(tx) = &self.tx {
-            if tx.send(key.clone()).is_err() {
+            if tx
+                .send(Job {
+                    key: key.clone(),
+                    generation,
+                })
+                .is_err()
+            {
                 let mut st = self.shared.state.lock().unwrap();
-                st.inflight.remove(&key);
+                if st.inflight.get(&key).copied() == Some(generation) {
+                    st.inflight.remove(&key);
+                }
                 if st.inflight.is_empty() {
                     self.shared.idle.notify_all();
                 }
@@ -721,6 +779,15 @@ where
 
     fn has_pending(&self) -> bool {
         !self.shared.state.lock().unwrap().inflight.is_empty()
+    }
+
+    fn invalidate(&self) {
+        let mut st = self.shared.state.lock().unwrap();
+        st.generation = st.generation.wrapping_add(1);
+        st.lru.clear();
+        st.failed.clear();
+        st.inflight.clear();
+        self.shared.idle.notify_all();
     }
 }
 
@@ -780,6 +847,10 @@ impl<K: Eq + std::hash::Hash + Clone, V> Lru<K, V> {
         self.map.len()
     }
 
+    fn clear(&mut self) {
+        self.map.clear();
+    }
+
     #[cfg(test)]
     fn contains(&self, key: &K) -> bool {
         self.map.contains_key(key)
@@ -789,7 +860,7 @@ impl<K: Eq + std::hash::Hash + Clone, V> Lru<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -819,6 +890,31 @@ mod tests {
                 width: side,
                 height: side,
                 rgba: vec![byte; (side * side * 4) as usize],
+            })
+        }
+    }
+
+    struct BlockingThumbSource {
+        started: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+        decodes: Arc<AtomicUsize>,
+    }
+
+    impl ThumbnailSource for BlockingThumbSource {
+        fn asset_hash(&self, _asset: AssetId) -> Option<String> {
+            None
+        }
+
+        fn decode_thumbnail(&self, _asset: AssetId, _tick: Tick, px: u32) -> Option<RgbaThumb> {
+            self.started.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            self.decodes.fetch_add(1, Ordering::SeqCst);
+            Some(RgbaThumb {
+                width: px,
+                height: px,
+                rgba: vec![0; (px * px * 4) as usize],
             })
         }
     }
@@ -869,6 +965,64 @@ mod tests {
             1,
             "same bucket, no re-decode"
         );
+    }
+
+    #[test]
+    fn invalidate_discards_resident_thumbnail_and_allows_redecode() {
+        let decodes = Arc::new(AtomicUsize::new(0));
+        let cache = ThumbnailCache::new(
+            Arc::new(FakeThumbSource {
+                decodes: Arc::clone(&decodes),
+                hash: None,
+            }),
+            temp_dir("invalidate"),
+        );
+        let asset = AssetId::new();
+
+        cache.request(asset, Tick(1_000), 64);
+        cache.block_until_idle();
+        assert!(cache.request(asset, Tick(1_000), 64).is_some());
+        assert_eq!(decodes.load(Ordering::SeqCst), 1);
+
+        cache.invalidate();
+        assert!(cache.request(asset, Tick(1_000), 64).is_none());
+        cache.block_until_idle();
+        assert!(cache.request(asset, Tick(1_000), 64).is_some());
+        assert_eq!(decodes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalidate_discards_an_inflight_old_generation_result() {
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let decodes = Arc::new(AtomicUsize::new(0));
+        let cache = ThumbnailCache::new(
+            Arc::new(BlockingThumbSource {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                decodes: Arc::clone(&decodes),
+            }),
+            temp_dir("invalidate-inflight"),
+        );
+        let asset = AssetId::new();
+
+        cache.request(asset, Tick(1_000), 8);
+        while !started.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        cache.invalidate();
+        release.store(true, Ordering::SeqCst);
+        while decodes.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+
+        assert!(
+            cache.request(asset, Tick(1_000), 8).is_none(),
+            "a completed job from the old generation must not be resident"
+        );
+        cache.block_until_idle();
+        assert!(cache.request(asset, Tick(1_000), 8).is_some());
+        assert_eq!(decodes.load(Ordering::SeqCst), 2);
     }
 
     #[test]

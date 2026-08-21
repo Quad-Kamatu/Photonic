@@ -1129,10 +1129,9 @@ fn draw_relink_section(
             )
             .clicked()
         {
-            if let Some(dir) = rfd::FileDialog::new()
-                .set_title("Relink: choose the folder the media moved to")
-                .pick_folder()
-            {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Relink: choose the folder the media moved to");
+            if let Some(dir) = crate::app::run_file_dialog(move || dialog.pick_folder()) {
                 ctx.media_ui.spawn_relink_scan(dir);
             }
         }

@@ -42,10 +42,16 @@ const MUTED: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x9A); // `secondary`
 const ACCENT: Color32 = Color32::from_rgb(0x6E, 0x56, 0xCF); // `primary`
 const SPEED_CURVE_MAX: f64 = 10.0;
 
-#[derive(Clone, Copy)]
+/// Live drag session for the speed curve. Holds a full working copy of the
+/// keys so the painted handles track the pointer even when the document
+/// commit lags a frame (or the parent `ScrollArea` would otherwise scroll).
+#[derive(Clone)]
 struct SpeedCurveDrag {
     clip: ClipId,
-    at: Tick,
+    /// Index into `keys` (kept sorted).
+    index: usize,
+    /// Working key list for the duration of the drag.
+    keys: Vec<SpeedKey>,
 }
 
 /// Left-rail Clip Inspector drawer. Reads the timeline selection and clip data
@@ -307,6 +313,36 @@ fn ratio_from_pct(pct: f64, reversed: bool) -> Ratio {
     Ratio::new(if reversed { -mag } else { mag }, den)
 }
 
+/// Default three-section ramp (four eased handles) used when the user first
+/// enables speed ramping or opens the curve with fewer than four points.
+/// Sections: hold → dip → punch → settle — CapCut/smooth-cut style.
+fn default_three_section_ramp(duration: Tick, base: Ratio) -> Vec<SpeedKey> {
+    // A freeze-frame is a valid zero-rate speed map. Keep it zero when the
+    // user opens the ramp editor; the first nonzero speed must be explicit.
+    if base.num == 0 {
+        return vec![
+            SpeedKey::new(Tick::ZERO, base),
+            SpeedKey::new(duration, base),
+        ];
+    }
+    let sign = if base.num < 0 { -1.0 } else { 1.0 };
+    let base_f = base.as_f64().abs().clamp(0.25, 4.0);
+    let at = |fraction: f64| {
+        Tick((duration.0 as f64 * fraction).round() as i64).clamp(Tick::ZERO, duration)
+    };
+    let ratio = |speed: f64| {
+        Ratio::new((sign * speed * 1000.0).round() as i32, 1000)
+    };
+    let ease = EasePreset::EaseInOut.interp();
+    vec![
+        SpeedKey::eased(at(0.0), ratio(base_f), ease),
+        SpeedKey::eased(at(1.0 / 3.0), ratio((base_f * 0.45).max(0.1)), ease),
+        SpeedKey::eased(at(2.0 / 3.0), ratio((base_f * 2.2).min(8.0)), ease),
+        // Last key is a hold so the settle speed persists to the clip end.
+        SpeedKey::new(duration, ratio(base_f)),
+    ]
+}
+
 fn preset_speed_keys(name: &str, duration: Tick) -> Vec<SpeedKey> {
     let at = |fraction: f64| Tick((duration.0 as f64 * fraction).round() as i64);
     let eased = |fraction: f64, speed: f64| {
@@ -319,6 +355,8 @@ fn preset_speed_keys(name: &str, duration: Tick) -> Vec<SpeedKey> {
     let last =
         |speed: f64| SpeedKey::new(duration, Ratio::new((speed * 1000.0).round() as i32, 1000));
     match name {
+        // Explicit three-section smooth-cut defaults (also the enable seed).
+        "Smooth" => default_three_section_ramp(duration, Ratio::ONE),
         "Flow" => vec![
             eased(0.0, 1.0),
             eased(0.25, 0.5),
@@ -357,16 +395,42 @@ fn curve_y_to_speed(y: f32, rect: egui::Rect) -> f64 {
     normalized.signum() * ((normalized.abs().min(1.0) * (1.0 + SPEED_CURVE_MAX).ln()).exp() - 1.0)
 }
 
+/// Handle hit size in screen px — large enough for easy grab inside a
+/// scrollable drawer (where small targets lose the drag to the ScrollArea).
+const SPEED_HANDLE_HIT_PX: f32 = 22.0;
+const SPEED_HANDLE_DRAW_PX: f32 = 7.0;
+
 fn speed_curve_canvas(
     ui: &mut Ui,
     clip: &Clip,
     keys: &[SpeedKey],
     frame_ticks: i64,
 ) -> Option<Vec<SpeedKey>> {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width().max(160.0), 132.0),
-        egui::Sense::click_and_drag(),
-    );
+    let desired = egui::vec2(ui.available_width().max(160.0), 160.0);
+    let (rect, bg_response) = ui.allocate_exact_size(desired, egui::Sense::click());
+
+    let drag_id = ui.id().with(("speed_curve_drag", clip.id));
+    // Prefer the live working copy while a drag is in progress so the paint
+    // path tracks the pointer even before history applies this frame's commit.
+    let mut live = ui
+        .data(|d| d.get_temp::<SpeedCurveDrag>(drag_id))
+        .filter(|d| d.clip == clip.id);
+    let mut sorted = live
+        .as_ref()
+        .map(|d| d.keys.clone())
+        .unwrap_or_else(|| {
+            let mut k = keys.to_vec();
+            k.sort_by_key(|key| key.at.0);
+            k
+        });
+
+    let dur = clip.duration.0.max(1) as f32;
+    let tick_to_x = |t: i64| rect.left() + rect.width() * (t as f32 / dur).clamp(0.0, 1.0);
+    let x_to_tick = |x: f32| -> i64 {
+        let u = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+        (u * clip.duration.0 as f64).round() as i64
+    };
+
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
     painter.rect_stroke(
@@ -374,6 +438,30 @@ fn speed_curve_canvas(
         4.0,
         egui::Stroke::new(1.0, MUTED.gamma_multiply(0.55)),
     );
+
+    // Soft vertical bands for sections between keys.
+    if sorted.len() >= 2 {
+        for (i, pair) in sorted.windows(2).enumerate() {
+            let x0 = tick_to_x(pair[0].at.0);
+            let x1 = tick_to_x(pair[1].at.0);
+            if x1 > x0 {
+                let tint = if i % 2 == 0 {
+                    ACCENT.gamma_multiply(0.08)
+                } else {
+                    MUTED.gamma_multiply(0.06)
+                };
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, rect.top()),
+                        egui::pos2(x1, rect.bottom()),
+                    ),
+                    0.0,
+                    tint,
+                );
+            }
+        }
+    }
+
     for value in [-10.0, -1.0, 0.0, 1.0, 10.0] {
         let y = speed_to_curve_y(value, rect);
         let stroke = if value == 0.0 {
@@ -393,93 +481,184 @@ fn speed_curve_canvas(
             MUTED,
         );
     }
-    let mut sorted = keys.to_vec();
-    sorted.sort_by_key(|key| key.at.0);
-    let point = |key: SpeedKey| {
-        let x = rect.left() + rect.width() * (key.at.0 as f32 / clip.duration.0.max(1) as f32);
-        egui::pos2(x, speed_to_curve_y(key.ratio.as_f64(), rect))
+
+    // Smooth sampled curve (eased segments via the real evaluator).
+    let map = SpeedMap::Keyframed {
+        keys: sorted.clone(),
     };
-    let points: Vec<_> = sorted.iter().copied().map(point).collect();
-    if points.len() > 1 {
-        painter.add(egui::Shape::line(
-            points.clone(),
-            egui::Stroke::new(1.8, ACCENT),
-        ));
+    let samples = 96usize.max(rect.width() as usize / 2);
+    let mut curve: Vec<egui::Pos2> = Vec::with_capacity(samples + 1);
+    for i in 0..=samples {
+        let t = Tick((clip.duration.0 as f64 * i as f64 / samples as f64).round() as i64);
+        let speed = map.ratio_at_f64(t);
+        curve.push(egui::pos2(tick_to_x(t.0), speed_to_curve_y(speed, rect)));
     }
-    for p in &points {
-        painter.circle_filled(*p, 4.5, ACCENT);
-        painter.circle_stroke(*p, 4.5, egui::Stroke::new(1.0, Color32::WHITE));
+    if curve.len() > 1 {
+        painter.add(egui::Shape::line(curve, egui::Stroke::new(2.0, ACCENT)));
     }
 
-    let drag_id = ui.id().with(("speed_curve_drag", clip.id));
-    if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some((index, _)) = points
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| a.distance(pos).total_cmp(&b.distance(pos)))
-                .filter(|(_, p)| p.distance(pos) <= 10.0)
-            {
-                ui.data_mut(|data| {
-                    data.insert_temp(
-                        drag_id,
-                        SpeedCurveDrag {
-                            clip: clip.id,
-                            at: sorted[index].at,
-                        },
-                    )
+    let mut result: Option<Vec<SpeedKey>> = None;
+    let pointer = ui.ctx().pointer_interact_pos();
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+
+    // ── Per-handle interact (beats ScrollArea drag-to-scroll) ─────────────
+    // One `ui.interact` per handle with a large hit rect. The drawer is a
+    // `ScrollArea::both()`, which steals canvas-level drag; individual
+    // handle widgets take pointer priority and track reliably.
+    let n = sorted.len();
+    for i in 0..n {
+        let p = egui::pos2(
+            tick_to_x(sorted[i].at.0),
+            speed_to_curve_y(sorted[i].ratio.as_f64(), rect),
+        );
+        let handle_rect =
+            egui::Rect::from_center_size(p, egui::vec2(SPEED_HANDLE_HIT_PX, SPEED_HANDLE_HIT_PX));
+        let hid = ui.id().with(("speed_handle", clip.id, i));
+        let resp = ui.interact(handle_rect, hid, egui::Sense::click_and_drag());
+
+        if resp.hovered() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+        }
+        if resp.dragged() || (resp.is_pointer_button_down_on() && primary_down) {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
+            ui.ctx().request_repaint();
+            // Tell the parent drawer ScrollArea to stop stealing this drag.
+            ui.data_mut(|d| {
+                d.insert_temp(egui::Id::new("speed_curve_dragging"), true);
+            });
+
+            // Start / continue a live session keyed by this handle.
+            if live.as_ref().map(|d| d.index) != Some(i) {
+                let mut keys_copy = sorted.clone();
+                keys_copy.sort_by_key(|k| k.at.0);
+                // Re-find index after sort (should match i if already sorted).
+                let index = keys_copy
+                    .iter()
+                    .position(|k| k.at == sorted[i].at && k.ratio == sorted[i].ratio)
+                    .unwrap_or(i)
+                    .min(keys_copy.len().saturating_sub(1));
+                live = Some(SpeedCurveDrag {
+                    clip: clip.id,
+                    index,
+                    keys: keys_copy,
                 });
             }
+
+            if let (Some(drag), Some(pos)) = (live.as_mut(), pointer) {
+                if drag.clip == clip.id && drag.index < drag.keys.len() {
+                    let mut at = x_to_tick(pos.x).clamp(0, clip.duration.0);
+                    let lo = if drag.index == 0 {
+                        0
+                    } else {
+                        drag.keys[drag.index - 1].at.0 + 1
+                    };
+                    let hi = if drag.index + 1 >= drag.keys.len() {
+                        clip.duration.0
+                    } else {
+                        (drag.keys[drag.index + 1].at.0 - 1).max(lo)
+                    };
+                    // Endpoints: pin time, free speed. Interiors: free both.
+                    if drag.index == 0 {
+                        at = 0;
+                    } else if drag.index + 1 == drag.keys.len() {
+                        at = clip.duration.0;
+                    } else {
+                        at = at.clamp(lo, hi);
+                    }
+                    let speed =
+                        curve_y_to_speed(pos.y, rect).clamp(-SPEED_CURVE_MAX, SPEED_CURVE_MAX);
+                    drag.keys[drag.index].at = Tick(at);
+                    drag.keys[drag.index].ratio =
+                        Ratio::new((speed * 1000.0).round() as i32, 1000);
+                    sorted = drag.keys.clone();
+                    result = Some(sorted.clone());
+                    ui.data_mut(|d| d.insert_temp(drag_id, drag.clone()));
+                }
+            }
+        }
+
+        // Draw handle at (possibly live-updated) position.
+        let draw_p = egui::pos2(
+            tick_to_x(sorted[i].at.0),
+            speed_to_curve_y(sorted[i].ratio.as_f64(), rect),
+        );
+        let r = if i == 0 || i + 1 == n {
+            SPEED_HANDLE_DRAW_PX + 1.0
+        } else {
+            SPEED_HANDLE_DRAW_PX
+        };
+        let fill = if resp.dragged() || resp.is_pointer_button_down_on() {
+            Color32::WHITE
+        } else {
+            ACCENT
+        };
+        painter.circle_filled(draw_p, r, fill);
+        painter.circle_stroke(draw_p, r, egui::Stroke::new(1.5, Color32::WHITE));
+        if resp.dragged() || resp.is_pointer_button_down_on() {
+            painter.circle_stroke(draw_p, r + 3.0, egui::Stroke::new(1.0, ACCENT));
         }
     }
-    if response.dragged() {
-        if let (Some(drag), Some(pos)) = (
-            ui.data(|data| data.get_temp::<SpeedCurveDrag>(drag_id)),
-            response.interact_pointer_pos(),
-        ) {
-            if drag.clip == clip.id {
-                let raw_tick =
-                    ((pos.x - rect.left()) / rect.width() * clip.duration.0 as f32) as i64;
-                let at = Tick(
-                    ((raw_tick as f64 / frame_ticks.max(1) as f64).round() as i64 * frame_ticks)
-                        .clamp(0, clip.duration.0),
+
+    // Release: frame-snap interior points, clear live session.
+    let any_handle_down = (0..n).any(|i| {
+        let hid = ui.id().with(("speed_handle", clip.id, i));
+        ui.ctx()
+            .read_response(hid)
+            .is_some_and(|r| r.is_pointer_button_down_on() || r.dragged())
+    });
+    if !primary_down || (!any_handle_down && live.is_some()) {
+        if let Some(mut drag) = ui.data(|d| d.get_temp::<SpeedCurveDrag>(drag_id)) {
+            if drag.clip == clip.id
+                && drag.index > 0
+                && drag.index + 1 < drag.keys.len()
+                && !primary_down
+            {
+                let ft = frame_ticks.max(1);
+                let snapped =
+                    ((drag.keys[drag.index].at.0 as f64 / ft as f64).round() as i64) * ft;
+                let lo = drag.keys[drag.index - 1].at.0 + 1;
+                let hi = (drag.keys[drag.index + 1].at.0 - 1).max(lo);
+                drag.keys[drag.index].at = Tick(snapped.clamp(lo, hi));
+                result = Some(drag.keys.clone());
+            }
+        }
+        if !primary_down {
+            ui.data_mut(|d| d.remove::<SpeedCurveDrag>(drag_id));
+        }
+    }
+
+    // Click empty curve (not on a handle) → add eased interior point.
+    if bg_response.clicked() {
+        if let Some(pos) = pointer {
+            let on_handle = sorted.iter().any(|key| {
+                let p = egui::pos2(
+                    tick_to_x(key.at.0),
+                    speed_to_curve_y(key.ratio.as_f64(), rect),
                 );
-                if at == drag.at || !sorted.iter().any(|key| key.at == at) {
-                    if let Some(key) = sorted.iter_mut().find(|key| key.at == drag.at) {
-                        key.at = at;
-                        key.ratio = Ratio::new(
-                            (curve_y_to_speed(pos.y, rect) * 1000.0).round() as i32,
-                            1000,
-                        );
-                        sorted.sort_by_key(|key| key.at.0);
-                        return Some(sorted);
-                    }
+                p.distance(pos) <= SPEED_HANDLE_HIT_PX * 0.5
+            });
+            if !on_handle {
+                let ft = frame_ticks.max(1);
+                let raw = x_to_tick(pos.x);
+                let at =
+                    Tick(((raw as f64 / ft as f64).round() as i64 * ft).clamp(0, clip.duration.0));
+                if !sorted.iter().any(|key| key.at == at) {
+                    let ratio = Ratio::new(
+                        (curve_y_to_speed(pos.y, rect)
+                            .clamp(-SPEED_CURVE_MAX, SPEED_CURVE_MAX)
+                            * 1000.0)
+                            .round() as i32,
+                        1000,
+                    );
+                    sorted.push(SpeedKey::eased(at, ratio, EasePreset::EaseInOut.interp()));
+                    sorted.sort_by_key(|key| key.at.0);
+                    result = Some(sorted);
                 }
             }
         }
     }
-    if response.drag_stopped() {
-        ui.data_mut(|data| data.remove::<SpeedCurveDrag>(drag_id));
-    }
-    if response.clicked() && ui.input(|input| input.modifiers.ctrl) {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let raw_tick = ((pos.x - rect.left()) / rect.width() * clip.duration.0 as f32) as i64;
-            let at = Tick(
-                ((raw_tick as f64 / frame_ticks.max(1) as f64).round() as i64 * frame_ticks)
-                    .clamp(0, clip.duration.0),
-            );
-            if !sorted.iter().any(|key| key.at == at) {
-                let ratio = Ratio::new(
-                    (curve_y_to_speed(pos.y, rect) * 1000.0).round() as i32,
-                    1000,
-                );
-                sorted.push(SpeedKey::new(at, ratio));
-                sorted.sort_by_key(|key| key.at.0);
-                return Some(sorted);
-            }
-        }
-    }
-    None
+
+    result
 }
 
 /// The piecewise-constant ramp speed in effect at clip-relative tick `t`,
@@ -522,16 +701,17 @@ fn draw_speed_section(
             if toggled {
                 let mut new_clip = clip.clone();
                 new_clip.speed = if is_ramped {
-                    // Seed with a single key at tick 0 holding the current
-                    // constant ratio for the whole clip (one key covers
-                    // `(-inf, +inf)` per `integrate_ramp`), so flipping the
-                    // toggle never itself changes existing playback.
+                    // Seed a three-section smooth-cut ramp (four handles) so the
+                    // curve editor opens with draggable sections, not a flat
+                    // single key. Base magnitude follows the previous constant
+                    // speed so enabling the ramp still reads as "that speed,
+                    // shaped."
                     let seed = match clip.speed {
                         SpeedMap::Constant(r) => r,
                         SpeedMap::Keyframed { .. } => Ratio::ONE,
                     };
                     SpeedMap::Keyframed {
-                        keys: vec![SpeedKey::new(Tick::ZERO, seed)],
+                        keys: default_three_section_ramp(clip.duration, seed),
                     }
                 } else {
                     let r = match &clip.speed {
@@ -545,6 +725,12 @@ fn draw_speed_section(
                     SpeedMap::Constant(r)
                 };
                 set_clip_discrete(project, seq, track, new_clip, action);
+                // Auto-open the curve editor so the three sections are visible
+                // and immediately draggable (CapCut-style "open → drag").
+                if is_ramped {
+                    let curve_edit_id = ui.id().with(("speed_curve_edit", clip.id));
+                    ui.data_mut(|data| data.insert_temp(curve_edit_id, true));
+                }
             }
             ui.add_space(2.0);
             match &clip.speed {
@@ -617,17 +803,23 @@ fn draw_speed_ramp_editor(
 
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Presets").color(MUTED).small());
-        for preset in ["Flow", "Hero", "Action", "Fast Lane"] {
+        for preset in ["Smooth", "Flow", "Hero", "Action", "Fast Lane"] {
             if ui.small_button(preset).clicked() {
                 new_keys = Some(preset_speed_keys(preset, clip.duration));
                 discrete = true;
+                // Presets are meant to be tweaked on the curve immediately.
+                ui.data_mut(|data| {
+                    data.insert_temp(ui.id().with(("speed_curve_edit", clip.id)), true)
+                });
             }
         }
     });
     let curve_edit_id = ui.id().with(("speed_curve_edit", clip.id));
+    // Default the curve open for ramps so the three sections are the first
+    // thing the user sees (toggle still lets them hide it).
     let mut editing_curve = ui
         .data(|data| data.get_temp::<bool>(curve_edit_id))
-        .unwrap_or(false);
+        .unwrap_or(true);
     if ui
         .small_button(if editing_curve {
             "Hide speed curve"
@@ -639,11 +831,27 @@ fn draw_speed_ramp_editor(
         editing_curve = !editing_curve;
         ui.data_mut(|data| data.insert_temp(curve_edit_id, editing_curve));
     }
+
+    // Expand a legacy single-key (or empty) ramp into three sections the first
+    // time the curve is shown — never stomp a multi-point ramp the user has
+    // already shaped (2–3 custom handles stay as-is).
+    if editing_curve && sorted.len() <= 1 && new_keys.is_none() {
+        let base = sorted
+            .first()
+            .map(|k| k.ratio)
+            .unwrap_or(Ratio::ONE);
+        new_keys = Some(default_three_section_ramp(clip.duration, base));
+        discrete = true;
+        sorted = new_keys.clone().unwrap_or(sorted);
+    }
+
     if editing_curve {
         ui.label(
-            RichText::new("Ctrl-click adds a point; drag points through 0x for reverse.")
-                .color(MUTED)
-                .small(),
+            RichText::new(
+                "Drag the handles (three sections by default). Click empty curve to add a point; drag through 0× for reverse.",
+            )
+            .color(MUTED)
+            .small(),
         );
         if let Some(edited) = speed_curve_canvas(ui, clip, &sorted, frame_ticks) {
             new_keys = Some(edited);
@@ -1997,5 +2205,15 @@ mod tests {
     #[test]
     fn ramp_ratio_at_empty_ramp_is_identity() {
         assert_eq!(ramp_ratio_at(&[], Tick(500)), Ratio::ONE);
+    }
+
+    #[test]
+    fn zero_rate_ramp_seed_stays_frozen() {
+        let keys = default_three_section_ramp(Tick(9_000), Ratio::new(0, 1));
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|key| key.ratio.num == 0));
+        let map = SpeedMap::Keyframed { keys };
+        assert_eq!(map.source_delta(Tick(9_000)), Tick::ZERO);
+        assert!(map.validate_for_duration(Tick(9_000)).is_ok());
     }
 }

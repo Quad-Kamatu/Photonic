@@ -15,9 +15,41 @@ struct KeymapFile {
     keymap: HashMap<String, KeyBinding>,
 }
 
+/// Which palette the app paints with.
+///
+/// `System` is the default and follows the desktop's colour-scheme setting via
+/// egui's [`ThemePreference::System`](egui::ThemePreference); the other two pin
+/// the choice regardless of what the desktop does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn to_egui(self) -> egui::ThemePreference {
+        match self {
+            ThemeMode::System => egui::ThemePreference::System,
+            ThemeMode::Dark => egui::ThemePreference::Dark,
+            ThemeMode::Light => egui::ThemePreference::Light,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPreferences {
     // APPEARANCE
+    /// Which of the two palettes is live, or `System` to follow the desktop.
+    /// Defaults to `System`.
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
+    /// Whether the *resolved* theme is the dark one. Kept in sync with
+    /// [`theme_mode`](Self::theme_mode) each frame (including when that resolves
+    /// through the system), so the handful of places that pick a colour by hand
+    /// — rulers, scrims, canvas overlays — stay correct without each having to
+    /// resolve the preference themselves.
     pub dark_mode: bool,
     pub ui_scale: f32, // 0.75, 1.0, 1.25, 1.5, 2.0
 
@@ -172,6 +204,12 @@ pub struct AppPreferences {
     /// First-run social/video coach marks dismissed (proposal 213).
     #[serde(default)]
     pub video_coach_dismissed: bool,
+    /// The coach has been shown once on this install. Set (and persisted) the
+    /// first frame the card renders, so the guide is genuinely a *first-run*
+    /// guide: closing the app without pressing Next/Skip no longer brings it
+    /// back on the next launch.
+    #[serde(default)]
+    pub video_coach_shown_once: bool,
     /// Current coach-mark step 0..2 while coaching is active (proposal 213).
     /// Ignored when [`Self::video_coach_dismissed`] is true.
     #[serde(default)]
@@ -320,6 +358,7 @@ fn default_snap_tolerance() -> f32 {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
+            theme_mode: ThemeMode::default(),
             dark_mode: true,
             ui_scale: 1.0,
             show_grid: false,
@@ -364,6 +403,7 @@ impl Default for AppPreferences {
             keymap: HashMap::new(),
             keymap_schema_version: KEYMAP_SCHEMA_CURRENT,
             video_coach_dismissed: false,
+            video_coach_shown_once: false,
             video_coach_step: 0,
             auto_place_import_on_timeline: true,
         }
@@ -625,8 +665,12 @@ mod tests {
             assert!(!DrawerGroup::all_for_mode(mode).contains(&DrawerGroup::Unknown));
             assert!(!RightDrawerGroup::all_for_mode(mode).contains(&RightDrawerGroup::Unknown));
         }
-        assert!(!DrawerGroup::Unknown.has_content(0));
-        assert!(!DrawerGroup::Unknown.has_content(5));
+        assert!(!DrawerGroup::Unknown.has_content(0, 0));
+        assert!(!DrawerGroup::Unknown.has_content(5, 5));
+        // Clip Inspector gates on timeline clip selection, not vector nodes.
+        assert!(!DrawerGroup::ClipInspector.has_content(0, 0));
+        assert!(!DrawerGroup::ClipInspector.has_content(3, 0));
+        assert!(DrawerGroup::ClipInspector.has_content(0, 1));
     }
 
     #[test]

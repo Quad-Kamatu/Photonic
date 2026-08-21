@@ -448,8 +448,13 @@ pub(crate) fn draw_audio_mixer(ui: &mut Ui, vid: &mut VideoPanelUi) {
     } = &mut model;
     let expanded: &mut HashSet<TrackId> = vid.mixer_expanded_tracks;
 
-    egui::ScrollArea::horizontal()
+    // Scroll on both axes and claim the host's full area: the strips are a
+    // fixed-size rack, so whichever axis the window is short on has to scroll
+    // rather than clip. `auto_shrink` off keeps the rack anchored to the
+    // window's top-left as it is resized instead of re-centring every frame.
+    egui::ScrollArea::both()
         .id_salt("audio_mixer_strips")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 for (idx, strip) in strips.iter_mut().enumerate() {

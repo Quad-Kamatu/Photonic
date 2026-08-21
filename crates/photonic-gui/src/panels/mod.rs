@@ -1417,12 +1417,13 @@ impl DrawerGroup {
     /// available; the operation drawers (Modify/Arrange) need a selection.
     ///
     /// Video-mode groups (04 §4.1): Media Pool/Effects/Captions/Node Editor are
-    /// always available; Clip Inspector needs a selection, same pattern as
-    /// Modify/Arrange. `selection_count` is the vector node-selection count at
-    /// every call site today — wiring it to the video clip selection is P2-wave
-    /// work (`timeline_selection`, 04 §6), so Clip Inspector's gating is a stub
-    /// approximation until then.
-    pub fn has_content(self, selection_count: usize) -> bool {
+    /// always available; Clip Inspector needs a **timeline clip** selection
+    /// (`clip_selection_count`). Modify/Arrange need a **vector node** selection
+    /// (`node_selection_count`). Passing the node count for Clip Inspector was
+    /// a stub that left the rail icon permanently disabled in video mode —
+    /// speed ramp / transform / freeze all live in that drawer and were
+    /// unreachable without this split.
+    pub fn has_content(self, node_selection_count: usize, clip_selection_count: usize) -> bool {
         match self {
             DrawerGroup::Tools
             | DrawerGroup::Inspector
@@ -1445,9 +1446,9 @@ impl DrawerGroup {
             | DrawerGroup::SourceMonitor
             | DrawerGroup::Multicam
             | DrawerGroup::Transcript => true,
-            DrawerGroup::Modify | DrawerGroup::Arrange | DrawerGroup::ClipInspector => {
-                selection_count >= 1
-            }
+            DrawerGroup::Modify | DrawerGroup::Arrange => node_selection_count >= 1,
+            // Timeline clip selection, not vector nodes.
+            DrawerGroup::ClipInspector => clip_selection_count >= 1,
             // A group this build does not know has no sections to render, so it
             // never has content: the rail icon stays disabled and an `Unknown`
             // that survives to the UI auto-collapses instead of drawing an empty

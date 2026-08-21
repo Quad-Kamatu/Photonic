@@ -59,6 +59,20 @@ const TOOLBAR_H: f32 = 24.0;
 const SEQ_TABS_H: f32 = 24.0;
 /// Navigator / horizontal-scrollbar strip height at the panel bottom (spec 17 G8).
 const NAV_H: f32 = 12.0;
+/// Height reserved at the bottom of the header column for the "+ Track" menu.
+/// The button is bottom-anchored inside it (see [`tracks::draw_add_controls`]),
+/// so a button taller than this grows *upwards* instead of being painted over
+/// by the navigator strip below.
+const TRACK_FOOTER_H: f32 = 30.0;
+
+/// Height a one-row strip of buttons needs at the current UI scale. The old
+/// hard-coded 24 px was smaller than a real `egui` button once the user bumped
+/// `ui_scale`, so the timeline's Captions/Export buttons wrapped onto a second
+/// line and got clipped by the strip.
+fn button_strip_height(ui: &egui::Ui) -> f32 {
+    let spacing = ui.spacing();
+    (spacing.interact_size.y + 2.0 * spacing.button_padding.y + 6.0).max(TOOLBAR_H)
+}
 const DRAG_ID: &str = "timeline_drag_state";
 const MARQUEE_ID: &str = "timeline_marquee";
 
@@ -68,10 +82,7 @@ const MARQUEE_ID: &str = "timeline_marquee";
 /// Returns `(index_in_kind, top_y)` — the top edge feeds the drop indicator.
 ///
 /// `index_in_kind` is the row's *true* `video_tracks` / `audio_tracks` Vec
-/// index, even for the reversed video lane (top row = last Vec index). The
-/// caller passes it straight to `ops::reorder_track`, which moves via
-/// remove-then-insert-at-index and so lands the dragged track on the target
-/// row's original slot with no per-orientation off-by-one — see the call site.
+/// index, even for the reversed video lane (top row = last Vec index).
 fn nearest_drop_row(
     geom: &[(TrackId, TrackKind, usize, f32, f32)],
     kind: TrackKind,
@@ -87,6 +98,46 @@ fn nearest_drop_row(
         .map(|g| (g.2, g.3))
 }
 
+/// Convert a visual "insert before the target row" drop into the raw Vec index
+/// expected by `ops::reorder_track`, which removes the dragged row first.
+/// Video and text rows are painted in reverse Vec order; audio rows are not.
+fn reorder_target_index(
+    kind: TrackKind,
+    drag_index: usize,
+    drop_index: usize,
+    count: usize,
+) -> Option<usize> {
+    if count == 0 || drag_index >= count || drop_index >= count {
+        return None;
+    }
+    let reversed = matches!(kind, TrackKind::Video | TrackKind::Text);
+    let visual_drag = if reversed {
+        count - 1 - drag_index
+    } else {
+        drag_index
+    };
+    let visual_drop = if reversed {
+        count - 1 - drop_index
+    } else {
+        drop_index
+    };
+
+    // The indicator is the target row's top edge, so the dragged row belongs
+    // immediately before the target in visual order. The index is in the
+    // post-removal visual list because reorder_track removes first.
+    let visual_insert = if visual_drag < visual_drop {
+        visual_drop - 1
+    } else {
+        visual_drop
+    };
+    let remaining = count - 1;
+    Some(if reversed {
+        remaining - visual_insert
+    } else {
+        visual_insert
+    })
+}
+
 /// Place a fixed-position widget without advancing the timeline panel's normal
 /// top-down layout cursor. The timeline is a canvas; using [`egui::Ui::put`]
 /// directly would make the resizable dock persist the widget's bottom edge
@@ -99,6 +150,28 @@ pub(crate) fn put_fixed(
     let mut fixed_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
         egui::Layout::centered_and_justified(egui::Direction::TopDown),
     ));
+    fixed_ui.add(widget)
+}
+
+/// [`put_fixed`] for a small square icon button in a hand-packed strip.
+///
+/// The track-header row packs seven controls into ~110 px using fixed 18 px
+/// slots with 2 px gaps. egui's default button padding is wider than those
+/// gaps, so a plain `put_fixed` button drew past its slot and every control
+/// visibly overlapped its neighbour. Shrinking the padding *inside the child
+/// ui* — never on the shared timeline `Ui`, whose style would then leak into
+/// everything drawn afterwards — makes the widget honour the slot it was given.
+pub(crate) fn put_icon(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    widget: impl egui::Widget,
+) -> egui::Response {
+    let mut fixed_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+        egui::Layout::centered_and_justified(egui::Direction::TopDown),
+    ));
+    fixed_ui.spacing_mut().button_padding = egui::vec2(1.0, 0.0);
+    fixed_ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    fixed_ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
     fixed_ui.add(widget)
 }
 
@@ -169,11 +242,18 @@ impl PhotonicApp {
         // frame from the active document's media pool so the background resolver
         // closures see the current assets without borrowing the document.
         if self.timeline_media.is_none() {
-            self.timeline_media = Some(TimelineMediaCaches::new(self.current_file.as_deref()));
+            self.timeline_media = Some(TimelineMediaCaches::new(
+                self.current_file.as_deref(),
+                self.active_tab,
+            ));
         }
-        let media_caches = self.timeline_media.take();
-        if let Some(caches) = media_caches.as_ref() {
-            caches.refresh(&doc.timeline.as_ref().unwrap().media);
+        let mut media_caches = self.timeline_media.take();
+        if let Some(caches) = media_caches.as_mut() {
+            caches.refresh(
+                self.current_file.as_deref(),
+                self.active_tab,
+                &doc.timeline.as_ref().unwrap().media,
+            );
         }
 
         let full = ui.max_rect();
@@ -202,7 +282,7 @@ impl PhotonicApp {
 
         let toolbar_rect = egui::Rect::from_min_size(
             egui::pos2(full.left(), tabs_rect.bottom()),
-            egui::vec2(full.width(), TOOLBAR_H),
+            egui::vec2(full.width(), button_strip_height(ui)),
         );
         self.draw_mini_toolbar(ui, toolbar_rect, doc, seq_id, &mut view, &mut snap);
 
@@ -385,14 +465,14 @@ impl PhotonicApp {
                 let row_top = y;
                 let row_bot = y + row.height;
                 y = row_bot;
-                if row_bot < header_rows_rect.top() || row_top > header_rows_rect.bottom() - 28.0 {
+                if row_bot < header_rows_rect.top() || row_top > header_rows_rect.bottom() - TRACK_FOOTER_H {
                     continue;
                 }
                 let hrect = egui::Rect::from_min_max(
                     egui::pos2(header_col.left(), row_top),
                     egui::pos2(
                         header_col.right(),
-                        row_bot.min(header_rows_rect.bottom() - 28.0),
+                        row_bot.min(header_rows_rect.bottom() - TRACK_FOOTER_H),
                     ),
                 );
                 // Drag-to-reorder: interact on the header background BEFORE the
@@ -426,20 +506,9 @@ impl PhotonicApp {
             // Resolve a drag in progress: highlight the drop slot, and on release
             // reorder to the nearest same-kind row under the pointer.
             //
-            // Reversed-index mapping: `index_in_kind` is the *true*
-            // `video_tracks` / `audio_tracks` Vec index of a row, even though the
-            // video lane is painted in reverse Vec order (top row = last Vec index
-            // = topmost composited layer — see `tracks::track_rows`). We therefore
-            // hand `move_track` the target row's raw Vec index as the drop
-            // position, unchanged. `ops::reorder_track` performs the move as
-            // remove-then-insert-at-index (`RemoveTrack` then `AddTrack { index }`,
-            // where `AddTrack` inserts, clamped to len). Removing the dragged
-            // track first shifts every later element down by one, so inserting at
-            // the target's raw index lands the dragged track on exactly the
-            // target row's original slot — for *both* drag directions and for
-            // *both* lane orientations (reversed video, in-order audio). Hence
-            // there is NO off-by-one at the lane boundaries and no per-orientation
-            // adjustment is needed here.
+            // `index_in_kind` is the raw Vec index, while the drop indicator is a
+            // visual insertion boundary. Convert between those coordinate systems
+            // before the remove-then-insert operation.
             if let Some(drag_id) = dragging {
                 // The primary button being held is the single source of truth for
                 // "drag still live". It is a level, not the one-frame
@@ -471,21 +540,17 @@ impl PhotonicApp {
                             );
                         } else if drop_idx != didx {
                             // Released over a different same-kind row → reorder.
-                            // `reorder_track` removes the dragged track FIRST, then
-                            // inserts at the target index. When the track sat ABOVE
-                            // the target (didx < drop_idx), that removal shifts the
-                            // target down one, so inserting at `drop_idx` would land
-                            // one slot too low (below the drawn indicator). Decrement
-                            // to make the landing match the indicator line. (Audio =
-                            // natural order; video/text rows are displayed reversed
-                            // but `index_in_kind` is the true Vec index, so the same
-                            // remove-then-insert correction applies.)
-                            let target = if didx < drop_idx {
-                                drop_idx - 1
-                            } else {
-                                drop_idx
-                            };
-                            ops_bridge::move_track(doc, history, seq_id, drag_id, target);
+                            if let Some(target) = reorder_target_index(
+                                dkind,
+                                didx,
+                                drop_idx,
+                                rows.iter()
+                                    .find(|candidate| candidate.kind == dkind)
+                                    .map(|candidate| candidate.count_in_kind)
+                                    .unwrap_or(0),
+                            ) {
+                                ops_bridge::move_track(doc, history, seq_id, drag_id, target);
+                            }
                         }
                     }
                 }
@@ -502,7 +567,7 @@ impl PhotonicApp {
             }
             // Add-track controls pinned to the header column's bottom.
             let footer = egui::Rect::from_min_max(
-                egui::pos2(header_rows_rect.left(), header_rows_rect.bottom() - 28.0),
+                egui::pos2(header_rows_rect.left(), header_rows_rect.bottom() - TRACK_FOOTER_H),
                 header_rows_rect.max,
             );
             tracks::draw_add_controls(ui, footer, doc, history, seq_id);
@@ -1086,108 +1151,89 @@ impl PhotonicApp {
 
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
-        let bh = 20.0;
-        let mut x = rect.left() + 4.0;
-        let y = rect.top() + (rect.height() - bh) * 0.5;
 
-        let fit = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-        if put_fixed(ui, fit, egui::Button::new("⤢").small())
-            .on_hover_text("Zoom to fit (Shift+Z)")
-            .clicked()
-        {
-            let extent = doc
-                .timeline
-                .as_ref()
-                .and_then(|p| p.sequences.get(&seq_id))
-                .map(|s| s.content_end())
-                .unwrap_or(Tick::ZERO);
-            view.fit(extent, view.last_lane_width_px.max(1.0));
-        }
-        x += bh + 4.0;
+        // Real horizontal layout, not hand-computed rects. The previous version
+        // placed every control at a fixed `bh`-derived x, which only lined up at
+        // one font size: at any other UI scale the buttons drew wider than their
+        // slots and collided (the ± pair ran into Snap), and "Captions" wrapped
+        // onto a second line that the 24 px strip then clipped. Letting egui size
+        // the widgets and advance the cursor makes the strip correct at every
+        // scale; `Extend` keeps labels on one line so a narrow timeline scrolls
+        // the strip's tail off instead of growing it vertically.
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.horizontal_centered(|ui| {
+                ui.add_space(4.0);
 
-        let zi = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-        if put_fixed(ui, zi, egui::Button::new("+").small())
-            .on_hover_text("Zoom in (+)")
-            .clicked()
-        {
-            view.zoom_around(ZOOM_STEP, view.scroll_ticks, 0.0);
-        }
-        x += bh + 2.0;
-        let zo = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh, bh));
-        if put_fixed(ui, zo, egui::Button::new("−").small())
-            .on_hover_text("Zoom out (−)")
-            .clicked()
-        {
-            view.zoom_around(1.0 / ZOOM_STEP, view.scroll_ticks, 0.0);
-        }
-        x += bh + 8.0;
+                if ui
+                    .button(ph::ARROWS_OUT_SIMPLE)
+                    .on_hover_text("Zoom to fit (Shift+Z)")
+                    .clicked()
+                {
+                    let extent = doc
+                        .timeline
+                        .as_ref()
+                        .and_then(|p| p.sequences.get(&seq_id))
+                        .map(|s| s.content_end())
+                        .unwrap_or(Tick::ZERO);
+                    view.fit(extent, view.last_lane_width_px.max(1.0));
+                }
+                if ui.button(ph::PLUS).on_hover_text("Zoom in (+)").clicked() {
+                    view.zoom_around(ZOOM_STEP, view.scroll_ticks, 0.0);
+                }
+                if ui.button(ph::MINUS).on_hover_text("Zoom out (−)").clicked() {
+                    view.zoom_around(1.0 / ZOOM_STEP, view.scroll_ticks, 0.0);
+                }
 
-        let snap_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 24.0, bh));
-        if put_fixed(ui, snap_rect, egui::SelectableLabel::new(*snap, "Snap"))
-            .on_hover_text("Toggle snapping (N)")
-            .clicked()
-        {
-            *snap = !*snap;
-        }
-        x += bh + 28.0;
+                ui.separator();
 
-        let fix_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bh + 36.0, bh));
-        if put_fixed(
-            ui,
-            fix_rect,
-            egui::SelectableLabel::new(view.fixed_playhead, "Fixed"),
-        )
-        .on_hover_text("Fixed playhead: centre playhead during playback (K-A10)")
-        .clicked()
-        {
-            view.fixed_playhead = !view.fixed_playhead;
-        }
-        x += bh + 40.0;
+                if ui
+                    .selectable_label(*snap, "Snap")
+                    .on_hover_text("Toggle snapping (N)")
+                    .clicked()
+                {
+                    *snap = !*snap;
+                }
+                if ui
+                    .selectable_label(view.fixed_playhead, "Fixed")
+                    .on_hover_text("Fixed playhead: centre playhead during playback (K-A10)")
+                    .clicked()
+                {
+                    view.fixed_playhead = !view.fixed_playhead;
+                }
 
-        let shift = ui.input(|i| i.modifiers.shift);
-        let rip = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(56.0, bh));
-        put_fixed(
-            ui,
-            rip,
-            egui::Label::new(egui::RichText::new("Ripple").small().color(if shift {
-                ui.visuals().selection.stroke.color
-            } else {
-                ui.visuals().weak_text_color()
-            })),
-        )
-        .on_hover_text("Hold Shift while trimming to ripple");
-        x += 60.0;
+                let shift = ui.input(|i| i.modifiers.shift);
+                ui.label(egui::RichText::new("Ripple").small().color(if shift {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    ui.visuals().weak_text_color()
+                }))
+                .on_hover_text("Hold Shift while trimming to ripple");
 
-        // Proposal 213: Captions + Export on the timeline strip (AS-1 steps 3/8).
-        let cap = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(78.0, bh));
-        if put_fixed(
-            ui,
-            cap,
-            egui::Button::new(format!("{} Captions", ph::CLOSED_CAPTIONING)).small(),
-        )
-        .on_hover_text("Open captions panel — auto-caption and styles (AS-1)")
-        .clicked()
-        {
-            self.open_drawer = Some(DrawerGroup::Captions);
-            self.prefs.open_drawer = Some(DrawerGroup::Captions);
-        }
-        x += 82.0;
+                ui.separator();
 
-        let exp = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(70.0, bh));
-        if put_fixed(
-            ui,
-            exp,
-            egui::Button::new(format!("{} Export", ph::EXPORT)).small(),
-        )
-        .on_hover_text("Export — Social 9:16 / 16:9 presets (AS-1)")
-        .clicked()
-        {
-            self.export_dialog_open = true;
-            if !self.prefs.video_coach_dismissed && self.prefs.video_coach_step >= 2 {
-                self.prefs.video_coach_dismissed = true;
-                self.prefs.save();
-            }
-        }
+                // Proposal 213: Captions + Export on the timeline strip (AS-1 steps 3/8).
+                if ui
+                    .button(format!("{} Captions", ph::CLOSED_CAPTIONING))
+                    .on_hover_text("Open captions panel — auto-caption and styles (AS-1)")
+                    .clicked()
+                {
+                    self.open_drawer = Some(DrawerGroup::Captions);
+                    self.prefs.open_drawer = Some(DrawerGroup::Captions);
+                }
+                if ui
+                    .button(format!("{} Export", ph::EXPORT))
+                    .on_hover_text("Export — Social 9:16 / 16:9 presets (AS-1)")
+                    .clicked()
+                {
+                    self.export_dialog_open = true;
+                    if !self.prefs.video_coach_dismissed && self.prefs.video_coach_step >= 2 {
+                        self.prefs.video_coach_dismissed = true;
+                        self.prefs.save();
+                    }
+                }
+            });
+        });
     }
 }
 
@@ -1385,7 +1431,7 @@ fn lane_colors(ui: &egui::Ui) -> clips::LaneColors {
 /// on-disk path plus its content hash (the sidecar disk-cache key). Held behind
 /// a shared `Mutex` and rebuilt every frame from `TimelineProject::media` so the
 /// `Send + Sync` resolver closures never borrow the document.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct ResolvedMedia {
     path: PathBuf,
     content_hash: Option<String>,
@@ -1400,6 +1446,12 @@ pub(crate) struct TimelineMediaCaches {
     /// `AssetId` → resolved path/hash, shared with the resolver closures and
     /// rebuilt from the active media pool every frame (see [`Self::refresh`]).
     resolved: Arc<Mutex<HashMap<AssetId, ResolvedMedia>>>,
+    /// Memoized probe/keyframe specs must be invalidated with the media cache.
+    thumb_memo: Arc<Mutex<HashMap<AssetId, Option<ThumbSpecParts>>>>,
+    cache_dir: Arc<Mutex<PathBuf>>,
+    project_path: Option<PathBuf>,
+    tab_key: usize,
+    media_snapshot: Option<HashMap<AssetId, ResolvedMedia>>,
 }
 
 impl TimelineMediaCaches {
@@ -1411,10 +1463,11 @@ impl TimelineMediaCaches {
     ///
     /// Constructing spawns the two caches' background worker threads (one each);
     /// they idle until the first `request` and exit cleanly on drop.
-    pub(crate) fn new(project_path: Option<&Path>) -> Self {
+    pub(crate) fn new(project_path: Option<&Path>, tab_key: usize) -> Self {
         let cache_dir = project_path
             .map(cache_dir_for_project)
             .unwrap_or_else(|| std::env::temp_dir().join("photonic-timeline-cache"));
+        let cache_dir_state = Arc::new(Mutex::new(cache_dir.clone()));
         let tools = locate().ok();
         let resolved: Arc<Mutex<HashMap<AssetId, ResolvedMedia>>> = Arc::default();
 
@@ -1424,14 +1477,20 @@ impl TimelineMediaCaches {
         let thumb_resolved = Arc::clone(&resolved);
         let thumb_tools = tools.clone();
         let thumb_memo: Arc<Mutex<HashMap<AssetId, Option<ThumbSpecParts>>>> = Arc::default();
+        let thumb_cache_dir = Arc::clone(&cache_dir_state);
+        let thumb_memo_for_source = Arc::clone(&thumb_memo);
         let thumb_source = Arc::new(DecodeThumbnailSource::new(move |asset: AssetId| {
             let tools = thumb_tools.clone()?;
-            if let Some(parts) = thumb_memo.lock().unwrap().get(&asset) {
+            if let Some(parts) = thumb_memo_for_source.lock().unwrap().get(&asset) {
                 return parts.clone().map(ThumbSpecParts::into_spec);
             }
             let media = thumb_resolved.lock().unwrap().get(&asset).cloned();
-            let parts = media.and_then(|m| ThumbSpecParts::build(&tools, &m));
-            thumb_memo.lock().unwrap().insert(asset, parts.clone());
+            let cache_dir = thumb_cache_dir.lock().unwrap().clone();
+            let parts = media.and_then(|m| ThumbSpecParts::build(&tools, &m, &cache_dir));
+            thumb_memo_for_source
+                .lock()
+                .unwrap()
+                .insert(asset, parts.clone());
             parts.map(ThumbSpecParts::into_spec)
         }));
         let thumbnails = ThumbnailCache::new(thumb_source, cache_dir.clone());
@@ -1448,6 +1507,11 @@ impl TimelineMediaCaches {
             thumbnails,
             waveforms,
             resolved,
+            thumb_memo,
+            cache_dir: cache_dir_state,
+            project_path: project_path.map(Path::to_path_buf),
+            tab_key,
+            media_snapshot: None,
         }
     }
 
@@ -1455,20 +1519,47 @@ impl TimelineMediaCaches {
     /// file-backed asset — cheap for a typical pool). Called once per frame
     /// before painting lanes so the resolver closures always see the active
     /// document's media without holding a borrow across the worker threads.
-    fn refresh(&self, pool: &MediaPool) {
-        let mut map = self.resolved.lock().unwrap();
-        map.clear();
-        for (id, asset) in &pool.assets {
-            if let AssetSource::File { path, .. } = &asset.source {
-                map.insert(
+    fn refresh(&mut self, project_path: Option<&Path>, tab_key: usize, pool: &MediaPool) {
+        let next = pool
+            .assets
+            .iter()
+            .filter_map(|(id, asset)| match &asset.source {
+                AssetSource::File { path, .. } => Some((
                     *id,
                     ResolvedMedia {
                         path: path.clone(),
                         content_hash: asset.content_hash.clone(),
                     },
-                );
-            }
+                )),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let next_project_path = project_path.map(Path::to_path_buf);
+        let owner_changed = self.project_path != next_project_path || self.tab_key != tab_key;
+        let media_changed = self
+            .media_snapshot
+            .as_ref()
+            .is_some_and(|previous| previous != &next);
+
+        if owner_changed {
+            let cache_dir = project_path
+                .map(cache_dir_for_project)
+                .unwrap_or_else(|| std::env::temp_dir().join("photonic-timeline-cache"));
+            *self.cache_dir.lock().unwrap() = cache_dir.clone();
+            self.thumbnails.set_cache_dir(cache_dir.clone());
+            self.waveforms.set_cache_dir(cache_dir);
         }
+        if owner_changed || media_changed {
+            self.thumbnails.invalidate();
+            self.waveforms.invalidate();
+            self.thumb_memo.lock().unwrap().clear();
+        }
+
+        self.project_path = next_project_path;
+        self.tab_key = tab_key;
+        self.media_snapshot = Some(next.clone());
+        let mut map = self.resolved.lock().unwrap();
+        *map = next;
     }
 
     fn has_pending(&self) -> bool {
@@ -1491,12 +1582,32 @@ impl ThumbSpecParts {
     /// parts, or `None` if the file has no decodable video stream or the probe
     /// fails (offline, no codec) — the caller then leaves the flat fill. Runs on
     /// the cache's worker thread (may block on ffmpeg), never the draw thread.
-    fn build(tools: &FfmpegTools, media: &ResolvedMedia) -> Option<ThumbSpecParts> {
+    ///
+    /// Keyframe/PTS indexes go through [`KeyframeIndex::load_or_build`] so a
+    /// 4K drone clip is not re-scanned on every session (the previous
+    /// `KeyframeIndex::build` path alone cost multiple seconds per asset and
+    /// made timeline thumbs look "stuck loading").
+    fn build(
+        tools: &FfmpegTools,
+        media: &ResolvedMedia,
+        cache_dir: &Path,
+    ) -> Option<ThumbSpecParts> {
         let details = probe_details(tools, &media.path).ok()?;
         let video = details.probe.video.clone()?;
-        let keyframes = KeyframeIndex::build(tools, &media.path).ok()?;
+        let hash = media
+            .content_hash
+            .clone()
+            .or_else(|| photonic_video::media::probe::content_hash(&media.path).ok());
+        let keyframes = match hash.as_deref() {
+            Some(h) => KeyframeIndex::load_or_build(tools, &media.path, cache_dir, h).ok()?,
+            None => KeyframeIndex::build(tools, &media.path).ok()?,
+        };
         let pts_kind = if details.is_vfr {
-            PtsKind::Vfr(Arc::new(PtsIndex::build(tools, &media.path).ok()?))
+            let pts = match hash.as_deref() {
+                Some(h) => PtsIndex::load_or_build(tools, &media.path, cache_dir, h).ok()?,
+                None => PtsIndex::build(tools, &media.path).ok()?,
+            };
+            PtsKind::Vfr(Arc::new(pts))
         } else {
             PtsKind::Cfr(video.frame_rate)
         };
@@ -1510,7 +1621,7 @@ impl ThumbSpecParts {
                 keyframes,
             },
             tools: tools.clone(),
-            content_hash: media.content_hash.clone(),
+            content_hash: hash,
         })
     }
 
@@ -2748,7 +2859,7 @@ mod drag_preview_geometry_tests {
 
 #[cfg(test)]
 mod track_drag_tests {
-    use super::nearest_drop_row;
+    use super::{nearest_drop_row, reorder_target_index};
     use photonic_core::timeline::{TrackId, TrackKind};
 
     // Three video rows as `track_rows` builds them: painted top→bottom in
@@ -2811,5 +2922,82 @@ mod track_drag_tests {
     fn no_same_kind_rows_yields_none() {
         let geom = vec![(TrackId::new(), TrackKind::Video, 0, 0.0, 30.0)];
         assert!(nearest_drop_row(&geom, TrackKind::Audio, 10.0).is_none());
+    }
+
+    #[test]
+    fn reversed_video_drag_above_target_uses_post_removal_raw_index() {
+        // Raw [A,B,C] is painted [C,B,A]. Drag visible A above visible C.
+        assert_eq!(
+            reorder_target_index(TrackKind::Video, 0, 2, 3),
+            Some(2),
+            "A must append after removing itself so it becomes the top visual row"
+        );
+    }
+
+    #[test]
+    fn reversed_video_drag_below_target_maps_visual_boundary_back_to_raw_vec() {
+        // Raw [A,B,C] is painted [C,B,A]. Drag visible C above visible A's row.
+        assert_eq!(
+            reorder_target_index(TrackKind::Video, 2, 0, 3),
+            Some(1),
+            "C should be inserted between A and B in raw order"
+        );
+    }
+
+    #[test]
+    fn natural_audio_drag_uses_the_same_visual_insert_contract() {
+        assert_eq!(
+            reorder_target_index(TrackKind::Audio, 0, 2, 3),
+            Some(1),
+            "audio A above C inserts between B and C after removal"
+        );
+        assert_eq!(
+            reorder_target_index(TrackKind::Audio, 2, 0, 3),
+            Some(0),
+            "audio C above A inserts at the front"
+        );
+    }
+}
+
+#[cfg(test)]
+mod media_cache_tests {
+    use super::TimelineMediaCaches;
+    use photonic_core::timeline::{AssetKind, MediaAsset, MediaPool};
+    use std::path::PathBuf;
+
+    #[test]
+    fn refresh_invalidates_memo_when_media_identity_changes() {
+        let mut pool = MediaPool::default();
+        let asset = MediaAsset::from_file(AssetKind::Video, "/old/clip.mp4");
+        let asset_id = asset.id;
+        pool.insert(asset.clone());
+
+        let mut caches = TimelineMediaCaches::new(None, 0);
+        caches.refresh(None, 0, &pool);
+        caches.thumb_memo.lock().unwrap().insert(asset_id, None);
+
+        let mut relinked = asset;
+        relinked.source = photonic_core::timeline::AssetSource::File {
+            path: PathBuf::from("/new/clip.mp4"),
+            rel_path: None,
+        };
+        relinked.content_hash = Some("new-bytes".into());
+        pool.assets.insert(asset_id, relinked);
+        caches.refresh(None, 0, &pool);
+
+        assert!(!caches.thumb_memo.lock().unwrap().contains_key(&asset_id));
+    }
+
+    #[test]
+    fn refresh_invalidates_memo_when_active_tab_changes() {
+        let pool = MediaPool::default();
+        let mut caches = TimelineMediaCaches::new(None, 0);
+        caches.refresh(None, 0, &pool);
+        let asset_id = photonic_core::timeline::AssetId::new();
+        caches.thumb_memo.lock().unwrap().insert(asset_id, None);
+
+        caches.refresh(None, 1, &pool);
+
+        assert!(!caches.thumb_memo.lock().unwrap().contains_key(&asset_id));
     }
 }
