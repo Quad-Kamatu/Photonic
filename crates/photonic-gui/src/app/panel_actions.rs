@@ -113,7 +113,7 @@ impl PhotonicApp {
                     out_ticks,
                     name,
                 } => {
-                    use photonic_core::timeline::{ops, Tick};
+                    use photonic_core::timeline::Tick;
                     if let Some(id) = crate::app::timeline::ops_bridge::create_subclip(
                         doc,
                         history,
@@ -2678,7 +2678,7 @@ impl PhotonicApp {
                             ShapeKind::Text => unreachable!(),
                         };
                         if let Some(path) = self.build_shape_with_tool(tool, sx, sy, ex, ey) {
-                            let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
+                            let stroke_arg = self.prefs.default_stroke_enabled.then_some({
                                 (
                                     self.prefs.default_stroke_color,
                                     self.prefs.default_stroke_width,
@@ -2885,20 +2885,18 @@ impl PhotonicApp {
                             Ok(series) => {
                                 let spec = photonic_core::timeline::StabilizationSpec::new(
                                     photonic_core::timeline::MotionBinding {
-                                        source:
-                                            photonic_core::timeline::MotionSourceRef::Sidecar {
-                                                path: path.clone(),
-                                                rel_path: None,
-                                                format: series.format,
-                                            },
+                                        source: photonic_core::timeline::MotionSourceRef::Sidecar {
+                                            path: path.clone(),
+                                            rel_path: None,
+                                            format: series.format,
+                                        },
                                         sync: Default::default(),
                                         // Uncalibrated until the user picks a
                                         // profile: rotation-only is the honest
                                         // default, and 22 §6.6 requires it be
                                         // an explicit state rather than a
                                         // silent fallback.
-                                        lens:
-                                            photonic_core::timeline::LensProfileRef::RotationOnly,
+                                        lens: photonic_core::timeline::LensProfileRef::RotationOnly,
                                     },
                                 );
                                 if crate::app::timeline::ops_bridge::set_clip_stabilization(
@@ -2927,8 +2925,7 @@ impl PhotonicApp {
                                 }
                             }
                             Err(e) => {
-                                self.file_status =
-                                    Some(format!("Motion metadata rejected: {e}"));
+                                self.file_status = Some(format!("Motion metadata rejected: {e}"));
                             }
                         }
                     }
@@ -2940,8 +2937,7 @@ impl PhotonicApp {
                     match self.engine.as_ref() {
                         Some(engine) => {
                             engine.send_analyze_stabilization(clip);
-                            self.file_status =
-                                Some("Stabilization analysis running…".into());
+                            self.file_status = Some("Stabilization analysis running…".into());
                         }
                         // No engine means no preview to stabilize; say so
                         // rather than silently dropping the request.
@@ -4167,13 +4163,9 @@ impl PhotonicApp {
                             for crit in &criteria {
                                 let ok = match *crit {
                                     "fill_color" => match &node.kind {
-                                        SceneNodeKind::Path(p) => {
-                                            if p.fill.enabled {
-                                                if let FillKind::Solid(c) = &p.fill.kind {
-                                                    color_matches([c.r, c.g, c.b])
-                                                } else {
-                                                    false
-                                                }
+                                        SceneNodeKind::Path(p) if p.fill.enabled => {
+                                            if let FillKind::Solid(c) = &p.fill.kind {
+                                                color_matches([c.r, c.g, c.b])
                                             } else {
                                                 false
                                             }
@@ -4566,7 +4558,7 @@ impl PhotonicApp {
                     let mut cmds: Vec<Command> = Vec::new();
                     for nid in target {
                         if let Some(node) = doc.nodes.get(&nid) {
-                            let node_opacity = node.opacity as f32;
+                            let node_opacity = node.opacity;
                             if node_opacity >= 1.0 - f32::EPSILON
                                 && match &node.kind {
                                     SceneNodeKind::Path(pn) => pn.fill.opacity >= 1.0 - 1e-6,
@@ -4580,13 +4572,13 @@ impl PhotonicApp {
                             new_node.opacity = 1.0;
                             match &mut new_node.kind {
                                 SceneNodeKind::Path(pn) => {
-                                    let combined = (pn.fill.opacity as f32) * node_opacity;
+                                    let combined = pn.fill.opacity * node_opacity;
                                     pn.fill = bake_fill(&pn.fill, combined);
                                     pn.stroke.color.a *= node_opacity;
                                     pn.stroke.opacity = 1.0;
                                 }
                                 SceneNodeKind::Text(tn) => {
-                                    let combined = (tn.fill.opacity as f32) * node_opacity;
+                                    let combined = tn.fill.opacity * node_opacity;
                                     tn.fill = bake_fill(&tn.fill, combined);
                                 }
                                 SceneNodeKind::Group(_) => {}
@@ -5048,8 +5040,8 @@ impl PhotonicApp {
                     use photonic_core::style::FillKind;
                     let mut findings: Vec<String> = Vec::new();
 
-                    let canvas_w = doc.width as f64;
-                    let canvas_h = doc.height as f64;
+                    let canvas_w = doc.width;
+                    let canvas_h = doc.height;
                     let mid_x = canvas_w / 2.0;
                     let mid_y = canvas_h / 2.0;
                     let (mut q_tl, mut q_tr, mut q_bl, mut q_br) = (0usize, 0usize, 0usize, 0usize);
@@ -5377,7 +5369,7 @@ impl PhotonicApp {
                             let cnt = rot_gaps.iter().filter(|&&g| (g - best).abs() < 3.0).count();
                             if cnt + 1 >= min_count && *best >= 5.0 {
                                 let n = (360.0 / best).round() as u32;
-                                let sym = if n >= 2 && n <= 12 {
+                                let sym = if (2..=12).contains(&n) {
                                     format!(" ({}× symmetry)", n)
                                 } else {
                                     String::new()
@@ -5694,7 +5686,7 @@ impl PhotonicApp {
                                     )
                                 }
                             }
-                            _ => (false, format!("unknown rule type")),
+                            _ => (false, "unknown rule type".to_string()),
                         };
                         results.push((rule.name.clone(), passed, msg));
                     }
@@ -5920,7 +5912,7 @@ impl PhotonicApp {
                                 continue 'actions;
                             };
                             const GOLDEN_ANGLE: f64 =
-                                std::f64::consts::TAU * (1.0 - 1.0 / 1.6180339887498949);
+                                std::f64::consts::TAU * (1.0 - 1.0 / 1.618_033_988_749_895);
                             for i in 0..count {
                                 let r = spread * ((i as f64 + 0.5) / count as f64).sqrt();
                                 let theta = i as f64 * GOLDEN_ANGLE;

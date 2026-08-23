@@ -61,13 +61,8 @@ pub fn run(host_port: &str) -> Result<()> {
             .map(|o| o.contains_key("id") && !o["id"].is_null())
             .unwrap_or(false);
 
-        let method = parsed
-            .get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
-        let tool_name = parsed
-            .pointer("/params/name")
-            .and_then(|n| n.as_str());
+        let method = parsed.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let tool_name = parsed.pointer("/params/name").and_then(|n| n.as_str());
 
         let mut req = client
             .post(&url)

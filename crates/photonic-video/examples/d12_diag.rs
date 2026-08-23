@@ -22,7 +22,11 @@ fn main() {
         match photonic_video::media::parse_motion(&p) {
             Ok(s) => {
                 println!("[usable] {name}");
-                println!("         {} samples, format {:?}", s.samples.len(), s.format);
+                println!(
+                    "         {} samples, format {:?}",
+                    s.samples.len(),
+                    s.format
+                );
                 if let Some(hz) = s.sample_rate_hz() {
                     println!("         {hz:.0} Hz");
                 }

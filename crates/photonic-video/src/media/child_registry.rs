@@ -113,8 +113,7 @@ impl ChildRegistry {
     }
 
     fn write(&self, records: &[ChildRecord]) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec(records)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let bytes = serde_json::to_vec(records).map_err(std::io::Error::other)?;
         super::atomic_write::write_atomic(&self.path, &bytes)
     }
 

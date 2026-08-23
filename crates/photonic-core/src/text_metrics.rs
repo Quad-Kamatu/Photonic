@@ -61,7 +61,6 @@ pub fn cluster_cells(cluster: &str) -> usize {
 }
 
 /// UAX #29 extended grapheme clusters of `s`.
-#[must_use]
 pub fn graphemes(s: &str) -> impl Iterator<Item = &str> + '_ {
     UnicodeSegmentation::graphemes(s, true)
 }
@@ -71,7 +70,6 @@ pub fn graphemes(s: &str) -> impl Iterator<Item = &str> + '_ {
 /// on it directly — e.g. `photonic-video`'s timing distribution — can
 /// tokenize through `photonic-core` without pulling the segmentation crate
 /// into a second `[dependencies]` table.
-#[must_use]
 pub fn word_bounds(s: &str) -> impl Iterator<Item = &str> + '_ {
     UnicodeSegmentation::split_word_bounds(s)
 }

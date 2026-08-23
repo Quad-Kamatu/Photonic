@@ -93,17 +93,12 @@ fn decode_frame(tools: &FfmpegTools, n: u64) -> DecodedFrame {
 /// 2x2 luma quad; this replicates it rather than interpolating, which is what
 /// makes the inverse below exact per-pixel.
 fn planes_to_working_frame(planes: &DecodedPlanes) -> Frame {
-    let DecodedPlanes::Yuv420 {
-        width,
-        height,
-        y,
-        cb,
-        cr,
-    } = planes
-    else {
+    let DecodedPlanes::Yuv420 { .. } = planes else {
         panic!("counter.mp4 is yuv420p; got a non-4:2:0 plane set");
     };
-    let (w, h) = (*width as usize, *height as usize);
+    let (width, height) = planes.dims();
+    let (w, h) = (width as usize, height as usize);
+    let (y, cb, cr) = (planes.y(), planes.cb(), planes.cr());
     let cw = w.div_ceil(2);
     let mut rgba = vec![0.0f32; w * h * 4];
     for row in 0..h {
@@ -120,8 +115,8 @@ fn planes_to_working_frame(planes: &DecodedPlanes) -> Frame {
         }
     }
     Frame {
-        width: *width,
-        height: *height,
+        width,
+        height,
         rgba_premult: rgba,
     }
 }
@@ -137,9 +132,10 @@ fn planes_to_working_frame(planes: &DecodedPlanes) -> Frame {
 fn colour_contract_is_exact_inverse_on_real_media() {
     let tools: FfmpegTools = tools_or_skip!();
     let frame = decode_frame(&tools, 0);
-    let DecodedPlanes::Yuv420 { y, cb, cr, .. } = &frame.planes else {
+    let DecodedPlanes::Yuv420 { .. } = &frame.planes else {
         panic!("counter.mp4 is yuv420p");
     };
+    let (y, cb, cr) = (frame.planes.y(), frame.planes.cb(), frame.planes.cr());
 
     let working = planes_to_working_frame(&frame.planes);
     let planes = working_frame_to_yuv_planes(
@@ -246,7 +242,7 @@ fn decoded_media_exports_to_a_well_formed_clip() {
         None,
         &cancel,
         |ev| {
-            if matches!(ev, ExportEvent::Done { .. }) {
+            if matches!(ev, ExportEvent::Done) {
                 done = true;
             }
         },

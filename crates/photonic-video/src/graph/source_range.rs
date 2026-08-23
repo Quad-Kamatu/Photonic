@@ -59,7 +59,7 @@ impl FrameRange {
 
     /// Number of distinct ticks covered (inclusive), ignoring stride.
     pub fn tick_count(self) -> u64 {
-        (self.last.0 - self.first.0).unsigned_abs() as u64 + 1
+        (self.last.0 - self.first.0).unsigned_abs() + 1
     }
 }
 

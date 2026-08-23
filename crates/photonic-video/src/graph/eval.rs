@@ -4641,7 +4641,7 @@ mod tests {
     ) -> photonic_core::timeline::ClipEffect {
         let mut eff = photonic_core::timeline::ClipEffect::new(kind);
         for (path, value) in params {
-            eff.params.base.set(*path, value.clone());
+            eff.params.base.set(*path, *value);
         }
         eff
     }

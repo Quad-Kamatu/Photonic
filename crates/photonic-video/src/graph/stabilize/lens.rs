@@ -172,10 +172,17 @@ impl LensProfile {
     }
 
     fn validate(&self) -> Result<(), LensError> {
-        let finite = [self.fx, self.fy, self.cx, self.cy, self.calib_width, self.calib_height]
-            .iter()
-            .chain(self.k.iter())
-            .all(|v| v.is_finite());
+        let finite = [
+            self.fx,
+            self.fy,
+            self.cx,
+            self.cy,
+            self.calib_width,
+            self.calib_height,
+        ]
+        .iter()
+        .chain(self.k.iter())
+        .all(|v| v.is_finite());
         if !finite {
             return Err(LensError::NonFinite);
         }
@@ -195,9 +202,9 @@ impl LensProfile {
     ///
     /// Accepts the widely-used community shape (`fisheye_params.camera_matrix`
     /// + `distortion_coeffs`, `calib_dimension`) so a user can point Photonic
-    /// at a profile they already have. Reading a *format* carries no licence
-    /// obligation; bundling profile *data* does, which is why no snapshot ships
-    /// until 23 §9.2 per-entry intake passes.
+    ///   at a profile they already have. Reading a *format* carries no licence
+    ///   obligation; bundling profile *data* does, which is why no snapshot ships
+    ///   until 23 §9.2 per-entry intake passes.
     pub fn from_json(text: &str) -> Result<Self, LensError> {
         let v: serde_json::Value = serde_json::from_str(text).map_err(LensError::Json)?;
 
@@ -220,8 +227,7 @@ impl LensProfile {
             return Err(LensError::BadCameraMatrix);
         }
         let row = |i: usize, j: usize| -> Result<f64, LensError> {
-            m[i]
-                .as_array()
+            m[i].as_array()
                 .and_then(|r| r.get(j))
                 .and_then(|x| x.as_f64())
                 .ok_or(LensError::BadCameraMatrix)
@@ -364,7 +370,10 @@ mod tests {
             (1919.0, 1079.0),
         ] {
             let ray = lens.unproject(px, py, w, h);
-            assert!((ray.length() - 1.0).abs() < 1e-9, "unproject returns a unit ray");
+            assert!(
+                (ray.length() - 1.0).abs() < 1e-9,
+                "unproject returns a unit ray"
+            );
             let (qx, qy) = lens.project(ray, w, h).unwrap();
             assert!(
                 (qx - px).abs() < 1e-6 && (qy - py).abs() < 1e-6,
@@ -396,7 +405,9 @@ mod tests {
     #[test]
     fn pinhole_rejects_rays_behind_the_camera() {
         let lens = LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0);
-        assert!(lens.project(DVec3::new(0.0, 0.0, -1.0), 1920.0, 1080.0).is_none());
+        assert!(lens
+            .project(DVec3::new(0.0, 0.0, -1.0), 1920.0, 1080.0)
+            .is_none());
     }
 
     #[test]
@@ -424,8 +435,8 @@ mod tests {
     #[test]
     fn theta_distortion_inverts() {
         let k = [0.02, -0.004, 0.0007, -0.00005];
-        for deg in [0.5, 5.0, 20.0, 45.0, 80.0, 100.0] {
-            let theta = (deg as f64).to_radians();
+        for deg in [0.5_f64, 5.0, 20.0, 45.0, 80.0, 100.0] {
+            let theta = deg.to_radians();
             let back = undistort_theta(distort_theta(theta, &k), &k);
             assert!((back - theta).abs() < 1e-10, "{deg}° -> {back}");
         }
@@ -475,7 +486,8 @@ mod tests {
 
     #[test]
     fn malformed_profiles_are_rejected() {
-        let bad_matrix = r#"{"fisheye_params":{"camera_matrix":[[1,2]],"distortion_coeffs":[0,0,0,0]}}"#;
+        let bad_matrix =
+            r#"{"fisheye_params":{"camera_matrix":[[1,2]],"distortion_coeffs":[0,0,0,0]}}"#;
         assert!(matches!(
             LensProfile::from_json(bad_matrix),
             Err(LensError::BadCameraMatrix)

@@ -228,11 +228,9 @@ pub fn validate_mcp_headers(
     match mode {
         ProtocolMode::Strict => {
             let Some(hm) = header_method.filter(|s| !s.is_empty()) else {
-                return Err(RpcError::new(
-                    ERR_HEADER_MISMATCH,
-                    "missing Mcp-Method header",
-                )
-                .http(400));
+                return Err(
+                    RpcError::new(ERR_HEADER_MISMATCH, "missing Mcp-Method header").http(400),
+                );
             };
             if hm != rpc_method {
                 return Err(header_mismatch("Mcp-Method", hm, rpc_method));
@@ -359,8 +357,8 @@ mod tests {
 
     #[test]
     fn strict_requires_method_header() {
-        let e = validate_mcp_headers(ProtocolMode::Strict, None, None, "tools/list", None)
-            .unwrap_err();
+        let e =
+            validate_mcp_headers(ProtocolMode::Strict, None, None, "tools/list", None).unwrap_err();
         assert_eq!(e.code, ERR_HEADER_MISMATCH);
     }
 

@@ -717,8 +717,8 @@ mod tests {
 
     /// ACCEPT CRITERION: export a doc with a text node through `outline_document_text`
     /// + `export_pdf`, write the result to /tmp/photonic_outline_test.pdf, then run
-    /// `pdffonts` on it.  The font table MUST be empty (zero rows) — the PDF contains
-    /// no embedded/referenced fonts; all glyphs are present as vector path operators.
+    ///   `pdffonts` on it.  The font table MUST be empty (zero rows) — the PDF contains
+    ///   no embedded/referenced fonts; all glyphs are present as vector path operators.
     ///
     /// Also verifies the PDF is non-trivial (> 512 bytes) so we know real paths exist.
     ///

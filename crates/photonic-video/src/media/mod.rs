@@ -17,6 +17,8 @@ pub mod motion;
 pub mod poster;
 pub mod probe;
 pub mod proxy;
+/// Deterministic hysteresis policy for selecting ready preview proxies.
+pub mod proxy_policy;
 /// Still-image decode sizing + the `(asset, size)`-keyed still cache (26 K-C8).
 pub mod stills;
 /// Clip thumbnails + waveform loading, sidecar-cached (spec 15, NLE parity 10).
@@ -40,6 +42,10 @@ pub use probe::{content_hash, probe_asset, probe_details, ProbeDetails, ProbeErr
 pub use proxy::{
     generate_proxy, proxy_cache_dir, proxy_cache_path, resolve_decode_input,
     should_auto_generate_proxy, validate_attach, AttachError, AttachValidation, ProxyError,
+};
+pub use proxy_policy::{
+    AdaptiveProxyPolicy, PreviewMediaChoice, PreviewPressure, PRESSURE_SAMPLES_BEFORE_PROXY,
+    RELAXED_BUDGET_DENOMINATOR, RELAXED_BUDGET_NUMERATOR, RELAXED_SAMPLES_BEFORE_ORIGINAL,
 };
 pub use stills::{resample_linear_premult, still_target_size, StillCache, StillKey};
 pub use thumbnails::{

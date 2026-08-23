@@ -9,6 +9,17 @@
 //! conversion pass) compiles against. Evaluator, decode, playback, audio, and
 //! export land in P3 per the phase plan.
 
+// GPU passes keep their command-model parameters and indexed pixel loops. The
+// data enums also remain inline because they cross public and worker boundaries.
+// `expect` makes these narrowly documented choices fail the strict gate once
+// they stop applying, instead of silently disabling the lints.
+#![expect(
+    clippy::large_enum_variant,
+    clippy::manual_clamp,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments
+)]
+
 pub mod graph;
 
 /// Audio engine host + mixer (02 §1, 09).
@@ -50,5 +61,5 @@ pub use media::thumbnails::{RgbaThumb, ThumbHandle, ThumbnailCache, WaveformCach
 pub use session::{
     coalesce_commands, colorimetry_for_probe, AssetReadiness, EngineCmd, EngineFrame,
     EngineSession, EngineStatus, ExportJob, MasterMeterSnapshot, PreviewQuality, PreviewTarget,
-    ProxyMode, RenderJobOptions, VideoEngine,
+    PreviewTelemetrySnapshot, ProxyMode, RenderJobOptions, VideoEngine,
 };

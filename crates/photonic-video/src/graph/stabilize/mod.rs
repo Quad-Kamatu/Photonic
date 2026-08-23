@@ -127,7 +127,10 @@ impl StabilizationAnalysis {
     /// last frame: a clip retimed longer than its analysis should degrade to
     /// unstabilized, not freeze on the final correction.
     pub fn at(&self, frame: usize) -> FrameCorrection {
-        self.frames.get(frame).copied().unwrap_or(FrameCorrection::IDENTITY)
+        self.frames
+            .get(frame)
+            .copied()
+            .unwrap_or(FrameCorrection::IDENTITY)
     }
 
     /// The frame index covering source time `seconds`.
@@ -135,7 +138,9 @@ impl StabilizationAnalysis {
         if !seconds.is_finite() || seconds <= self.source_start_s {
             return 0;
         }
-        ((seconds - self.source_start_s) * self.fps).round().max(0.0) as usize
+        ((seconds - self.source_start_s) * self.fps)
+            .round()
+            .max(0.0) as usize
     }
 
     /// Build the resolved warp for `frame`.
@@ -289,10 +294,8 @@ pub fn analyze_clip(
     spec.validate().map_err(AnalyzeError::Recipe)?;
 
     let series = match &spec.binding.source {
-        MotionSourceRef::Sidecar { path, .. } => {
-            crate::media::motion::parse_motion(&resolve(path))
-                .map_err(|e| AnalyzeError::Motion(e.to_string()))?
-        }
+        MotionSourceRef::Sidecar { path, .. } => crate::media::motion::parse_motion(&resolve(path))
+            .map_err(|e| AnalyzeError::Motion(e.to_string()))?,
         MotionSourceRef::Embedded { .. } => {
             // 23 §9.1's dependency audit has not cleared, so no container
             // adapter exists to call. Fail loudly rather than pretending.
@@ -306,11 +309,10 @@ pub fn analyze_clip(
         // No calibration: rays still need *a* consistent camera to be defined
         // in, so use an ideal rectilinear one. This corrects rotation only,
         // which is exactly what RotationOnly promises.
-        LensProfileRef::RotationOnly => {
-            LensProfile::ideal_pinhole(geom.width, geom.height, 90.0)
+        LensProfileRef::RotationOnly => LensProfile::ideal_pinhole(geom.width, geom.height, 90.0),
+        LensProfileRef::UserFile { path, .. } => {
+            LensProfile::from_path(&resolve(path)).map_err(|e| AnalyzeError::Lens(e.to_string()))?
         }
-        LensProfileRef::UserFile { path, .. } => LensProfile::from_path(&resolve(path))
-            .map_err(|e| AnalyzeError::Lens(e.to_string()))?,
         LensProfileRef::Bundled { id } => {
             // No snapshot ships until 23 §9.2 per-entry intake passes, so a
             // document referencing one resolves to "unavailable" rather than
@@ -468,9 +470,15 @@ pub fn analyze(
 /// `glam` stores matrices column-major; the IR and WGSL want row-major.
 fn mat3_row_major(m: DMat3) -> [f32; 9] {
     [
-        m.x_axis.x as f32, m.y_axis.x as f32, m.z_axis.x as f32,
-        m.x_axis.y as f32, m.y_axis.y as f32, m.z_axis.y as f32,
-        m.x_axis.z as f32, m.y_axis.z as f32, m.z_axis.z as f32,
+        m.x_axis.x as f32,
+        m.y_axis.x as f32,
+        m.z_axis.x as f32,
+        m.x_axis.y as f32,
+        m.y_axis.y as f32,
+        m.z_axis.y as f32,
+        m.x_axis.z as f32,
+        m.y_axis.z as f32,
+        m.z_axis.z as f32,
     ]
 }
 
@@ -595,8 +603,13 @@ mod tests {
     #[test]
     fn a_perfectly_still_camera_needs_no_correction() {
         let s = samples([0.0; 3], None, 500.0, 2.0);
-        let a = analyze(&s, &spec(0.8), &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom())
-            .unwrap();
+        let a = analyze(
+            &s,
+            &spec(0.8),
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
         assert_eq!(a.frames.len(), 60);
         for (i, f) in a.frames.iter().enumerate() {
             assert!(f.is_identity(), "frame {i} was not identity: {f:?}");
@@ -610,8 +623,13 @@ mod tests {
         // With no smoothing the desired path *is* the raw path, so the
         // correction is identity even though the camera is moving hard.
         let s = samples([0.0, 0.5, 0.0], None, 500.0, 2.0);
-        let a = analyze(&s, &spec(0.0), &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom())
-            .unwrap();
+        let a = analyze(
+            &s,
+            &spec(0.0),
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
         for f in &a.frames {
             assert!(f.is_identity());
         }
@@ -636,8 +654,13 @@ mod tests {
                 orientation: None,
             })
             .collect();
-        let a = analyze(&s, &spec(0.9), &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom())
-            .unwrap();
+        let a = analyze(
+            &s,
+            &spec(0.9),
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
         assert!(
             a.frames.iter().any(|f| !f.is_identity()),
             "shaky footage must produce a non-identity correction"
@@ -650,7 +673,13 @@ mod tests {
         let mut sp = spec(0.5);
         sp.horizon_lock = 1.0;
         let s = samples([0.0, 0.1, 0.0], None, 500.0, 2.0);
-        let a = analyze(&s, &sp, &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom()).unwrap();
+        let a = analyze(
+            &s,
+            &sp,
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
         assert!(
             a.diagnostics.horizon_lock_unavailable,
             "a setting that silently does nothing is worse than one that says so"
@@ -662,18 +691,37 @@ mod tests {
     fn horizon_lock_reports_confidence_when_accel_is_present() {
         let mut sp = spec(0.5);
         sp.horizon_lock = 1.0;
-        let s = samples([0.0, 0.05, 0.0], Some([0.0, orientation::G0, 0.0]), 500.0, 2.0);
-        let a = analyze(&s, &sp, &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom()).unwrap();
+        let s = samples(
+            [0.0, 0.05, 0.0],
+            Some([0.0, orientation::G0, 0.0]),
+            500.0,
+            2.0,
+        );
+        let a = analyze(
+            &s,
+            &sp,
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
         assert!(!a.diagnostics.horizon_lock_unavailable);
         let c = a.diagnostics.mean_gravity_confidence.unwrap();
-        assert!((c - 1.0).abs() < 1e-9, "resting accel should be fully trusted, got {c}");
+        assert!(
+            (c - 1.0).abs() < 1e-9,
+            "resting accel should be fully trusted, got {c}"
+        );
     }
 
     #[test]
     fn bias_is_reported_in_diagnostics() {
         let s = samples([0.008, -0.004, 0.002], None, 500.0, 3.0);
-        let a = analyze(&s, &spec(0.5), &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom())
-            .unwrap();
+        let a = analyze(
+            &s,
+            &spec(0.5),
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
         assert!(a.diagnostics.bias.estimated);
         assert!((a.diagnostics.bias.bias_rad_s[0] - 0.008).abs() < 1e-6);
     }
@@ -693,7 +741,13 @@ mod tests {
             },
         ];
         let s = samples([0.0; 3], None, 500.0, 3.0);
-        let a = analyze(&s, &sp, &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom()).unwrap();
+        let a = analyze(
+            &s,
+            &sp,
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
         assert!(
             (a.diagnostics.clock_drift_ppm - 1000.0).abs() < 1.0,
             "got {} ppm",
@@ -706,7 +760,12 @@ mod tests {
     fn analysis_is_deterministic() {
         // Cacheability depends on this: the same inputs must give bit-identical
         // output, or the analysis key lies.
-        let s = samples([0.05, -0.02, 0.01], Some([0.0, orientation::G0, 0.0]), 500.0, 2.0);
+        let s = samples(
+            [0.05, -0.02, 0.01],
+            Some([0.0, orientation::G0, 0.0]),
+            500.0,
+            2.0,
+        );
         let l = LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0);
         let a = analyze(&s, &spec(0.7), &l, geom()).unwrap();
         let b = analyze(&s, &spec(0.7), &l, geom()).unwrap();
@@ -737,9 +796,17 @@ mod tests {
     #[test]
     fn out_of_range_frames_degrade_to_identity() {
         let s = samples([0.0; 3], None, 500.0, 2.0);
-        let a = analyze(&s, &spec(0.5), &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0), geom())
-            .unwrap();
-        assert!(a.at(9_999).is_identity(), "past the end must not freeze or panic");
+        let a = analyze(
+            &s,
+            &spec(0.5),
+            &LensProfile::ideal_pinhole(1920.0, 1080.0, 90.0),
+            geom(),
+        )
+        .unwrap();
+        assert!(
+            a.at(9_999).is_identity(),
+            "past the end must not freeze or panic"
+        );
     }
 
     #[test]
@@ -751,7 +818,15 @@ mod tests {
             Err(AnalyzeError::NoSamples)
         ));
         assert!(matches!(
-            analyze(&s, &spec(0.5), &l, ClipGeometry { frame_count: 0, ..geom() }),
+            analyze(
+                &s,
+                &spec(0.5),
+                &l,
+                ClipGeometry {
+                    frame_count: 0,
+                    ..geom()
+                }
+            ),
             Err(AnalyzeError::NoFrames)
         ));
         assert!(matches!(
@@ -759,12 +834,23 @@ mod tests {
             Err(AnalyzeError::BadFrameRate)
         ));
         assert!(matches!(
-            analyze(&s, &spec(0.5), &l, ClipGeometry { width: 0.0, ..geom() }),
+            analyze(
+                &s,
+                &spec(0.5),
+                &l,
+                ClipGeometry {
+                    width: 0.0,
+                    ..geom()
+                }
+            ),
             Err(AnalyzeError::BadDimensions)
         ));
         let mut bad = spec(0.5);
         bad.max_zoom = 0.5;
-        assert!(matches!(analyze(&s, &bad, &l, geom()), Err(AnalyzeError::Recipe(_))));
+        assert!(matches!(
+            analyze(&s, &bad, &l, geom()),
+            Err(AnalyzeError::Recipe(_))
+        ));
     }
 
     #[test]

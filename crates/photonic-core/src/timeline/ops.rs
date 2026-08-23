@@ -2670,10 +2670,7 @@ pub fn paste_keyframes_reanchored(
 
 /// Read the effect stack a [`VfxOwner`] names, or the owner-shaped `EditError`
 /// when it does not resolve.
-pub fn effect_stack<'a>(
-    p: &'a TimelineProject,
-    owner: VfxOwner,
-) -> Result<&'a [ClipEffect], EditError> {
+pub fn effect_stack(p: &TimelineProject, owner: VfxOwner) -> Result<&[ClipEffect], EditError> {
     match owner {
         VfxOwner::Clip(c) => Ok(&find_clip_anywhere(p, c)
             .ok_or(EditError::NoClip(c))?
@@ -6725,6 +6722,12 @@ mod tests {
     fn set_generate_proxies_on_import_undoably() {
         let mut doc = Document::new("t", 100.0, 100.0);
         doc.timeline = Some(TimelineProject::new());
+        assert!(doc.timeline.as_ref().unwrap().settings.generate_proxies);
+
+        let p = doc.timeline.as_ref().unwrap();
+        let cmd = set_generate_proxies_on_import(p, false);
+        assert_undo_roundtrip(&doc, &cmd);
+        Command::Timeline(cmd).apply(&mut doc);
         assert!(!doc.timeline.as_ref().unwrap().settings.generate_proxies);
 
         let p = doc.timeline.as_ref().unwrap();
@@ -6732,11 +6735,6 @@ mod tests {
         assert_undo_roundtrip(&doc, &cmd);
         Command::Timeline(cmd).apply(&mut doc);
         assert!(doc.timeline.as_ref().unwrap().settings.generate_proxies);
-
-        let p = doc.timeline.as_ref().unwrap();
-        let cmd = set_generate_proxies_on_import(p, false);
-        Command::Timeline(cmd).apply(&mut doc);
-        assert!(!doc.timeline.as_ref().unwrap().settings.generate_proxies);
     }
 
     // ── K-B1 / K-B2: track, master and asset effect stacks ───────────────────

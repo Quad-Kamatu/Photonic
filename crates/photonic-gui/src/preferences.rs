@@ -637,23 +637,18 @@ mod tests {
     /// rail-offered group in both modes still resolves to itself.
     #[test]
     fn known_drawer_groups_still_round_trip() {
-        for g in DrawerGroup::ALL
-            .iter()
-            .chain(DrawerGroup::VIDEO_ALL.iter())
-            .copied()
-        {
+        for g in DrawerGroup::ALL.iter().chain(DrawerGroup::VIDEO_ALL.iter()) {
             let s = serde_json::to_string(&g).unwrap();
             let back: DrawerGroup = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, g, "DrawerGroup {g:?} round-tripped to {back:?}");
+            assert_eq!(back, *g, "DrawerGroup {g:?} round-tripped to {back:?}");
         }
         for g in RightDrawerGroup::ALL
             .iter()
             .chain(RightDrawerGroup::VIDEO_ALL.iter())
-            .copied()
         {
             let s = serde_json::to_string(&g).unwrap();
             let back: RightDrawerGroup = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, g, "RightDrawerGroup {g:?} round-tripped to {back:?}");
+            assert_eq!(back, *g, "RightDrawerGroup {g:?} round-tripped to {back:?}");
         }
     }
 

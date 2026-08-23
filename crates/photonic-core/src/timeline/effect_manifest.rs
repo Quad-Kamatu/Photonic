@@ -1258,14 +1258,14 @@ mod tests {
         for m in MANIFESTS {
             for p in m.params {
                 // Default discriminant matches the declared kind.
-                let ok = match (p.kind, p.default) {
-                    (ParamKind::Float, PropValue::Float(_)) => true,
-                    (ParamKind::Vec2, PropValue::Vec2(_)) => true,
-                    (ParamKind::Color, PropValue::Color(_)) => true,
-                    (ParamKind::Bool, PropValue::Bool(_)) => true,
-                    (ParamKind::Enum(_), PropValue::Enum(_)) => true,
-                    _ => false,
-                };
+                let ok = matches!(
+                    (p.kind, p.default),
+                    (ParamKind::Float, PropValue::Float(_))
+                        | (ParamKind::Vec2, PropValue::Vec2(_))
+                        | (ParamKind::Color, PropValue::Color(_))
+                        | (ParamKind::Bool, PropValue::Bool(_))
+                        | (ParamKind::Enum(_), PropValue::Enum(_))
+                );
                 assert!(
                     ok,
                     "{} {}: default {:?} does not match kind {:?}",

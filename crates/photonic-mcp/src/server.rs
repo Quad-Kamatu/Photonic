@@ -1,6 +1,7 @@
 use crate::dispatch;
 use crate::handlers;
 use crate::handlers::clipboard::ClipboardRing;
+use crate::protocol::envelope::{self, Dialect, ProtocolMode, RpcError, DEFAULT_BODY_LIMIT};
 use crate::protocol::*;
 pub use crate::schema_gen::tool_list;
 use axum::{
@@ -9,9 +10,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
-};
-use crate::protocol::envelope::{
-    self, Dialect, ProtocolMode, RpcError, DEFAULT_BODY_LIMIT,
 };
 use photonic_core::{document::Document, history::CommandHistory, AuditLog, PathPolicy};
 use serde_json::{json, Value};
@@ -361,10 +359,7 @@ pub async fn process_rpc_request(
     }
 }
 
-fn rpc_to_http(
-    id: Option<Value>,
-    err: RpcError,
-) -> (axum::http::StatusCode, JsonRpcResponse) {
+fn rpc_to_http(id: Option<Value>, err: RpcError) -> (axum::http::StatusCode, JsonRpcResponse) {
     let status = axum::http::StatusCode::from_u16(err.http_status.unwrap_or(400))
         .unwrap_or(axum::http::StatusCode::BAD_REQUEST);
     (status, JsonRpcResponse::from_rpc_error(id, err))
@@ -403,7 +398,8 @@ async fn dispatch_method(
                 .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    RpcError::new(crate::protocol::ERR_INVALID_PARAMS, "Missing tool name").http(400)
+                    RpcError::new(crate::protocol::ERR_INVALID_PARAMS, "Missing tool name")
+                        .http(400)
                 })?
                 .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));

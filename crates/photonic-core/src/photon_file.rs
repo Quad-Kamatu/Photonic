@@ -83,7 +83,7 @@ pub fn load_photon(json: &str) -> Result<(Document, Option<HistorySnapshot>), se
     let document = Document::from_value(value)?;
 
     let history = if doc_version == CURRENT_FORMAT_VERSION
-        && photon_format.map_or(true, |f| f <= PHOTON_FORMAT_VERSION as u64)
+        && photon_format.is_none_or(|f| f <= PHOTON_FORMAT_VERSION as u64)
     {
         history_value
             .and_then(|h| match h {

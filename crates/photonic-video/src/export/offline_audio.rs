@@ -498,7 +498,7 @@ mod tests {
         let (project, sid) = empty_audio_seq();
         // 1 second at 48 kHz → 48000 frames × 2 channels.
         let start = Tick(0);
-        let end = Tick(TICKS_PER_SECOND as i64);
+        let end = Tick(TICKS_PER_SECOND);
         let pcm = render_export_audio(&project, sid, start, end, None, None).unwrap();
         assert_eq!(pcm.len(), 48_000 * CHANNELS);
         assert!(pcm.iter().all(|&s| s == 0.0));
@@ -738,9 +738,6 @@ mod tests {
 
     #[test]
     fn ticks_to_frames_is_exact_for_one_second_at_48k() {
-        assert_eq!(
-            ticks_to_frames(Tick(TICKS_PER_SECOND as i64), 48_000),
-            48_000
-        );
+        assert_eq!(ticks_to_frames(Tick(TICKS_PER_SECOND), 48_000), 48_000);
     }
 }

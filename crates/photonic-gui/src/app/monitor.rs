@@ -1083,9 +1083,7 @@ impl PhotonicApp {
                     (egui::vec2(avail_w, avail_w / target_aspect), false)
                 }
             }
-            ImageZoomMode::Actual => {
-                (egui::vec2(format.width as f32, format.height as f32), false)
-            }
+            ImageZoomMode::Actual => (egui::vec2(format.width as f32, format.height as f32), false),
         };
         if zoom.mode == ImageZoomMode::Fit {
             zoom.pan = egui::Vec2::ZERO;
@@ -1121,10 +1119,7 @@ impl PhotonicApp {
         // bars) and Actual mode stay centered.
         let video_rect = if fit_pillarbox {
             let top = image_area.center().y - video_size.y * 0.5;
-            egui::Rect::from_min_size(
-                egui::pos2(image_area.left(), top) + zoom.pan,
-                video_size,
-            )
+            egui::Rect::from_min_size(egui::pos2(image_area.left(), top) + zoom.pan, video_size)
         } else {
             egui::Rect::from_center_size(image_area.center() + zoom.pan, video_size)
         };
@@ -2040,10 +2035,7 @@ impl PhotonicApp {
                             // size — the old `small_button` made Skip visibly
                             // shorter than its neighbour.
                             let btn = egui::vec2(72.0, ui.spacing().interact_size.y);
-                            if ui
-                                .add_sized(btn, egui::Button::new(next_label))
-                                .clicked()
-                            {
+                            if ui.add_sized(btn, egui::Button::new(next_label)).clicked() {
                                 let (new_step, dismissed) =
                                     crate::preferences::coach_advance_button(step);
                                 if dismissed {

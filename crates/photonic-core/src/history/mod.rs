@@ -3130,7 +3130,7 @@ impl Command {
                 doc.artboards = new.clone();
                 if doc
                     .active_artboard
-                    .map_or(true, |id| !doc.artboards.iter().any(|a| a.id == id))
+                    .is_none_or(|id| !doc.artboards.iter().any(|a| a.id == id))
                 {
                     doc.active_artboard = doc.artboards.first().map(|a| a.id);
                 }

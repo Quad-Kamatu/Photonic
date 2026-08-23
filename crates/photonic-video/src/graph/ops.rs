@@ -232,11 +232,8 @@ pub fn stabilize_warp(input: &Image, warp: &StabilizeWarp, sampling: Sampling) -
             };
 
             // 5 — sample, or leave the hole showing if asked to.
-            let outside =
-                !valid || sx < 0.0 || sy < 0.0 || sx > w - 1.0 || sy > h - 1.0;
-            let texel = if outside && warp.transparent_edges {
-                [0.0, 0.0, 0.0, 0.0]
-            } else if !valid {
+            let outside = !valid || sx < 0.0 || sy < 0.0 || sx > w - 1.0 || sy > h - 1.0;
+            let texel = if !valid || (outside && warp.transparent_edges) {
                 [0.0, 0.0, 0.0, 0.0]
             } else {
                 match sampling {
@@ -1350,15 +1347,12 @@ mod tests {
         warp.fisheye = true;
         warp.k = [0.02, -0.004, 0.0007, -0.00005];
         warp.rotation[0] = 1.0 - 1e-6;
-        assert!(!warp.is_identity() || true, "may or may not short-circuit");
         let out = stabilize_warp(&src, &warp, Sampling::Bilinear);
         let worst = out
             .pixels
             .iter()
             .zip(src.pixels.iter())
-            .map(|(a, b)| {
-                (0..4).map(|c| (a[c] - b[c]).abs()).fold(0.0f32, f32::max)
-            })
+            .map(|(a, b)| (0..4).map(|c| (a[c] - b[c]).abs()).fold(0.0f32, f32::max))
             .fold(0.0f32, f32::max);
         assert!(worst < 1e-3, "worst channel deviation was {worst}");
     }
@@ -1492,7 +1486,10 @@ mod tests {
             .zip(nn.pixels.iter())
             .map(|(a, b)| (a[0] - b[0]).abs())
             .fold(0.0f32, f32::max);
-        assert!(worst < 0.05, "modes disagree by {worst}, likely a coordinate bug");
+        assert!(
+            worst < 0.05,
+            "modes disagree by {worst}, likely a coordinate bug"
+        );
     }
 
     #[test]

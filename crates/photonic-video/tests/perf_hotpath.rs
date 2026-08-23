@@ -9,6 +9,8 @@
 //! Soft wall-clock budgets skip hard-fail on overloaded CI; structural
 //! assertions always run.
 
+#![expect(clippy::assertions_on_constants)]
+
 use std::time::Instant;
 
 use photonic_core::timeline::{

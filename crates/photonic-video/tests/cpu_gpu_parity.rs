@@ -442,9 +442,8 @@ fn stabilize_warp_cpu_gpu_parity() {
     let q = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.04, 0.07, 0.03);
     let m = glam::Mat3::from_quat(q);
     let rotation = [
-        m.x_axis.x, m.y_axis.x, m.z_axis.x,
-        m.x_axis.y, m.y_axis.y, m.z_axis.y,
-        m.x_axis.z, m.y_axis.z, m.z_axis.z,
+        m.x_axis.x, m.y_axis.x, m.z_axis.x, m.x_axis.y, m.y_axis.y, m.z_axis.y, m.x_axis.z,
+        m.y_axis.z, m.z_axis.z,
     ];
 
     let cases = [

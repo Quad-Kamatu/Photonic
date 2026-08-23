@@ -468,7 +468,8 @@ fn planes_to_rgba(planes: &crate::decode::DecodedPlanes) -> RgbaThumb {
     let (wu, hu) = (w as usize, h as usize);
     let mut rgba = vec![0u8; wu * hu * 4];
     match planes {
-        DecodedPlanes::Yuv420 { y, cb, cr, .. } => {
+        DecodedPlanes::Yuv420 { .. } => {
+            let (y, cb, cr) = (planes.y(), planes.cb(), planes.cr());
             let cw = wu.div_ceil(2);
             for py in 0..hu {
                 let crow = (py / 2) * cw;
@@ -483,7 +484,13 @@ fn planes_to_rgba(planes: &crate::decode::DecodedPlanes) -> RgbaThumb {
                 }
             }
         }
-        DecodedPlanes::Yuva444 { y, cb, cr, a, .. } => {
+        DecodedPlanes::Yuva444 { .. } => {
+            let (y, cb, cr, a) = (
+                planes.y(),
+                planes.cb(),
+                planes.cr(),
+                planes.a().expect("YUVA thumbnail frame has alpha"),
+            );
             for (i, chunk) in rgba.chunks_exact_mut(4).enumerate() {
                 let (r, g, b) = yuv_to_rgb(y[i], cb[i], cr[i]);
                 chunk[0] = r;
@@ -1202,14 +1209,7 @@ mod tests {
     #[test]
     fn planes_to_rgba_maps_dims_and_alpha() {
         use crate::decode::DecodedPlanes;
-        let planes = DecodedPlanes::Yuva444 {
-            width: 2,
-            height: 1,
-            y: vec![16, 235],
-            cb: vec![128, 128],
-            cr: vec![128, 128],
-            a: vec![10, 250],
-        };
+        let planes = DecodedPlanes::yuva444(2, 1, vec![16, 235, 128, 128, 128, 128, 10, 250]);
         let img = planes_to_rgba(&planes);
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(img.rgba.len(), 2 * 4); // 2 px * 1 row * 4 bytes

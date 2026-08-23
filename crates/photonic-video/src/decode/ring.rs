@@ -104,27 +104,48 @@ impl FrameRing {
     /// Keep at most `back_cap` frames before the playhead and `fwd_cap` at or
     /// after it; evict by ring position (oldest on each side first).
     fn prune(&mut self) {
-        // Backward side: frames strictly before the playhead.
-        let back: Vec<Tick> = self
+        // Count first so retain can evict directly. `prune` runs for every
+        // decoded frame, and collecting both sides into temporary Vecs made
+        // the normal decode path allocate twice per push.
+        let playhead = self.playhead;
+
+        // Backward side: frames strictly before the playhead. BTreeMap visits
+        // keys in ascending order, so discard the oldest excess frames.
+        let drop_back = self
             .frames
-            .range(..self.playhead)
-            .map(|(t, _)| *t)
-            .collect();
-        if back.len() > self.back_cap {
-            for t in &back[..back.len() - self.back_cap] {
-                self.frames.remove(t);
-            }
+            .range(..playhead)
+            .count()
+            .saturating_sub(self.back_cap);
+        if drop_back != 0 {
+            let mut removed = 0;
+            self.frames.retain(|pts, _| {
+                if *pts < playhead && removed < drop_back {
+                    removed += 1;
+                    false
+                } else {
+                    true
+                }
+            });
         }
-        // Forward side: frames at or after the playhead.
-        let fwd: Vec<Tick> = self
+
+        // Forward side: frames at or after the playhead. Keep the closest
+        // `fwd_cap` frames and remove the remaining, farther-ahead frames.
+        let fwd_cap = self.fwd_cap;
+        let drop_fwd = self
             .frames
-            .range(self.playhead..)
-            .map(|(t, _)| *t)
-            .collect();
-        if fwd.len() > self.fwd_cap {
-            for t in &fwd[self.fwd_cap..] {
-                self.frames.remove(t);
-            }
+            .range(playhead..)
+            .count()
+            .saturating_sub(fwd_cap);
+        if drop_fwd != 0 {
+            let mut kept = 0;
+            self.frames.retain(|pts, _| {
+                if *pts >= playhead {
+                    kept += 1;
+                    kept <= fwd_cap
+                } else {
+                    true
+                }
+            });
         }
     }
 }
@@ -245,13 +266,7 @@ mod tests {
     fn frame(pts: Tick) -> DecodedFrame {
         DecodedFrame {
             pts,
-            planes: DecodedPlanes::Yuv420 {
-                width: 2,
-                height: 2,
-                y: vec![0; 4],
-                cb: vec![0],
-                cr: vec![0],
-            },
+            planes: DecodedPlanes::yuv420(2, 2, vec![0; 6]),
         }
     }
 

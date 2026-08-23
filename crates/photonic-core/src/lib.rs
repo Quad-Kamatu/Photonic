@@ -1,3 +1,18 @@
+// These expectations document intentional representation and hot-loop choices.
+// Unlike `allow`, an expectation makes the strict gate fail if the corresponding
+// code is removed or refactored, so this baseline cannot silently go stale.
+#![expect(
+    clippy::large_enum_variant,
+    clippy::manual_checked_ops,
+    clippy::manual_strip,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::needless_range_loop,
+    clippy::nonminimal_bool,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::wrong_self_convention
+)]
+
 pub mod annotation;
 pub mod audit;
 pub mod color;

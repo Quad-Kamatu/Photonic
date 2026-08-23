@@ -52,15 +52,15 @@ pub use clip::{
     SpeedKey, SpeedMap, SpeedMapError, TextClipContent, Transition, TransitionKind,
     TransitionParams, WipeDirection,
 };
-pub use stabilization::{
-    LensProfileRef, MotionBinding, MotionFormat, MotionSample, MotionSourceRef, MotionSync,
-    MotionSyncAnchor, StabilizationCropMode, StabilizationError, StabilizationSpec,
-};
 pub use commands::{
     AnimTarget, AudioCmd, CaptionCmd, ClipTiming, FadeEdge, FormatOp, FxOwner, GraphCmd,
     StyleTarget, TimelineCmd, TrackSettings, TtsCmd,
 };
 pub use effect_kind::{EffectKind, EffectParams};
+pub use stabilization::{
+    LensProfileRef, MotionBinding, MotionFormat, MotionSample, MotionSourceRef, MotionSync,
+    MotionSyncAnchor, StabilizationCropMode, StabilizationError, StabilizationSpec,
+};
 // NB: `effect_manifest::Display` is intentionally NOT re-exported at the
 // timeline root — the name would collide with `std::fmt::Display` for callers
 // that glob `use photonic_core::timeline::*`. Reach it via `effect_manifest::Display`.

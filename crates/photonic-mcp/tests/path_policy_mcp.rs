@@ -62,7 +62,10 @@ async fn save_document_outside_roots_denied() {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap();
-    let res = build_router(state_with_policy(pol)).oneshot(req).await.unwrap();
+    let res = build_router(state_with_policy(pol))
+        .oneshot(req)
+        .await
+        .unwrap();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["result"]["resultType"], "complete");

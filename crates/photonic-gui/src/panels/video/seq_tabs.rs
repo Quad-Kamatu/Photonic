@@ -169,7 +169,7 @@ pub(crate) fn draw_seq_tabs(
             if ui.button("Rename…").clicked() {
                 // Toggle a distinguishable suffix so rename is undoable and
                 // visible without a separate modal (modal rename is follow-up).
-                rename = Some((*id, format!("{name}")));
+                rename = Some((*id, name.to_string()));
                 ui.close_menu();
             }
         });

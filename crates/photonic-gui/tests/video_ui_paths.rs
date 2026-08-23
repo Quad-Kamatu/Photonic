@@ -734,7 +734,7 @@ fn ui_as1_social_path_structural_arm() {
         eprintln!("skip AS-1 place/split: no counter.mp4 fixture");
         return;
     }
-    let asset = MediaAsset::from_file(AssetKind::Video, &counter_mp4());
+    let asset = MediaAsset::from_file(AssetKind::Video, counter_mp4());
     let asset_id = asset.id;
     history.execute_discrete(Command::Timeline(ops::add_asset(asset)), &mut doc);
 

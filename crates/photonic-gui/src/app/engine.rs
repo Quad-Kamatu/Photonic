@@ -246,12 +246,8 @@ impl EngineBridge {
     /// Not reconciled like the `set_*` senders below: this is an explicit user
     /// action, and re-running it on unchanged input is exactly what the
     /// Reanalyze button is for.
-    pub(crate) fn send_analyze_stabilization(
-        &self,
-        clip: photonic_core::timeline::ClipId,
-    ) {
-        self.session
-            .send(EngineCmd::AnalyzeStabilization { clip });
+    pub(crate) fn send_analyze_stabilization(&self, clip: photonic_core::timeline::ClipId) {
+        self.session.send(EngineCmd::AnalyzeStabilization { clip });
     }
 
     /// Send `cmd` kinds only when the desired value changed since last send.

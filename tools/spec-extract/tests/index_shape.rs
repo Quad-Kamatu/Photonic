@@ -126,6 +126,7 @@ fn indexes_const_enum_and_fields_in_order() {
             // K-B5 compare-effect mode — view state too, declared next to
             // `SetScopeTap` for that reason. The literal list caught this one
             // as well, on the same terms as the note below.
+            "AnalyzeStabilization",
             "SetCompareEffects",
             "SeekSource",
             "InvalidateRange",

@@ -60,6 +60,7 @@ use crate::graph::ir::IrOp;
 use crate::media::ffmpeg_locate::{locate, FfmpegTools};
 use crate::media::keyframe_index::{KeyframeIndex, PtsIndex};
 use crate::media::probe::{content_hash, probe_details, ProbeDetails};
+use crate::media::proxy_policy::{AdaptiveProxyPolicy, PreviewMediaChoice, PreviewPressure};
 use crate::media::stills::{resample_linear_premult, still_target_size, StillCache};
 use crate::playback::pcm::{read_pcm_window, TimeWarpPcmSource};
 use crate::playback::prefetch::{
@@ -79,10 +80,10 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Proxy media policy for this session (02 §6 — session state, not document).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ProxyMode {
-    /// Engine chooses a ready proxy per asset and otherwise falls back to the
-    /// original. This is the responsive editing default: proxies are never
-    /// required for correctness, so an asset whose proxy is absent, pending,
-    /// or failed remains playable without a mode change (CAP-014).
+    /// Engine starts on originals and moves to ready proxies after sustained
+    /// preview pressure. This preserves quality on hardware that decodes the
+    /// original efficiently, while a missing/pending/failed proxy remains a
+    /// correctness-safe fallback to the original (CAP-014).
     #[default]
     Auto,
     ForceProxy,
@@ -293,12 +294,17 @@ pub struct EngineStatus {
     /// these to the newest texture; comparing this with presentation telemetry
     /// identifies a UI/vsync bottleneck separately from decode/compositing.
     pub frames_published: u64,
+    /// Total graph-evaluation attempts by this engine session. Compare-effects
+    /// mode performs a second clean evaluation, and both passes are counted.
+    pub evaluations: u64,
     /// Duration of the most recent compile + graph evaluation in microseconds.
     /// This is deliberately cheap, per-frame telemetry for Linux performance
     /// reports; it is not a profiler substitute.
     pub last_evaluate_micros: u64,
-    /// Evaluations that produced no frame (for example an unavailable decode
-    /// source), kept distinct from clock-driven dropped frames.
+    /// Primary program evaluations that produced no frame (for example an
+    /// unavailable decode source), kept distinct from clock-driven dropped
+    /// frames. A missing optional compare-effects texture does not mark the
+    /// program evaluation as a miss.
     pub evaluation_misses: u64,
     /// The `CommandHistory` revision the current snapshot was taken at
     /// (02 §1's `doc_generation`).
@@ -334,6 +340,48 @@ pub struct EngineStatus {
     pub scope_tap: ScopeTapPoint,
 }
 
+/// Allocation-free preview/decode telemetry sampled by the UI or a benchmark.
+///
+/// `ring_hits` and `inline_seeks` are process-wide, monotonic decode counters;
+/// they intentionally are not reset when a session opens or closes. The
+/// remaining fields come from one published [`EngineStatus`] snapshot, so they
+/// describe a coherent point in this session's engine state. The two sources
+/// cannot be sampled as one cross-thread atomic transaction, so callers that
+/// need interval measurements should take and subtract two snapshots.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreviewTelemetrySnapshot {
+    /// Frames supplied from a decoded-frame ring since process start.
+    pub ring_hits: u64,
+    /// Decode-ring misses since process start. Misses now hold the last good
+    /// frame rather than performing an engine-thread inline seek.
+    pub decode_misses: u64,
+    /// Compatibility alias for [`Self::decode_misses`]. This historic name is
+    /// retained for existing benchmarks; it does not indicate an inline seek.
+    pub inline_seeks: u64,
+    /// Program frames published by this engine session.
+    pub frames_published: u64,
+    /// Total graph evaluations attempted by this engine session.
+    pub evaluations: u64,
+    /// Evaluations that did not produce an exact frame for this session.
+    pub evaluation_misses: u64,
+    /// Compile + graph-evaluation duration for the most recent attempt.
+    pub last_evaluate_micros: u64,
+}
+
+impl PreviewTelemetrySnapshot {
+    fn from_status(status: &EngineStatus, ring_hits: u64, inline_seeks: u64) -> Self {
+        Self {
+            ring_hits,
+            decode_misses: inline_seeks,
+            inline_seeks,
+            frames_published: status.frames_published,
+            evaluations: status.evaluations,
+            evaluation_misses: status.evaluation_misses,
+            last_evaluate_micros: status.last_evaluate_micros,
+        }
+    }
+}
+
 /// Wait-free master meter snapshot (G-4 / 09 §8). Linear amplitude, not dB —
 /// the GUI converts for display (same unit as `StereoMeter::peak`/`rms`).
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -351,6 +399,7 @@ impl Default for EngineStatus {
             cache: CacheStats::default(),
             audio_xruns: 0,
             frames_published: 0,
+            evaluations: 0,
             last_evaluate_micros: 0,
             evaluation_misses: 0,
             doc_revision: 0,
@@ -490,6 +539,19 @@ impl EngineSession {
         self.status.load_full()
     }
 
+    /// Sample preview/decode counters without blocking the engine or resetting
+    /// process-wide instrumentation. This clones the published `Arc` (an
+    /// atomic refcount operation, not a heap allocation), avoiding ArcSwap's
+    /// thread-local guard setup on a UI thread's first sample.
+    pub fn preview_telemetry(&self) -> PreviewTelemetrySnapshot {
+        let status = self.status.load_full();
+        PreviewTelemetrySnapshot::from_status(
+            &status,
+            RING_HITS.load(Ordering::Relaxed),
+            INLINE_SEEKS.load(Ordering::Relaxed),
+        )
+    }
+
     /// Stop the engine thread and join it. (Dropping the session does the
     /// same; this form surfaces the join point explicitly.)
     pub fn shutdown(mut self) {
@@ -624,6 +686,9 @@ struct EngineThread {
     last_revision: Option<u64>,
     active_sequence_override: Option<SequenceId>,
     proxy_mode: ProxyMode,
+    /// Hysteresis state behind [`ProxyMode::Auto`]. Owned by the engine thread,
+    /// so observing a present adds neither a lock nor an allocation.
+    adaptive_proxy: AdaptiveProxyPolicy,
     preview_target: PreviewTarget,
     preview_quality: PreviewQuality,
     /// Set when present requested a frame but eval produced none (24 §5).
@@ -648,6 +713,10 @@ struct EngineThread {
     /// Playback telemetry: distinguish producer/evaluator pressure from
     /// clock-side drops reported by `PlaybackController`.
     frames_published: u64,
+    /// Every call into the graph evaluator, including optional compare-effects
+    /// clean passes. Kept separately from published frames because a single
+    /// present can intentionally evaluate twice.
+    evaluations: u64,
     last_evaluate_micros: u64,
     evaluation_misses: u64,
     /// Reused command drain buffer (avoids per-tick `Vec` alloc on the engine
@@ -698,6 +767,7 @@ impl EngineThread {
             last_revision: None,
             active_sequence_override: None,
             proxy_mode: ProxyMode::Auto,
+            adaptive_proxy: AdaptiveProxyPolicy::new(),
             preview_target: PreviewTarget::default(),
             preview_quality: PreviewQuality::Draft,
             buffering: false,
@@ -710,6 +780,7 @@ impl EngineThread {
             xruns: None,
             tools,
             frames_published: 0,
+            evaluations: 0,
             last_evaluate_micros: 0,
             evaluation_misses: 0,
             cmd_batch: Vec::with_capacity(32),
@@ -827,6 +898,10 @@ impl EngineThread {
             }
             EngineCmd::SetProxyMode(mode) => {
                 self.proxy_mode = mode;
+                // A manual mode change starts any later Auto run with fresh
+                // evidence; pressure accumulated under an explicit override
+                // must not silently alter the user's next Auto preview.
+                self.adaptive_proxy.reset();
                 // Different quality flag ⇒ different content hashes; the old
                 // entries age out hash-naturally (02 §5).
                 self.controller.request_present();
@@ -1662,6 +1737,7 @@ impl EngineThread {
                     Some((point, node)) => (point, Some(node)),
                     None => (ScopeTapPoint::Program, None),
                 };
+                self.evaluations = self.evaluations.saturating_add(1);
                 let (frame_tex, tap_tex) = self.evaluator.evaluate_with_tap(
                     &compiled.graph,
                     canvas,
@@ -1682,11 +1758,13 @@ impl EngineThread {
                         Some(&self.lut_cache),
                         true,
                     );
+                    self.evaluations = self.evaluations.saturating_add(1);
                     self.evaluator
                         .evaluate(&clean.graph, canvas, &mut self.media)
                 } else {
                     None
                 };
+                let evaluation_missed = frame_tex.is_none();
                 if let Some(texture) = frame_tex {
                     self.frame_out.store(Some(Arc::new(EngineFrame {
                         texture,
@@ -1703,7 +1781,23 @@ impl EngineThread {
                     self.evaluation_misses = self.evaluation_misses.saturating_add(1);
                     self.buffering = true;
                 }
-                self.last_evaluate_micros = evaluate_started.elapsed().as_micros() as u64;
+                let evaluate_elapsed = evaluate_started.elapsed();
+                self.last_evaluate_micros =
+                    u64::try_from(evaluate_elapsed.as_micros()).unwrap_or(u64::MAX);
+                let proxy_changed = observe_adaptive_proxy(
+                    &mut self.adaptive_proxy,
+                    self.preview_quality,
+                    self.proxy_mode,
+                    seq.frame_rate,
+                    evaluate_elapsed,
+                    evaluation_missed,
+                );
+                if proxy_changed {
+                    // The quality bit participates in graph source identity.
+                    // Request a present so the new source selection takes
+                    // effect without waiting for the next playback clock edge.
+                    self.controller.request_present();
+                }
                 // Ring prefetch now runs off the engine thread: each evaluated
                 // `DecodeVideo` node steers its source's background decode
                 // worker (see `MediaSources::video_texture`), so decode overlaps
@@ -1732,7 +1826,8 @@ impl EngineThread {
         let proxy = match (self.preview_quality, self.proxy_mode) {
             (PreviewQuality::Full, _) => false,
             (_, ProxyMode::ForceOriginal) => false,
-            (_, ProxyMode::Auto | ProxyMode::ForceProxy) => true,
+            (_, ProxyMode::ForceProxy) => true,
+            (_, ProxyMode::Auto) => self.adaptive_proxy.choice() == PreviewMediaChoice::Proxy,
         };
         Quality { proxy }
     }
@@ -1827,6 +1922,7 @@ impl EngineThread {
             h = h
                 .wrapping_mul(0x9E37_79B9)
                 .wrapping_add(self.frames_published);
+            h = h.wrapping_mul(0x9E37_79B9).wrapping_add(self.evaluations);
             h = h
                 .wrapping_mul(0x9E37_79B9)
                 .wrapping_add(self.evaluation_misses);
@@ -1887,6 +1983,7 @@ impl EngineThread {
             cache: self.evaluator.cache_stats(),
             audio_xruns,
             frames_published: self.frames_published,
+            evaluations: self.evaluations,
             last_evaluate_micros: self.last_evaluate_micros,
             evaluation_misses: self.evaluation_misses,
             doc_revision,
@@ -1904,18 +2001,81 @@ impl EngineThread {
     }
 }
 
+/// Feed one completed present into Auto proxy hysteresis. Evaluation time is
+/// deliberately the end-to-end engine work rather than a sum of decode and
+/// evaluation timings: the background decoder overlaps compositing, so adding
+/// their durations would double-count work and select proxies too aggressively.
+/// Decode-input resolution independently verifies that a selected proxy is
+/// Ready and on disk, otherwise it falls back to the original.
+fn observe_adaptive_proxy(
+    policy: &mut AdaptiveProxyPolicy,
+    preview_quality: PreviewQuality,
+    proxy_mode: ProxyMode,
+    frame_rate: FrameRate,
+    evaluate_time: Duration,
+    evaluation_missed: bool,
+) -> bool {
+    if preview_quality != PreviewQuality::Draft || proxy_mode != ProxyMode::Auto {
+        policy.reset();
+        return false;
+    }
+
+    let before = policy.choice();
+    let frame_budget = ticks_to_duration(frame_rate.ticks_per_frame());
+    // `resolve_decode_input` below is the final per-asset readiness check.
+    // Supplying `true` here lets one session-level policy prepare the next
+    // source while retaining that no-proxy fallback at the media boundary.
+    let after = policy.observe(
+        PreviewPressure {
+            evaluate_time,
+            frame_budget,
+            missed_frames: u32::from(evaluation_missed),
+            ..PreviewPressure::default()
+        },
+        true,
+    );
+    after != before
+}
+
+/// Convert the timeline's integer tick domain into a wall-clock duration.
+///
+/// Timeline ticks are deliberately much finer than microseconds
+/// ([`TICKS_PER_SECOND`] is 705,600,000), so treating ticks as microseconds
+/// would inflate a 30fps preview budget from about 33ms to 23.52 seconds and
+/// permanently suppress Auto proxy pressure detection.
+fn ticks_to_duration(ticks: Tick) -> Duration {
+    let ticks = u64::try_from(ticks.0.max(1)).unwrap_or(u64::MAX);
+    let ticks_per_second = TICKS_PER_SECOND as u64;
+    let seconds = ticks / ticks_per_second;
+    // The remainder is strictly below 705.6M, so multiplying by 1e9 cannot
+    // overflow u64. Truncation is less than one nanosecond and intentionally
+    // conservative for the frame-budget comparison.
+    let nanos = (ticks % ticks_per_second) * 1_000_000_000 / ticks_per_second;
+    Duration::new(seconds, nanos as u32)
+}
+
 // ── Diagnostic counters (decode ring-hit vs inline-seek) ─────────────────────
-// Temporary throughput instrumentation: lets a headless bench see whether the
-// engine is decode-bound (inline seeks) or composite-bound (all ring hits).
+// Temporary throughput instrumentation: lets a headless bench distinguish
+// decoded-frame-ring hits from ring misses/held frames. `INLINE_SEEKS` keeps
+// its historic name for public benchmark compatibility; the engine no longer
+// performs inline seeks on a miss.
 pub static RING_HITS: AtomicU64 = AtomicU64::new(0);
 pub static INLINE_SEEKS: AtomicU64 = AtomicU64::new(0);
 
-/// (ring_hits, inline_seeks) since process start.
+/// `(ring_hits, decode_misses)` since process start.
 pub fn decode_stats() -> (u64, u64) {
     (
         RING_HITS.load(Ordering::Relaxed),
         INLINE_SEEKS.load(Ordering::Relaxed),
     )
+}
+
+/// Increment a diagnostic counter without allowing a long-running process to
+/// wrap a monotonic total back to zero.
+fn saturating_increment(counter: &AtomicU64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(1))
+    });
 }
 
 fn stabilization_analysis_key(
@@ -1937,6 +2097,16 @@ fn stabilization_analysis_key(
 }
 
 // ── Media sources (GpuFrameSource over decode rings) ─────────────────────────
+
+/// Cache identity for a video input. The boolean records the *resolved* input,
+/// not a graph's proxy request: a requested proxy that is not ready on disk is
+/// the same original decode/upload as an explicit original request.
+type VideoSourceKey = (AssetId, bool);
+
+struct ResolvedVideoInput {
+    key: VideoSourceKey,
+    path: PathBuf,
+}
 
 struct VideoSourceEntry {
     /// The source's decode ring. The engine only ever reads it (a ring hit
@@ -1970,16 +2140,17 @@ struct MediaSources {
     project: Option<Arc<TimelineProject>>,
     /// `None` value = open failed; don't re-probe every frame (an
     /// `InvalidateRange` clears the entry and allows a retry).
-    sources: HashMap<(AssetId, bool), Option<VideoSourceEntry>>,
+    sources: HashMap<VideoSourceKey, Option<VideoSourceEntry>>,
     /// Sources whose expensive open (ffprobe + keyframe/pts index build, each a
     /// subprocess) is running on a background thread, so the engine present loop
     /// never stalls on a cold source. `drain_pending` promotes the completed
     /// build into `sources`; until then the source reads as absent and the
     /// compositor holds the last frame / shows transparent for a few presents.
-    pending: HashMap<(AssetId, bool), std::sync::mpsc::Receiver<Option<VideoSourceEntry>>>,
+    pending: HashMap<VideoSourceKey, std::sync::mpsc::Receiver<Option<VideoSourceEntry>>>,
     /// Uploaded working textures keyed by decoded pts — scrub back/forward
-    /// over the same frames skips the GPU upload.
-    uploads: HashMap<(AssetId, Tick, bool), GpuFrame>,
+    /// over the same frames skips the GPU upload. LRU eviction preserves hot
+    /// nearby frames when a timeline exceeds the bounded texture budget.
+    uploads: UploadCache<GpuFrame>,
     /// Decoded still images uploaded to the working format, cached by
     /// `(asset, logical size)` (26 K-C8). A still's pixels never change until
     /// relink/`InvalidateRange`, but the size it is wanted at does — Draft vs
@@ -2010,10 +2181,77 @@ struct MediaSources {
     headless: Option<HeadlessRenderer>,
 }
 
-/// Upload-cache entry cap: ~a ring's worth per couple of assets; wholesale
-/// clear on overflow keeps it trivially bounded (entries are cheap to rebuild
-/// from the decode ring).
+/// Upload-cache entry cap: ~a ring's worth per couple of assets.
 const UPLOAD_CACHE_CAP: usize = 32;
+
+type UploadKey = (AssetId, Tick, bool);
+
+struct UploadCacheEntry<T> {
+    value: T,
+    last_used: u64,
+}
+
+/// Small bounded LRU for decoded frames already converted into working-format
+/// GPU textures. A wholesale clear creates a noticeable re-upload burst at the
+/// cap; evicting exactly one cold entry keeps scrubbing and A/B playback warm.
+struct UploadCache<T> {
+    entries: HashMap<UploadKey, UploadCacheEntry<T>>,
+    cap: usize,
+}
+
+impl<T> UploadCache<T> {
+    fn new(cap: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    fn get(&mut self, key: &UploadKey, stamp: u64) -> Option<&T> {
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = stamp;
+        Some(&entry.value)
+    }
+
+    fn insert(&mut self, key: UploadKey, value: T, stamp: u64) {
+        if !self.entries.contains_key(&key) && self.entries.len() >= self.cap {
+            if let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| *key)
+            {
+                self.entries.remove(&victim);
+            }
+        }
+        self.entries.insert(
+            key,
+            UploadCacheEntry {
+                value,
+                last_used: stamp,
+            },
+        );
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn remove_assets(&mut self, assets: &HashSet<AssetId>) {
+        self.entries
+            .retain(|(asset, _, _), _| !assets.contains(asset));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, key: &UploadKey) -> bool {
+        self.entries.contains_key(key)
+    }
+}
 
 /// Still-image texture cache cap, counted in `(asset, size)` entries (26 K-C8);
 /// wholesale clear on overflow (each entry is cheap to redecode from disk).
@@ -2022,13 +2260,13 @@ const STILL_CACHE_CAP: usize = 16;
 /// Rasterized-vector texture cache cap; wholesale clear on overflow.
 const VECTOR_CACHE_CAP: usize = 16;
 
-/// How far ahead (in frames) to warm the next clip's decoder before a cut.
-/// ~0.8s at 30fps — enough lead for a keyframe-seek bootstrap to finish.
+// How far ahead (in frames) to warm the next clip's decoder before a cut.
+// ~0.8s at 30fps — enough lead for a keyframe-seek bootstrap to finish.
 // Cut-ahead lead lives in `playback::prefetch::CUT_AHEAD_LEAD_FRAMES`.
 
-/// Cap on live decode sources (each = a worker thread + ffmpeg sidecar). With
-/// cut-ahead, a long timeline would otherwise accumulate them; evict the
-/// least-recently-used beyond this, never one on screen this frame.
+// Cap on live decode sources (each = a worker thread + ffmpeg sidecar). With
+// cut-ahead, a long timeline would otherwise accumulate them; evict the
+// least-recently-used beyond this, never one on screen this frame.
 // MAX_LIVE_SOURCES re-exported from playback::prefetch.
 
 /// Assets whose decoded bytes could differ between two project snapshots.
@@ -2071,7 +2309,7 @@ impl MediaSources {
             doc_revision: None,
             vectors: HashMap::new(),
             headless: None,
-            uploads: HashMap::new(),
+            uploads: UploadCache::new(UPLOAD_CACHE_CAP),
             stills: StillCache::new(STILL_CACHE_CAP),
             converter: None,
             playing: false,
@@ -2144,7 +2382,6 @@ impl MediaSources {
     /// so we never open dual always-on decoders for every upcoming cut.
     fn prefetch_upcoming(&mut self, seq: &Sequence, t: Tick, lead: Tick, quality: Quality) {
         self.drain_pending();
-        let proxy = quality.proxy;
         let mut built_this_call = false;
         let targets = cut_ahead_targets(seq, t, lead);
         for target in targets {
@@ -2153,12 +2390,15 @@ impl MediaSources {
             if !self.is_video_asset(asset) {
                 continue;
             }
-            let key = (asset, proxy);
+            let Some(input) = self.resolve_video_input(asset, quality.proxy) else {
+                continue;
+            };
+            let key = input.key;
             if !self.sources.contains_key(&key) {
                 if built_this_call {
                     continue; // amortize builds across presents
                 }
-                let entry = self.build_source(asset, proxy);
+                let entry = self.build_source(input.path);
                 self.sources.insert(key, entry);
                 built_this_call = true;
             }
@@ -2227,8 +2467,7 @@ impl MediaSources {
         }
         self.sources.retain(|(asset, _), _| !assets.contains(asset));
         self.pending.retain(|(asset, _), _| !assets.contains(asset));
-        self.uploads
-            .retain(|(asset, _, _), _| !assets.contains(asset));
+        self.uploads.remove_assets(assets);
         self.stills.remove_assets(assets);
     }
 
@@ -2262,8 +2501,8 @@ impl MediaSources {
     /// pts index build (ffprobe/ffmpeg subprocesses) runs on a background thread
     /// so the present loop never stalls. The result lands in `sources` on a later
     /// `drain_pending`.
-    fn ensure_source(&mut self, asset: AssetId, proxy: bool) {
-        let key = (asset, proxy);
+    fn ensure_source(&mut self, input: ResolvedVideoInput) {
+        let key = input.key;
         if self.sources.contains_key(&key) || self.pending.contains_key(&key) {
             return;
         }
@@ -2274,75 +2513,70 @@ impl MediaSources {
         // off-thread (below), where a present-loop stall would drop frames; and
         // cut-ahead pre-builds the next clip off-thread before it is on screen.
         if !self.playing {
-            let entry = self.build_source(asset, proxy);
+            let entry = self.build_source(input.path);
             self.sources.insert(key, entry);
             return;
         }
-        // Resolve the decode input (original vs. proxy) — cheap, needs `self`.
-        let inputs = (|| {
-            let tools = self.tools.clone()?;
-            let project = self.project.as_ref()?;
-            let media_asset = project.media.assets.get(&asset)?;
-            let original = match &media_asset.source {
-                AssetSource::File { path, .. } => path.clone(),
-                // Embedded vectors go through RasterVector, never DecodeVideo.
-                _ => return None,
-            };
-            let path = crate::media::proxy::resolve_decode_input(
-                &original,
-                media_asset.proxy.as_ref(),
-                proxy,
-            );
-            Some((tools, path))
-        })();
-        let Some((tools, path)) = inputs else {
-            // Not a file-backed video source — record failure so we don't retry
-            // every present (an `InvalidateRange` clears it for a relink retry).
+        let Some(tools) = self.tools.clone() else {
             self.sources.insert(key, None);
             return;
         };
+        let path = input.path;
         let (tx, rx) = std::sync::mpsc::channel();
+        let path_for_thread = path.clone();
         let spawned = std::thread::Builder::new()
             .name("photonic-source-build".into())
             .spawn(move || {
-                let _ = tx.send(build_source_entry(tools, path));
+                let _ = tx.send(build_source_entry(tools, path_for_thread));
             });
         match spawned {
             Ok(_) => {
                 self.pending.insert(key, rx);
             }
             // Can't spawn the builder thread — fall back to a synchronous build so
-            // the source still opens (rare; thread-exhaustion). `tools`/`path`
-            // were moved into the (dropped) closure, so re-resolve via the
-            // synchronous path.
+            // the source still opens (rare; thread exhaustion). Keep the same
+            // resolved path and cache key, so the fallback cannot create a
+            // duplicate original source for a missing requested proxy.
             Err(_) => {
-                let entry = self.build_source(asset, proxy);
+                let entry = self.build_source(path);
                 self.sources.insert(key, entry);
             }
         }
     }
 
-    /// Synchronous open (paused path + spawn-failure fallback): resolves the
-    /// decode input, then does the expensive build inline. The playing path uses
-    /// the off-thread `build_source_entry` via `ensure_source`.
-    fn build_source(&self, asset: AssetId, proxy: bool) -> Option<VideoSourceEntry> {
-        let tools = self.tools.clone()?;
+    /// Resolve an asset's requested input once, then use its actual selection
+    /// for every cache and worker key. A missing on-disk proxy deliberately
+    /// canonicalizes to `(asset, false)`, avoiding a second original decoder and
+    /// upload-cache entry when Auto requests proxies globally.
+    fn resolve_video_input(
+        &self,
+        asset: AssetId,
+        requested_proxy: bool,
+    ) -> Option<ResolvedVideoInput> {
         let project = self.project.as_ref()?;
         let media_asset = project.media.assets.get(&asset)?;
         let original = match &media_asset.source {
-            AssetSource::File { path, .. } => path.clone(),
+            AssetSource::File { path, .. } => path,
             // Embedded vectors go through RasterVector, never DecodeVideo.
             _ => return None,
         };
-        // Proxy selection (02 §6): decode the generated proxy input when it was
-        // requested (Quality::PREVIEW / ProxyMode::ForceProxy) and a Ready proxy
-        // is present; otherwise the original. Probe/keyframe/pts below then run
-        // against the *selected* file, so the whole source (dims, GOP structure,
-        // pts model) matches whichever media it decodes. Proxies are never
-        // required for correctness — a missing/pending proxy falls back to the
-        // original (CAP-014).
-        let path =
-            crate::media::proxy::resolve_decode_input(&original, media_asset.proxy.as_ref(), proxy);
+        let path = crate::media::proxy::resolve_decode_input(
+            original,
+            media_asset.proxy.as_ref(),
+            requested_proxy,
+        );
+        let resolved_proxy = requested_proxy && path != *original;
+        Some(ResolvedVideoInput {
+            key: (asset, resolved_proxy),
+            path,
+        })
+    }
+
+    /// Synchronous open (paused path + spawn-failure fallback) for a previously
+    /// resolved input. The playing path uses the same path off-thread via
+    /// `ensure_source`.
+    fn build_source(&self, path: PathBuf) -> Option<VideoSourceEntry> {
+        let tools = self.tools.clone()?;
         build_source_entry(tools, path)
     }
 }
@@ -2391,14 +2625,16 @@ impl GpuFrameSource for MediaSources {
         proxy: bool,
     ) -> Option<GpuFrame> {
         self.drain_pending();
-        self.ensure_source(asset, proxy);
+        let input = self.resolve_video_input(asset, proxy)?;
+        let source_key = input.key;
+        self.ensure_source(input);
         let playing = self.playing;
         let scrubbing = self.scrubbing;
         let stamp = self.next_use_stamp();
         // A source still building in the background reads as absent here → the
         // caller composites transparent / holds the last frame for a few presents
         // until `drain_pending` promotes it. No engine-thread stall.
-        let entry = self.sources.get_mut(&(asset, proxy))?.as_mut()?;
+        let entry = self.sources.get_mut(&source_key)?.as_mut()?;
         entry.last_used = stamp;
         let colorimetry = entry.colorimetry;
 
@@ -2422,7 +2658,7 @@ impl GpuFrameSource for MediaSources {
             |f: &Arc<crate::decode::DecodedFrame>| scrubbing || src_time.0 - f.pts.0 < tolerance;
 
         let frame = if let Some(f) = entry.ring.frame_covering(src_time).filter(within) {
-            RING_HITS.fetch_add(1, Ordering::Relaxed);
+            saturating_increment(&RING_HITS);
             f
         } else {
             // Miss: the worker hasn't produced the frame yet. Wait for it,
@@ -2437,7 +2673,7 @@ impl GpuFrameSource for MediaSources {
             };
             match entry.ring.wait_for_frame(src_time, budget).filter(within) {
                 Some(f) => {
-                    RING_HITS.fetch_add(1, Ordering::Relaxed);
+                    saturating_increment(&RING_HITS);
                     f
                 }
                 // Still behind. Hold the last good frame while playing/scrubbing
@@ -2446,7 +2682,7 @@ impl GpuFrameSource for MediaSources {
                 // required and asserted by the seek/step tests. The engine never
                 // seeks inline — that would clear the ring and thrash the worker.
                 None => {
-                    INLINE_SEEKS.fetch_add(1, Ordering::Relaxed);
+                    saturating_increment(&INLINE_SEEKS);
                     if playing || scrubbing {
                         if let Some(tex) = entry.last_good.clone() {
                             return Some(tex);
@@ -2458,29 +2694,30 @@ impl GpuFrameSource for MediaSources {
         };
 
         // Upload (cached by decoded pts) and record as the new last-good frame.
-        let key = (asset, frame.pts, proxy);
-        let texture = if let Some(cached) = self.uploads.get(&key) {
+        let key = (asset, frame.pts, source_key.1);
+        let texture = if let Some(cached) = self.uploads.get(&key, stamp) {
             cached.clone()
         } else {
             let converter = self
                 .converter
                 .get_or_insert_with(|| YuvConverter::new(gpu.device()));
-            let converted = converter.convert(
+            let (width, height) = frame.planes.dims();
+            let bucket = crate::graph::ir::TextureDesc { width, height }.bucket();
+            let converted = converter.convert_to_size(
                 gpu.device(),
                 gpu.queue(),
                 &frame.planes.as_yuv_planes(),
                 colorimetry,
+                bucket,
             );
-            let (width, height) = (converted.width(), converted.height());
-            let texture =
-                GpuFrame::new(Arc::new(pad_to_pool_bucket(gpu, converted)), width, height);
-            if self.uploads.len() >= UPLOAD_CACHE_CAP {
-                self.uploads.clear();
-            }
-            self.uploads.insert(key, texture.clone());
+            // Convert directly into the evaluator's physical pool bucket. The
+            // `GpuFrame` keeps source dimensions logical, so the padded margin
+            // never participates in sampling.
+            let texture = GpuFrame::new(Arc::new(converted), width, height);
+            self.uploads.insert(key, texture.clone(), stamp);
             texture
         };
-        if let Some(Some(entry)) = self.sources.get_mut(&(asset, proxy)) {
+        if let Some(Some(entry)) = self.sources.get_mut(&source_key) {
             entry.last_good = Some(texture.clone());
         }
         Some(texture)
@@ -2950,11 +3187,199 @@ mod tests {
     use super::*;
 
     #[test]
+    fn upload_cache_evicts_only_the_coldest_frame() {
+        let mut cache = UploadCache::new(2);
+        let a = AssetId::new();
+        let b = AssetId::new();
+        let c = AssetId::new();
+        let ka = (a, Tick(0), false);
+        let kb = (b, Tick(0), false);
+        let kc = (c, Tick(0), false);
+
+        cache.insert(ka, "a", 1);
+        cache.insert(kb, "b", 2);
+        assert_eq!(cache.get(&ka, 3), Some(&"a"), "touches promote a hit");
+        cache.insert(kc, "c", 4);
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_key(&ka), "recently touched frame survives");
+        assert!(!cache.contains_key(&kb), "coldest frame alone is evicted");
+        assert!(cache.contains_key(&kc), "new frame is cached");
+    }
+
+    #[test]
     fn engine_status_starts_with_zeroed_performance_telemetry() {
         let status = EngineStatus::default();
         assert_eq!(status.frames_published, 0);
+        assert_eq!(status.evaluations, 0);
         assert_eq!(status.last_evaluate_micros, 0);
         assert_eq!(status.evaluation_misses, 0);
+    }
+
+    #[test]
+    fn preview_telemetry_reports_explicit_evaluation_attempts() {
+        let status = EngineStatus {
+            frames_published: 17,
+            // 17 successful program passes, 3 primary misses, plus one clean
+            // compare-effects pass: this cannot be derived from publications.
+            evaluations: 21,
+            evaluation_misses: 3,
+            last_evaluate_micros: 2_400,
+            ..EngineStatus::default()
+        };
+
+        let telemetry = PreviewTelemetrySnapshot::from_status(&status, 41, 7);
+
+        assert_eq!(telemetry.ring_hits, 41);
+        assert_eq!(telemetry.inline_seeks, 7);
+        assert_eq!(telemetry.frames_published, 17);
+        assert_eq!(telemetry.evaluation_misses, 3);
+        assert_eq!(telemetry.evaluations, 21);
+        assert_eq!(telemetry.last_evaluate_micros, 2_400);
+    }
+
+    #[test]
+    fn preview_telemetry_preserves_a_saturated_evaluation_counter() {
+        let status = EngineStatus {
+            evaluations: u64::MAX,
+            ..EngineStatus::default()
+        };
+
+        let telemetry = PreviewTelemetrySnapshot::from_status(&status, 0, 0);
+
+        assert_eq!(telemetry.evaluations, u64::MAX);
+    }
+
+    #[test]
+    fn preview_telemetry_public_accessor_uses_the_published_status() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let status = Arc::new(ArcSwap::from_pointee(EngineStatus {
+            frames_published: 5,
+            evaluations: 8,
+            evaluation_misses: 2,
+            last_evaluate_micros: 777,
+            ..EngineStatus::default()
+        }));
+        let session = EngineSession {
+            tx,
+            frame: Arc::new(ArcSwapOption::from(None)),
+            status,
+            join: None,
+        };
+
+        let telemetry = session.preview_telemetry();
+        assert_eq!(telemetry.frames_published, 5);
+        assert_eq!(telemetry.evaluations, 8);
+        assert_eq!(telemetry.evaluation_misses, 2);
+        assert_eq!(telemetry.last_evaluate_micros, 777);
+        assert_eq!(telemetry.decode_misses, telemetry.inline_seeks);
+    }
+
+    #[test]
+    fn auto_proxy_uses_timeline_ticks_for_a_30fps_frame_budget() {
+        let mut policy = AdaptiveProxyPolicy::new();
+        let rate = FrameRate::FPS_30;
+        let expected_budget = Duration::from_micros(33_333);
+        assert!(
+            ticks_to_duration(rate.ticks_per_frame()) >= expected_budget,
+            "30fps ticks must convert to roughly 33.3ms, not tens of seconds"
+        );
+
+        // 34ms is just over a 30fps frame, so exactly three consecutive
+        // samples must switch Auto to the proxy hysteresis state.
+        for _ in 0..2 {
+            assert!(!observe_adaptive_proxy(
+                &mut policy,
+                PreviewQuality::Draft,
+                ProxyMode::Auto,
+                rate,
+                Duration::from_millis(34),
+                false,
+            ));
+            assert_eq!(policy.choice(), PreviewMediaChoice::Original);
+        }
+        assert!(observe_adaptive_proxy(
+            &mut policy,
+            PreviewQuality::Draft,
+            ProxyMode::Auto,
+            rate,
+            Duration::from_millis(34),
+            false,
+        ));
+        assert_eq!(policy.choice(), PreviewMediaChoice::Proxy);
+    }
+
+    #[test]
+    fn resolved_source_keys_share_original_for_unready_proxies() {
+        use photonic_core::timeline::{MediaAsset, ProxyRef};
+
+        let dir = std::env::temp_dir().join(format!(
+            "photonic-source-key-{}-{}",
+            std::process::id(),
+            AssetId::new()
+        ));
+        std::fs::create_dir_all(&dir).expect("create source-key fixture dir");
+        let ready_original = dir.join("ready-original.mp4");
+        let ready_proxy = dir.join("ready.proxy.mp4");
+        let unready_original = dir.join("unready-original.mp4");
+        std::fs::write(&ready_original, []).expect("write ready original");
+        std::fs::write(&ready_proxy, []).expect("write ready proxy");
+        std::fs::write(&unready_original, []).expect("write unready original");
+
+        let mut project = TimelineProject::new();
+        let mut ready = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: ready_original.clone(),
+                rel_path: None,
+            },
+        );
+        ready.proxy = Some(ProxyRef::ready_generated(ready_proxy.clone()));
+        let ready_id = ready.id;
+        project.media.assets.insert(ready_id, ready);
+
+        let mut unready = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: unready_original.clone(),
+                rel_path: None,
+            },
+        );
+        // Status may say Ready while the file is gone; selection must still
+        // canonicalize to the original input.
+        unready.proxy = Some(ProxyRef::ready_generated(dir.join("missing.proxy.mp4")));
+        let unready_id = unready.id;
+        project.media.assets.insert(unready_id, unready);
+
+        let mut media = MediaSources::new(None);
+        media.set_project(Arc::new(project));
+
+        let ready_proxy_input = media
+            .resolve_video_input(ready_id, true)
+            .expect("ready video input");
+        assert_eq!(ready_proxy_input.key, (ready_id, true));
+        assert_eq!(ready_proxy_input.path, ready_proxy);
+
+        let unready_proxy_input = media
+            .resolve_video_input(unready_id, true)
+            .expect("unready proxy fallback");
+        let unready_original_input = media
+            .resolve_video_input(unready_id, false)
+            .expect("unready original input");
+        assert_eq!(unready_proxy_input.key, (unready_id, false));
+        assert_eq!(unready_proxy_input.key, unready_original_input.key);
+        assert_eq!(unready_proxy_input.path, unready_original);
+        assert_eq!(unready_proxy_input.path, unready_original_input.path);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn diagnostic_counter_increment_saturates_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        saturating_increment(&counter);
+        saturating_increment(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]

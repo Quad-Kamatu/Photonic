@@ -534,7 +534,7 @@ mod offscreen_tests {
         const H: u32 = 48;
         let mut doc = Document::new("raster parity", W as f64, H as f64);
         let layer_id = doc.active_layer_id.unwrap();
-        let image = RasterImage::from_rgba(24, 20, vec![255, 0, 0, 255].repeat(24 * 20))
+        let image = RasterImage::from_rgba(24, 20, [255, 0, 0, 255].repeat(24 * 20))
             .expect("valid raster image");
         let mut raster = RasterNode::new(image);
         raster.mask = Some(Mask::rect(24, 20, 0, 0, 12, 20));

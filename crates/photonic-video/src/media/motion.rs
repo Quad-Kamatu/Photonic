@@ -459,7 +459,10 @@ impl MotionMetadataAdapter for PhotonicJsonAdapter {
         let g_scale = gyro_scale(&raw.gyro_units)?;
         // Only demanded when a sample actually carries acceleration, so a
         // gyro-only file need not declare a unit it never uses.
-        let a_scale = match (&raw.accel_units, raw.samples.iter().any(|s| s.accel.is_some())) {
+        let a_scale = match (
+            &raw.accel_units,
+            raw.samples.iter().any(|s| s.accel.is_some()),
+        ) {
             (Some(u), _) => Some(accel_scale(u)?),
             (None, false) => None,
             (None, true) => {
@@ -588,7 +591,10 @@ impl MotionMetadataAdapter for GcsvAdapter {
             }
             // The column header is the first line whose leading field is `t`.
             if line.split(',').next().map(str::trim) == Some("t") {
-                columns = line.split(',').map(|c| c.trim().to_ascii_lowercase()).collect();
+                columns = line
+                    .split(',')
+                    .map(|c| c.trim().to_ascii_lowercase())
+                    .collect();
                 header_end = idx;
                 break;
             }
@@ -676,11 +682,9 @@ impl MotionMetadataAdapter for GcsvAdapter {
                     })
             };
             let accel = match accel_cols {
-                Some((x, y, z)) => Some(axes.apply([
-                    get(x)? * ascale,
-                    get(y)? * ascale,
-                    get(z)? * ascale,
-                ])),
+                Some((x, y, z)) => {
+                    Some(axes.apply([get(x)? * ascale, get(y)? * ascale, get(z)? * ascale]))
+                }
                 None => None,
             };
             let sample = MotionSample {
@@ -1086,9 +1090,8 @@ mod tests {
     fn gcsv_nan_rows_are_dropped_and_counted() {
         // Unlike JSON, the text format *can* carry `nan`/`inf`: Rust's f64
         // parser accepts both. This is the guard's real exposure.
-        let mut body = String::from(
-            "GYROFLOW IMU LOG\norientation,XYZ\ntscale,1\ngscale,1\nt,gx,gy,gz\n",
-        );
+        let mut body =
+            String::from("GYROFLOW IMU LOG\norientation,XYZ\ntscale,1\ngscale,1\nt,gx,gy,gz\n");
         for t in 0..20 {
             body.push_str(&format!("{t},0,0,0\n"));
         }
@@ -1101,9 +1104,8 @@ mod tests {
 
     #[test]
     fn gcsv_infinity_is_also_caught() {
-        let mut body = String::from(
-            "GYROFLOW IMU LOG\norientation,XYZ\ntscale,1\ngscale,1\nt,gx,gy,gz\n",
-        );
+        let mut body =
+            String::from("GYROFLOW IMU LOG\norientation,XYZ\ntscale,1\ngscale,1\nt,gx,gy,gz\n");
         for t in 0..20 {
             body.push_str(&format!("{t},0,0,0\n"));
         }
@@ -1175,7 +1177,10 @@ mod tests {
 
     #[test]
     fn gcsv_accepts_the_camera_magic_too() {
-        let p = tmp("camera.gcsv", &GCSV_OK.replace("GYROFLOW IMU LOG", "CAMERA IMU LOG"));
+        let p = tmp(
+            "camera.gcsv",
+            &GCSV_OK.replace("GYROFLOW IMU LOG", "CAMERA IMU LOG"),
+        );
         assert!(GcsvAdapter.parse(&p).is_ok());
     }
 
@@ -1258,10 +1263,7 @@ mod tests {
         // The common real case: a re-encoded clip whose private metadata box
         // was stripped. The user needs "no gyro data here", not "corrupt file".
         let p = tmp("reencoded.mp4", "\u{0}fake");
-        assert!(matches!(
-            parse_motion(&p),
-            Err(MotionError::NoMotionTrack)
-        ));
+        assert!(matches!(parse_motion(&p), Err(MotionError::NoMotionTrack)));
     }
 
     #[test]

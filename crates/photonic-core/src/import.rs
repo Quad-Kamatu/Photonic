@@ -934,8 +934,7 @@ fn parse_color(s: &str) -> Option<Color> {
         return None;
     }
 
-    if s.starts_with('#') {
-        let hex = &s[1..];
+    if let Some(hex) = s.strip_prefix('#') {
         return match hex.len() {
             3 => {
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()? as f32 / 255.0;
@@ -1128,7 +1127,7 @@ fn polyline_to_path_d(points_attr: &str, close: bool) -> Option<String> {
         .filter_map(|s| s.parse().ok())
         .collect();
 
-    if coords.len() < 4 || coords.len() % 2 != 0 {
+    if coords.len() < 4 || !coords.len().is_multiple_of(2) {
         return None;
     }
 

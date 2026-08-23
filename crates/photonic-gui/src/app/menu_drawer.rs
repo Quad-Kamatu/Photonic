@@ -900,8 +900,7 @@ impl PhotonicApp {
                 let clicked_inside = ctx
                     .input(|i| i.pointer.interact_pos())
                     .map(|pos| {
-                        drawer_resp.response.rect.contains(pos)
-                            || toolbar_rect.contains(pos)
+                        drawer_resp.response.rect.contains(pos) || toolbar_rect.contains(pos)
                     })
                     .unwrap_or(false);
                 if !clicked_inside {

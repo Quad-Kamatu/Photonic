@@ -1443,9 +1443,7 @@ impl Document {
     /// If it is a group child, the search walks up the group hierarchy until a
     /// top-level node is found.  Returns `None` if the node does not exist.
     pub fn top_level_ancestor(&self, node_id: NodeId) -> Option<NodeId> {
-        if self.nodes.get(&node_id).is_none() {
-            return None;
-        }
+        self.nodes.get(&node_id)?;
         // Already top-level?
         let is_top = self.layer_order.iter().any(|lid| {
             self.layers

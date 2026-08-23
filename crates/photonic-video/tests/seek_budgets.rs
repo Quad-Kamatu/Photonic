@@ -14,6 +14,8 @@
 //! See `docs/specs/video-editor/24-preview-media-load.md` §6 and
 //! `11-testing-phasing.md` §4.1.
 
+#![expect(clippy::assertions_on_constants)]
+
 use std::path::PathBuf;
 use std::time::Instant;
 

@@ -1,3 +1,7 @@
+// CLI color parsing preserves the established NaN behavior; command argument
+// lists mirror the public CLI surface. Keep both choices self-checking.
+#![expect(clippy::manual_clamp, clippy::too_many_arguments)]
+
 mod args;
 mod cli;
 mod mcp_proxy;
@@ -889,7 +893,7 @@ impl PhotonicWinitApp {
                         &mut view,
                         &mut state.renderer,
                         mcp_ok,
-                        &mut *hist,
+                        &mut hist,
                     );
                     state.renderer.view = view;
                 }
@@ -1085,7 +1089,7 @@ impl PhotonicWinitApp {
             use std::sync::atomic::{AtomicU64, Ordering};
             static FRAME: AtomicU64 = AtomicU64::new(0);
             let n = FRAME.fetch_add(1, Ordering::Relaxed);
-            if n % 600 == 0 {
+            if n.is_multiple_of(600) {
                 tracing::info!("render loop alive — frame {}", n);
             }
         }

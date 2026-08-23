@@ -2823,7 +2823,7 @@ mod blend_tests {
         let mut tile = RasterImage::new(n, n);
         for y in 0..n {
             for x in 0..n {
-                let on = ((x / cell) + (y / cell)) % 2 == 0;
+                let on = ((x / cell) + (y / cell)).is_multiple_of(2);
                 let rgba = if on {
                     [230, 30, 30, 255]
                 } else {

@@ -165,14 +165,10 @@ fn decode_counter_mid_gop_seek_is_pts_exact() {
     // pts-exact: the decoded frame's presentation tick equals frame 75's tick.
     assert_eq!(f75.pts, target, "mid-GOP seek lands pts-exact on frame 75");
     assert_eq!(f75.planes.dims(), (320, 180));
-    match &f75.planes {
-        DecodedPlanes::Yuv420 { y, cb, cr, .. } => {
-            assert_eq!(y.len(), 320 * 180);
-            assert_eq!(cb.len(), 160 * 90);
-            assert_eq!(cr.len(), 160 * 90);
-        }
-        _ => panic!("expected yuv420 planes for a no-alpha source"),
-    }
+    assert!(matches!(&f75.planes, DecodedPlanes::Yuv420 { .. }));
+    assert_eq!(f75.planes.y().len(), 320 * 180);
+    assert_eq!(f75.planes.cb().len(), 160 * 90);
+    assert_eq!(f75.planes.cr().len(), 160 * 90);
 
     // Frame-accuracy: an adjacent frame differs; re-seeking is deterministic.
     let f76 = src
@@ -309,11 +305,12 @@ fn decode_alpha_gradient_ramps_across_row() {
         .seek(photonic_core::timeline::Tick(0))
         .expect("seek frame 0");
     let (a, w) = match &f0.planes {
-        DecodedPlanes::Yuva444 {
-            a, width, height, ..
-        } => {
-            assert_eq!((*width, *height), (160, 90));
-            (a.clone(), *width as usize)
+        DecodedPlanes::Yuva444 { .. } => {
+            assert_eq!(f0.planes.dims(), (160, 90));
+            (
+                f0.planes.a().expect("YUVA frame has alpha").to_vec(),
+                160usize,
+            )
         }
         _ => panic!("expected yuva444 planes for an alpha source"),
     };
@@ -332,7 +329,5 @@ fn decode_alpha_gradient_ramps_across_row() {
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 fn plane_y(p: &DecodedPlanes) -> &[u8] {
-    match p {
-        DecodedPlanes::Yuv420 { y, .. } | DecodedPlanes::Yuva444 { y, .. } => y,
-    }
+    p.y()
 }

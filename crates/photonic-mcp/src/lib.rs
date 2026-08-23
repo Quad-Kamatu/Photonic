@@ -4,6 +4,9 @@
 //! helpers are documented in **`docs/specs/mcp-2026-07-28.md`**.
 //!
 #![recursion_limit = "2048"]
+// Pairwise path operations retain indexed loops so removal and replacement
+// decisions share the original ordering. Keep the exception self-checking.
+#![expect(clippy::needless_range_loop)]
 // `pub` (29 §3 / CAP-019): the acceptance-story harness in
 // `crates/photonic-app/tests/` must drive the real tool-call path — the
 // same `dispatch_tool` entry that carries document-snapshot/undo/audit-log
@@ -12,13 +15,13 @@
 pub mod dispatch;
 
 pub mod auth;
+pub mod catalog;
 pub mod handlers;
+pub mod path_guard;
 pub mod protocol;
 pub mod schema_gen;
 pub mod server;
 pub mod stdio;
-pub mod path_guard;
-pub mod catalog;
 
 pub use handlers::doc_export::register_export_gpu;
 pub use server::{McpServer, McpServerConfig};

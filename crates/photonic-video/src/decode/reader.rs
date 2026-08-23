@@ -66,6 +66,9 @@ pub struct FrameReader<R: Read> {
     /// Output ordinal since the seek origin (0-based).
     ordinal: i64,
     pts_model: PtsModel,
+    /// Reused only while a keyframe seek discards pre-target frames. Frames
+    /// retained by the ring must own their bytes, but skipped GOP frames do not.
+    discard_buf: Vec<u8>,
 }
 
 impl<R: Read> FrameReader<R> {
@@ -78,6 +81,7 @@ impl<R: Read> FrameReader<R> {
             frame_bytes: pix_fmt.frame_bytes(width, height),
             ordinal: 0,
             pts_model,
+            discard_buf: Vec::new(),
         }
     }
 
@@ -85,16 +89,41 @@ impl<R: Read> FrameReader<R> {
     /// `Err(PartialFrame)` if the stream ends mid-frame (a crash mid-decode).
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, DecodeError> {
         let mut buf = vec![0u8; self.frame_bytes];
+        if !Self::read_frame(&mut self.reader, &mut buf)? {
+            return Ok(None);
+        }
+
+        let pts = self.advance_pts()?;
+        let planes = self.split_planes(buf);
+        Ok(Some(DecodedFrame { pts, planes }))
+    }
+
+    /// Read and discard one full raw frame while preserving its presentation
+    /// ordinal. This is the seek fast path for frames before the target: reuse
+    /// one buffer instead of allocating a full YUV payload per discarded GOP
+    /// frame. Returns its tick, or `None` on clean end-of-stream.
+    pub fn discard_next_frame(&mut self) -> Result<Option<Tick>, DecodeError> {
+        let mut buf = std::mem::take(&mut self.discard_buf);
+        buf.resize(self.frame_bytes, 0);
+        let result = Self::read_frame(&mut self.reader, &mut buf);
+        self.discard_buf = buf;
+        if !result? {
+            return Ok(None);
+        }
+        self.advance_pts().map(Some)
+    }
+
+    fn read_frame(reader: &mut R, buf: &mut [u8]) -> Result<bool, DecodeError> {
         let mut filled = 0;
-        while filled < self.frame_bytes {
-            match self.reader.read(&mut buf[filled..]) {
+        while filled < buf.len() {
+            match reader.read(&mut buf[filled..]) {
                 Ok(0) => {
                     if filled == 0 {
-                        return Ok(None); // clean EOF at a frame boundary
+                        return Ok(false); // clean EOF at a frame boundary
                     }
                     return Err(DecodeError::PartialFrame {
                         got: filled,
-                        expected: self.frame_bytes,
+                        expected: buf.len(),
                     });
                 }
                 Ok(n) => filled += n,
@@ -102,15 +131,16 @@ impl<R: Read> FrameReader<R> {
                 Err(e) => return Err(DecodeError::Io(e)),
             }
         }
+        Ok(true)
+    }
 
+    fn advance_pts(&mut self) -> Result<Tick, DecodeError> {
         let pts = self
             .pts_model
             .pts(self.ordinal)
             .ok_or(DecodeError::NoPtsModel)?;
         self.ordinal += 1;
-
-        let planes = self.split_planes(buf);
-        Ok(Some(DecodedFrame { pts, planes }))
+        Ok(pts)
     }
 
     /// The presentation tick the *next* frame will carry (without reading it).
@@ -119,40 +149,7 @@ impl<R: Read> FrameReader<R> {
     }
 
     fn split_planes(&self, buf: Vec<u8>) -> DecodedPlanes {
-        let (w, h) = (self.width as usize, self.height as usize);
-        match self.pix_fmt {
-            PixFmt::Yuv420p => {
-                let cw = w.div_ceil(2);
-                let ch = h.div_ceil(2);
-                let y_len = w * h;
-                let c_len = cw * ch;
-                let y = buf[..y_len].to_vec();
-                let cb = buf[y_len..y_len + c_len].to_vec();
-                let cr = buf[y_len + c_len..y_len + 2 * c_len].to_vec();
-                DecodedPlanes::Yuv420 {
-                    width: self.width,
-                    height: self.height,
-                    y,
-                    cb,
-                    cr,
-                }
-            }
-            PixFmt::Yuva444p => {
-                let p = w * h;
-                let y = buf[..p].to_vec();
-                let cb = buf[p..2 * p].to_vec();
-                let cr = buf[2 * p..3 * p].to_vec();
-                let a = buf[3 * p..4 * p].to_vec();
-                DecodedPlanes::Yuva444 {
-                    width: self.width,
-                    height: self.height,
-                    y,
-                    cb,
-                    cr,
-                    a,
-                }
-            }
-        }
+        DecodedPlanes::from_rawvideo(self.pix_fmt, self.width, self.height, buf)
     }
 }
 
@@ -188,20 +185,41 @@ mod tests {
 
         let f0 = r.next_frame().unwrap().unwrap();
         assert_eq!(f0.pts, Tick(60 * tpf));
-        match &f0.planes {
-            DecodedPlanes::Yuv420 { y, cb, cr, .. } => {
-                assert_eq!(y, &[1, 2, 3, 4]);
-                assert_eq!(cb, &[100]);
-                assert_eq!(cr, &[200]);
-            }
-            // Test invariant: a Yuv420p reader only ever yields Yuv420 planes.
-            other => panic!("expected Yuv420 planes, got {other:?}"),
-        }
+        assert_eq!(f0.planes.y(), &[1, 2, 3, 4]);
+        assert_eq!(f0.planes.cb(), &[100]);
+        assert_eq!(f0.planes.cr(), &[200]);
 
         let f1 = r.next_frame().unwrap().unwrap();
         assert_eq!(f1.pts, Tick(61 * tpf));
 
         assert!(r.next_frame().unwrap().is_none(), "clean EOF");
+    }
+
+    #[test]
+    fn discarded_frame_advances_pts_without_affecting_next_payload() {
+        let rate = FrameRate::FPS_30;
+        let tpf = rate.ticks_per_frame().0;
+        // Two yuv420p 2×2 frames. The first represents a pre-target GOP frame
+        // and must be read into the reusable discard buffer; the second still
+        // has to arrive with its own pixels and the correct ordinal/PTS.
+        let bytes = vec![1, 2, 3, 4, 100, 200, 5, 6, 7, 8, 101, 201];
+        let mut r = FrameReader::new(
+            std::io::Cursor::new(bytes),
+            2,
+            2,
+            PixFmt::Yuv420p,
+            PtsModel::Cfr {
+                rate,
+                start_frame: 10,
+            },
+        );
+
+        assert_eq!(r.discard_next_frame().unwrap(), Some(Tick(10 * tpf)));
+        let kept = r.next_frame().unwrap().expect("second frame");
+        assert_eq!(kept.pts, Tick(11 * tpf));
+        assert_eq!(kept.planes.y(), &[5, 6, 7, 8]);
+        assert_eq!(kept.planes.cb(), &[101]);
+        assert_eq!(kept.planes.cr(), &[201]);
     }
 
     #[test]

@@ -47,18 +47,15 @@ fn post(body: Value, headers: &[(&str, &str)]) -> Request<Body> {
     builder.body(Body::from(body.to_string())).unwrap()
 }
 
-async fn call(
-    mode: ProtocolMode,
-    body: Value,
-    headers: &[(&str, &str)],
-) -> (StatusCode, Value) {
+async fn call(mode: ProtocolMode, body: Value, headers: &[(&str, &str)]) -> (StatusCode, Value) {
     let res = build_router(test_state(mode))
         .oneshot(post(body, headers))
         .await
         .unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let v: Value = serde_json::from_slice(&bytes).unwrap_or(json!({ "raw": String::from_utf8_lossy(&bytes) }));
+    let v: Value =
+        serde_json::from_slice(&bytes).unwrap_or(json!({ "raw": String::from_utf8_lossy(&bytes) }));
     (status, v)
 }
 
@@ -89,7 +86,10 @@ async fn discover_dual_lists_2026_and_legacy() {
     let vers = r["supportedVersions"].as_array().unwrap();
     assert!(vers.iter().any(|x| x == PROTOCOL_2026_07_28));
     assert!(vers.iter().any(|x| x == "2024-11-05"));
-    assert_eq!(r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "photonic");
+    assert_eq!(
+        r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "photonic"
+    );
 }
 
 #[tokio::test]

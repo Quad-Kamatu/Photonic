@@ -217,16 +217,24 @@ impl DecodeSource {
         let reader = self.reader.as_mut().expect("reader set by start_process");
 
         loop {
-            match reader.next_frame()? {
-                // First frame at/after the target: ring it and return it.
-                Some(frame) if frame.pts >= target => {
-                    let pts = frame.pts;
-                    self.ring.push(frame);
-                    return self.ring.get(pts).ok_or(DecodeError::EmptyDecode);
+            // The reader's PTS model can answer this before consuming the raw
+            // bytes. Pre-target GOP frames are never retained, so read them
+            // through its reusable discard buffer rather than allocating one
+            // decoded payload per frame on a long-GOP seek.
+            match reader.next_pts() {
+                Some(pts) if pts < target => {
+                    if reader.discard_next_frame()?.is_none() {
+                        return Err(DecodeError::EmptyDecode);
+                    }
                 }
-                // Still before the target within this GOP: discard.
-                Some(_) => continue,
-                // EOF before reaching target ⇒ nothing at/after target.
+                Some(_) => match reader.next_frame()? {
+                    Some(frame) => {
+                        let pts = frame.pts;
+                        self.ring.push(frame);
+                        return self.ring.get(pts).ok_or(DecodeError::EmptyDecode);
+                    }
+                    None => return Err(DecodeError::EmptyDecode),
+                },
                 None => return Err(DecodeError::EmptyDecode),
             }
         }

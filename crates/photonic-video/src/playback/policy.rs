@@ -70,7 +70,9 @@ mod tests {
         assert_eq!(p.ring_back_frames, 6);
         assert_eq!(p.prefill_for(false), 6);
         assert_eq!(p.prefill_for(true), 12);
-        assert!(UNDERRUN_HOLDS_LAST_FRAME);
-        assert!(RECOVERY_FORCE_RENDERS);
+        const {
+            assert!(UNDERRUN_HOLDS_LAST_FRAME);
+            assert!(RECOVERY_FORCE_RENDERS);
+        }
     }
 }

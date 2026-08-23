@@ -465,7 +465,9 @@ impl PhotonicApp {
                 let row_top = y;
                 let row_bot = y + row.height;
                 y = row_bot;
-                if row_bot < header_rows_rect.top() || row_top > header_rows_rect.bottom() - TRACK_FOOTER_H {
+                if row_bot < header_rows_rect.top()
+                    || row_top > header_rows_rect.bottom() - TRACK_FOOTER_H
+                {
                     continue;
                 }
                 let hrect = egui::Rect::from_min_max(
@@ -567,7 +569,10 @@ impl PhotonicApp {
             }
             // Add-track controls pinned to the header column's bottom.
             let footer = egui::Rect::from_min_max(
-                egui::pos2(header_rows_rect.left(), header_rows_rect.bottom() - TRACK_FOOTER_H),
+                egui::pos2(
+                    header_rows_rect.left(),
+                    header_rows_rect.bottom() - TRACK_FOOTER_H,
+                ),
                 header_rows_rect.max,
             );
             tracks::draw_add_controls(ui, footer, doc, history, seq_id);

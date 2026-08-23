@@ -679,9 +679,10 @@ fn kill_matching_loop(needle: &str, stop: &AtomicBool, period: Duration) {
 /// realistic conditions: continuously kill the real ffmpeg decode process
 /// the engine spawns for `beep_flash.mp4` while it's playing, and assert
 /// (a) the engine's status-publish loop keeps making forward progress the
-/// whole time (never wedges on the dead pipe/child), (b) at least one
-/// diagnostic placeholder frame is actually served, and (c) the engine is
-/// still fully controllable (`Pause` completes) once the killing stops.
+/// whole time (never wedges on the dead pipe/child), (b) decode misses are
+/// contained by holding the last opaque frame rather than flashing a transparent
+/// placeholder, and (c) the engine is still fully controllable (`Pause`
+/// completes) once the killing stops.
 ///
 /// Needs a real ffmpeg subprocess to kill, plus `pkill` (Linux/macOS) — the
 /// one test class 11 §3.3 flags as needing a real subprocess — so it is
@@ -732,6 +733,7 @@ fn sidecar_kill_mid_decode_never_blocks_the_engine() {
         .expect("baseline decode succeeds before sidecar interference");
 
     session.send(EngineCmd::Play);
+    let (_, misses_before) = photonic_video::session::decode_stats();
 
     // Kill every ffmpeg decoding this fixture, repeatedly and tightly, for a
     // few seconds — long enough to land on multiple in-flight decode/restart
@@ -753,7 +755,8 @@ fn sidecar_kill_mid_decode_never_blocks_the_engine() {
     let mut last_playhead = session.status().playhead;
     let mut progress_at = Instant::now();
     let probe_deadline = Instant::now() + kill_window;
-    let mut saw_placeholder = false;
+    let mut saw_opaque_frame = false;
+    let mut saw_transparent_frame = false;
     while Instant::now() < probe_deadline {
         let status = session.status();
         if status.playhead != last_playhead {
@@ -772,7 +775,9 @@ fn sidecar_kill_mid_decode_never_blocks_the_engine() {
                 // Alpha 0 only ever comes from `Evaluator::transparent`'s
                 // failure substitute — real decoded content is always
                 // opaque, even the (mostly black) genuine content here.
-                saw_placeholder = true;
+                saw_transparent_frame = true;
+            } else {
+                saw_opaque_frame = true;
             }
         }
         std::thread::sleep(Duration::from_millis(15));
@@ -781,10 +786,18 @@ fn sidecar_kill_mid_decode_never_blocks_the_engine() {
     stop.store(true, Ordering::Relaxed);
     let _ = killer.join();
 
+    let (_, misses_after) = photonic_video::session::decode_stats();
     assert!(
-        saw_placeholder,
-        "expected at least one diagnostic placeholder (transparent) frame while the \
-         sidecar was under continuous kill pressure — containment path never observed"
+        misses_after > misses_before,
+        "sidecar kill pressure must cause at least one bounded decode miss"
+    );
+    assert!(
+        saw_opaque_frame,
+        "the last good frame must remain presentable"
+    );
+    assert!(
+        !saw_transparent_frame,
+        "sidecar failure must hold the last good frame, never flash the transparent substitute"
     );
 
     // Recovery: with the killing stopped, the engine must still be fully

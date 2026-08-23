@@ -9,7 +9,7 @@
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::server::{process_rpc_request, AppState};
 use serde_json::Value;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use tracing::{debug, warn};
 
 /// Run the MCP server on stdin/stdout until EOF.
@@ -39,12 +39,8 @@ pub async fn run_stdio(state: AppState) -> io::Result<()> {
         };
 
         // Notifications: process but do not reply if id is null/absent.
-        let is_notification = req.id.is_none()
-            || req
-                .id
-                .as_ref()
-                .map(|id| id.is_null())
-                .unwrap_or(false);
+        let is_notification =
+            req.id.is_none() || req.id.as_ref().map(|id| id.is_null()).unwrap_or(false);
 
         // Derive routing headers from body for dual/strict checks (stdio has no HTTP headers).
         let method = req.method.clone();
@@ -79,8 +75,6 @@ pub async fn run_stdio(state: AppState) -> io::Result<()> {
 
 /// Read one JSON-RPC message: Content-Length framed, or a single NDJSON line.
 pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<String>> {
-    let mut content_length: Option<usize> = None;
-    let mut saw_header = false;
     let mut first_line = String::new();
 
     // Peek first non-empty line to decide framing.
@@ -96,16 +90,13 @@ pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     }
 
     let trimmed = first_line.trim_end_matches(['\r', '\n']);
-    if let Some(rest) = trimmed
+    let mut content_length = if let Some(rest) = trimmed
         .strip_prefix("Content-Length:")
         .or_else(|| trimmed.strip_prefix("content-length:"))
     {
-        saw_header = true;
-        content_length = Some(
-            rest.trim()
-                .parse()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Content-Length: {e}")))?,
-        );
+        rest.trim().parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Content-Length: {e}"))
+        })?
     } else if trimmed.starts_with('{') {
         // NDJSON legacy: one JSON object per line.
         return Ok(Some(trimmed.to_string()));
@@ -114,37 +105,30 @@ pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<String>> {
             io::ErrorKind::InvalidData,
             format!("expected Content-Length header or JSON line, got: {trimmed:?}"),
         ));
-    }
+    };
 
     // Consume remaining headers until blank line.
-    if saw_header {
-        loop {
-            let mut line = String::new();
-            let n = reader.read_line(&mut line)?;
-            if n == 0 {
-                return Ok(None);
-            }
-            let t = line.trim_end_matches(['\r', '\n']);
-            if t.is_empty() {
-                break;
-            }
-            if let Some(rest) = t
-                .strip_prefix("Content-Length:")
-                .or_else(|| t.strip_prefix("content-length:"))
-            {
-                content_length = Some(
-                    rest.trim().parse().map_err(|e| {
-                        io::Error::new(io::ErrorKind::InvalidData, format!("Content-Length: {e}"))
-                    })?,
-                );
-            }
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let t = line.trim_end_matches(['\r', '\n']);
+        if t.is_empty() {
+            break;
+        }
+        if let Some(rest) = t
+            .strip_prefix("Content-Length:")
+            .or_else(|| t.strip_prefix("content-length:"))
+        {
+            content_length = rest.trim().parse().map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("Content-Length: {e}"))
+            })?;
         }
     }
 
-    let len = content_length.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length header")
-    })?;
-    let mut buf = vec![0u8; len];
+    let mut buf = vec![0u8; content_length];
     reader.read_exact(&mut buf)?;
     let s = String::from_utf8(buf)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("utf-8: {e}")))?;
@@ -162,8 +146,8 @@ pub fn write_message(writer: &mut impl Write, response: &JsonRpcResponse) -> io:
 
 /// Write raw JSON value (for tests).
 pub fn write_json_value(writer: &mut impl Write, value: &Value) -> io::Result<()> {
-    let body = serde_json::to_string(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let body =
+        serde_json::to_string(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
     writer.flush()?;
     Ok(())
@@ -194,7 +178,8 @@ mod tests {
 
     #[test]
     fn write_roundtrip_frame() {
-        let resp = JsonRpcResponse::success(Some(serde_json::json!(1)), serde_json::json!({"ok": true}));
+        let resp =
+            JsonRpcResponse::success(Some(serde_json::json!(1)), serde_json::json!({"ok": true}));
         let mut buf = Vec::new();
         write_message(&mut buf, &resp).unwrap();
         let s = String::from_utf8(buf).unwrap();

@@ -1354,12 +1354,12 @@ mod tests {
         let mut project = photonic_core::timeline::TimelineProject::new();
         let mut seq = photonic_core::timeline::Sequence::new("Seq", FrameRate::FPS_30, 640, 360);
         let mut m1 = Marker::new(Tick(0), "Intro");
-        m1.duration = Tick(TICKS_PER_SECOND as i64);
-        let mut m2 = Marker::new(Tick(TICKS_PER_SECOND as i64 * 2), "Outro");
-        m2.duration = Tick(TICKS_PER_SECOND as i64);
+        m1.duration = Tick(TICKS_PER_SECOND);
+        let mut m2 = Marker::new(Tick(TICKS_PER_SECOND * 2), "Outro");
+        m2.duration = Tick(TICKS_PER_SECOND);
         // Point marker (duration 0) must be skipped.
         seq.markers
-            .push(Marker::new(Tick(TICKS_PER_SECOND as i64), "Point"));
+            .push(Marker::new(Tick(TICKS_PER_SECOND), "Point"));
         seq.markers.push(m1);
         seq.markers.push(m2);
         let seq_id = seq.id;

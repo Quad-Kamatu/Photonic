@@ -174,24 +174,21 @@ pub(crate) async fn dispatch_tool_inner(
 ) -> Result<ToolOutput, String> {
     match name {
         // ── Mutating tools (write to the document) ──────────────────────────────
-                "search_actions" => {
+        "search_actions" => {
             let query = args
                 .get("query")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let limit = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(15) as usize;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
             let data = crate::catalog::search_actions(&query, limit);
-            return Ok(ToolOutput::readonly(
+            Ok(ToolOutput::readonly(
                 crate::protocol::ToolResult::text(format!(
                     "Found {} action(s) for {query:?}",
                     data["count"]
                 ))
                 .with_data(data),
-            ));
+            ))
         }
         "execute_action" => {
             let action = args
@@ -2501,7 +2498,8 @@ pub(crate) async fn dispatch_tool_inner(
             ))
         }
         "set_stabilization" => {
-            let a: SetStabilizationArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            let a: SetStabilizationArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::mutating(
                 handlers::video::set_stabilization(state, a).await,
             ))
@@ -3164,7 +3162,7 @@ mod tests {
         node::{PathNode, TextNode},
         AuditLog, Document, PathData, SceneNode, SceneNodeKind,
     };
-    use serde_json::{json, Value};
+    use serde_json::json;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Mutex;
 

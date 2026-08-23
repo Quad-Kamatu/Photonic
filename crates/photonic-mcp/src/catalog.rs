@@ -112,7 +112,7 @@ pub fn search_actions(query: &str, limit: usize) -> Value {
             scored.push((score, summary));
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let limit = limit.clamp(1, 50);
     let hits: Vec<Value> = scored.into_iter().take(limit).map(|(_, v)| v).collect();
     json!({ "actions": hits, "count": hits.len(), "query": query })

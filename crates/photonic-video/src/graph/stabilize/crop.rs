@@ -99,10 +99,7 @@ fn covered(rot: DMat3, lens: &LensProfile, w: f64, h: f64, zoom: f64) -> bool {
     for i in 0..=EDGE_SAMPLES {
         let f = i as f64 / EDGE_SAMPLES as f64;
         let (x, y) = (f * (w - 1.0), f * (h - 1.0));
-        if !boundary(x, 0.0)
-            || !boundary(x, h - 1.0)
-            || !boundary(0.0, y)
-            || !boundary(w - 1.0, y)
+        if !boundary(x, 0.0) || !boundary(x, h - 1.0) || !boundary(0.0, y) || !boundary(w - 1.0, y)
         {
             return false;
         }
@@ -149,12 +146,7 @@ const DYNAMIC_WINDOW_S: f64 = 2.0;
 ///
 /// `per_frame` is each frame's independently required zoom, `None` where even
 /// `max_zoom` was insufficient.
-pub fn solve(
-    per_frame: &[Option<f64>],
-    mode: CropMode,
-    max_zoom: f64,
-    fps: f64,
-) -> CropSolution {
+pub fn solve(per_frame: &[Option<f64>], mode: CropMode, max_zoom: f64, fps: f64) -> CropSolution {
     let max_required = per_frame
         .iter()
         .filter_map(|z| *z)
@@ -211,9 +203,7 @@ pub fn solve(
                 .iter()
                 .map(|z| z.unwrap_or(max_zoom).clamp(1.0, max_zoom))
                 .collect();
-            let window = |i: usize, len: usize| {
-                (i.saturating_sub(half), (i + half + 1).min(len))
-            };
+            let window = |i: usize, len: usize| (i.saturating_sub(half), (i + half + 1).min(len));
             let dilated: Vec<f64> = (0..raw.len())
                 .map(|i| {
                     let (lo, hi) = window(i, raw.len());
@@ -223,8 +213,7 @@ pub fn solve(
             (0..dilated.len())
                 .map(|i| {
                     let (lo, hi) = window(i, dilated.len());
-                    let mean =
-                        dilated[lo..hi].iter().sum::<f64>() / (hi - lo) as f64;
+                    let mean = dilated[lo..hi].iter().sum::<f64>() / (hi - lo) as f64;
                     mean.clamp(1.0, max_zoom) as f32
                 })
                 .collect()
@@ -274,8 +263,8 @@ mod tests {
     fn larger_rotations_demand_more_zoom() {
         let l = lens();
         let mut last = 0.0;
-        for deg in [1.0, 3.0, 6.0, 10.0] {
-            let z = required_zoom(rot((deg as f64).to_radians()), &l, 1920.0, 1080.0, 4.0)
+        for deg in [1.0_f64, 3.0, 6.0, 10.0] {
+            let z = required_zoom(rot(deg.to_radians()), &l, 1920.0, 1080.0, 4.0)
                 .expect("should be feasible within 4x");
             assert!(z > last, "{deg}° gave {z}, not more than {last}");
             last = z;
@@ -287,8 +276,8 @@ mod tests {
         // The property that matters: what the solver returns must pass the
         // very test it was solving.
         let l = lens();
-        for deg in [2.0, 5.0, 9.0] {
-            let r = rot((deg as f64).to_radians());
+        for deg in [2.0_f64, 5.0, 9.0] {
+            let r = rot(deg.to_radians());
             let z = required_zoom(r, &l, 1920.0, 1080.0, 4.0).unwrap();
             assert!(
                 covered(r, &l, 1920.0, 1080.0, z),
@@ -401,7 +390,10 @@ mod tests {
             .fold(0.0f32, f32::max);
         // A boxcar mean of a dilated step ramps over its whole support, so the
         // per-frame change is roughly (rise / 2h) — here about 0.01.
-        assert!(max_step < 0.03, "largest per-frame zoom step was {max_step}");
+        assert!(
+            max_step < 0.03,
+            "largest per-frame zoom step was {max_step}"
+        );
     }
 
     #[test]

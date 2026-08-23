@@ -45,9 +45,7 @@ fn shaky_gcsv(name: &str, secs: f64, amp: f64) -> std::path::PathBuf {
         let gx = amp * (s * 11.0).sin();
         let gy = amp * (s * 7.0).sin();
         let gz = amp * (s * 13.0).sin();
-        body.push_str(&format!(
-            "{t_ms:.3},{gx:.6},{gy:.6},{gz:.6},0,9.80665,0\n"
-        ));
+        body.push_str(&format!("{t_ms:.3},{gx:.6},{gy:.6},{gz:.6},0,9.80665,0\n"));
     }
     write(name, &body)
 }
@@ -143,7 +141,12 @@ fn a_still_camera_round_trips_untouched() {
     let mut src = Image::new(32, 18);
     for y in 0..18 {
         for x in 0..32 {
-            put(&mut src, x, y, [x as f32 / 31.0, y as f32 / 17.0, 0.25, 1.0]);
+            put(
+                &mut src,
+                x,
+                y,
+                [x as f32 / 31.0, y as f32 / 17.0, 0.25, 1.0],
+            );
         }
     }
     let out = stabilize_warp(&src, &analysis.warp_at(10, false), Sampling::Bilinear);
@@ -193,11 +196,7 @@ fn static_safe_never_exposes_an_edge() {
     }
     // Opaque white in, so any transparent output pixel is an exposed edge.
     for f in 0..analysis.frames.len() {
-        let out = stabilize_warp(
-            &src,
-            &analysis.warp_at(f, true),
-            Sampling::Bilinear,
-        );
+        let out = stabilize_warp(&src, &analysis.warp_at(f, true), Sampling::Bilinear);
         let holes = out.pixels.iter().filter(|p| p[3] < 0.5).count();
         assert_eq!(holes, 0, "frame {f} exposed {holes} edge pixels");
     }
@@ -205,9 +204,8 @@ fn static_safe_never_exposes_an_edge() {
 
 #[test]
 fn horizon_lock_without_accelerometer_is_reported() {
-    let mut body = String::from(
-        "GYROFLOW IMU LOG\norientation,XYZ\ntscale,0.001\ngscale,1\nt,gx,gy,gz\n",
-    );
+    let mut body =
+        String::from("GYROFLOW IMU LOG\norientation,XYZ\ntscale,0.001\ngscale,1\nt,gx,gy,gz\n");
     for i in 0..1000 {
         body.push_str(&format!("{:.3},0.02,0,0\n", i as f64 / 500.0 * 1000.0));
     }
@@ -307,8 +305,14 @@ fn dji_flight_log_is_diagnosed_not_mistaken_for_gyro() {
     };
     match photonic_video::media::parse_motion(path) {
         Err(photonic_video::media::MotionError::LowRateTelemetryOnly { hz, samples, .. }) => {
-            assert!(hz < 50.0, "a flight log must be reported as low-rate, got {hz} Hz");
-            assert!(samples > 0, "the diagnostic must name the sample count it saw");
+            assert!(
+                hz < 50.0,
+                "a flight log must be reported as low-rate, got {hz} Hz"
+            );
+            assert!(
+                samples > 0,
+                "the diagnostic must name the sample count it saw"
+            );
         }
         // Acceptable when ffprobe is unavailable: the adapter falls back rather
         // than inventing a diagnosis it cannot support.
@@ -335,16 +339,14 @@ fn reencoded_copy_is_reported_as_recoverable() {
         eprintln!("skipping: no Downloads directory");
         return;
     };
-    let Some(path) = entries
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("dji_fly_"))
-        })
-    else {
+    let Some(path) = entries.flatten().map(|e| e.path()).find(|p| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("dji_fly_"))
+    }) else {
         eprintln!("skipping: no transcoded DJI sample present");
         return;
     };

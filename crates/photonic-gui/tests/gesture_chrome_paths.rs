@@ -5,6 +5,8 @@
 //! K-A10, K-B5 compare, coach, transport registry, split, markers/bookmarks,
 //! freeze, alpha view.
 
+#![expect(clippy::assertions_on_constants)]
+
 use photonic_core::history::CommandHistory;
 use photonic_core::timeline::{
     Clip, ClipId, ClipSource, FrameRate, Sequence, SequenceId, Tick, TimelineProject, Track,
@@ -269,11 +271,9 @@ fn add_marker_and_bookmark_via_ops_bridge() {
         assert_eq!(s.markers[0].name, "Mark");
     }
     history.undo(&mut doc);
-    assert!(
-        doc.timeline.as_ref().unwrap().sequences[&seq]
-            .markers
-            .is_empty()
-    );
+    assert!(doc.timeline.as_ref().unwrap().sequences[&seq]
+        .markers
+        .is_empty());
 
     ops_bridge::add_bookmark(
         &mut doc,

@@ -222,7 +222,7 @@ pub async fn check_grammar(state: &AppState, args: CheckGrammarArgs) -> ToolResu
                     false
                 };
                 if found {
-                    (true, format!("Required layer is present."))
+                    (true, "Required layer is present.".to_string())
                 } else {
                     let desc = if !target_name.is_empty() {
                         format!("'{}'", target_name)

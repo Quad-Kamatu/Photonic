@@ -1,3 +1,12 @@
+// Render-pass signatures and indexed tessellation loops are deliberately kept
+// close to the GPU command model. Expectations keep that decision visible to
+// the strict gate instead of suppressing the lints permanently.
+#![expect(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
 pub mod canvas;
 pub mod capability;
 pub mod caption;

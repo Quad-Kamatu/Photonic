@@ -4006,14 +4006,11 @@ pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult
     let mut pending = Vec::new();
     for p in &args.paths {
         let path = std::path::PathBuf::from(p);
-        let path = match crate::path_guard::check_path(
-            state,
-            &path,
-            photonic_core::PathAccess::Read,
-        ) {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
+        let path =
+            match crate::path_guard::check_path(state, &path, photonic_core::PathAccess::Read) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
         let Some(kind) = guess_asset_kind(&path) else {
             return ToolResult::error(format!(
                 "cannot infer media kind for {p:?} — unrecognized extension"
@@ -4095,14 +4092,12 @@ pub async fn import_media(state: &AppState, args: ImportMediaArgs) -> ToolResult
 ///   hash recorded, stale `probe` dropped — it described the old bytes).
 pub async fn relink_media(state: &AppState, args: RelinkMediaArgs) -> ToolResult {
     tracing::debug!("tool: relink_media {}", args.asset_id);
-    let new_path = match crate::path_guard::check_path(
-        state,
-        &args.new_path,
-        photonic_core::PathAccess::Read,
-    ) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let new_path =
+        match crate::path_guard::check_path(state, &args.new_path, photonic_core::PathAccess::Read)
+        {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
     if !new_path.exists() {
         return err_code("AssetOffline", format!("file not found: {}", args.new_path));
     }
@@ -5750,14 +5745,12 @@ pub async fn transcode_media(state: &AppState, args: TranscodeMediaArgs) -> Tool
     };
     let (enc_args, ext, preset_name) = args.preset.ffmpeg_spec();
     let out_path = match &args.out_path {
-        Some(p) => match crate::path_guard::check_path(
-            state,
-            p,
-            photonic_core::PathAccess::Write,
-        ) {
-            Ok(path) => path,
-            Err(e) => return e,
-        },
+        Some(p) => {
+            match crate::path_guard::check_path(state, p, photonic_core::PathAccess::Write) {
+                Ok(path) => path,
+                Err(e) => return e,
+            }
+        }
         None => {
             let p = input.with_extension(format!("{preset_name}.{ext}"));
             match crate::path_guard::check_path(state, &p, photonic_core::PathAccess::Write) {
@@ -7120,14 +7113,11 @@ fn caption_format_from(path: &str, explicit: Option<&str>) -> Option<String> {
 
 pub async fn import_captions(state: &AppState, args: ImportCaptionsArgs) -> ToolResult {
     tracing::debug!("tool: import_captions {}", args.track_id);
-    let cap_path = match crate::path_guard::check_path(
-        state,
-        &args.path,
-        photonic_core::PathAccess::Read,
-    ) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let cap_path =
+        match crate::path_guard::check_path(state, &args.path, photonic_core::PathAccess::Read) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
     let content = match std::fs::read_to_string(&cap_path) {
         Ok(c) => c,
         Err(e) => return ToolResult::error(format!("could not read {}: {e}", args.path)),
@@ -7200,14 +7190,11 @@ pub async fn export_captions(state: &AppState, args: ExportCaptionsArgs) -> Tool
             ))
         }
     };
-    let out_path = match crate::path_guard::check_path(
-        state,
-        &args.path,
-        photonic_core::PathAccess::Write,
-    ) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let out_path =
+        match crate::path_guard::check_path(state, &args.path, photonic_core::PathAccess::Write) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
     if let Err(e) = std::fs::write(&out_path, text) {
         return ToolResult::error(format!("could not write {}: {e}", out_path.display()));
     }
@@ -7507,14 +7494,11 @@ pub async fn apply_lut(state: &AppState, args: ApplyLutArgs) -> ToolResult {
     let lut_asset: Option<(AssetId, TimelineCmd)> = match &args.lut_path {
         None => None,
         Some(path) => {
-            let pb = match crate::path_guard::check_path(
-                state,
-                path,
-                photonic_core::PathAccess::Read,
-            ) {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
+            let pb =
+                match crate::path_guard::check_path(state, path, photonic_core::PathAccess::Read) {
+                    Ok(p) => p,
+                    Err(e) => return e,
+                };
             if !pb.exists() {
                 return err_code("AssetOffline", format!("LUT file not found: {path}"));
             }
@@ -8669,6 +8653,307 @@ pub async fn insert_title_template(
         "NotSupportedV1",
         "the vector title-template library is not shipped in this build (05 §4b, P6) — nothing to insert",
     )
+}
+
+// ── D-12 gyro stabilization (22 §6.5) ───────────────────────────────────────
+
+/// Bind a gyro/IMU sidecar to a clip.
+///
+/// Parses eagerly so a bad file is rejected here, with a located error, rather
+/// than surfacing later as a failed analysis (22 §6.6: hard-fail, never guess).
+/// The response reports what the file actually contains — sample count, rate,
+/// and whether it carries accelerometer data — because "horizon lock does
+/// nothing" is otherwise a mystery.
+///
+/// Device serials, GPS and precise timestamps are never echoed (23 §9.4).
+pub async fn import_motion_metadata(
+    state: &AppState,
+    args: ImportMotionMetadataArgs,
+) -> ToolResult {
+    use photonic_core::timeline::{
+        LensProfileRef, MotionBinding, MotionSourceRef, StabilizationSpec,
+    };
+
+    tracing::debug!("tool: import_motion_metadata {}", args.clip_id);
+    // 28: every filesystem read goes through the path policy.
+    let path =
+        match crate::path_guard::check_path(state, &args.path, photonic_core::PathAccess::Read) {
+            Ok(p) => p,
+            Err(denied) => return denied,
+        };
+    let series = match photonic_video::media::parse_motion(&path) {
+        Ok(s) => s,
+        Err(e) => return ToolResult::error(format!("motion metadata rejected: {e}")),
+    };
+
+    let lens = match args.lens_profile_path.as_deref() {
+        Some(p) => {
+            let lp = match crate::path_guard::check_path(state, p, photonic_core::PathAccess::Read)
+            {
+                Ok(v) => v,
+                Err(denied) => return denied,
+            };
+            // Validate now, for the same reason as the motion file.
+            if let Err(e) = photonic_video::graph::stabilize::LensProfile::from_path(&lp) {
+                return ToolResult::error(format!("lens profile rejected: {e}"));
+            }
+            LensProfileRef::UserFile {
+                path: lp,
+                rel_path: None,
+            }
+        }
+        None => LensProfileRef::RotationOnly,
+    };
+
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+
+    let mut spec = StabilizationSpec::new(MotionBinding {
+        source: MotionSourceRef::Sidecar {
+            path,
+            rel_path: None,
+            format: series.format,
+        },
+        sync: Default::default(),
+        lens,
+    });
+    if let Some(v) = args.smoothness {
+        spec.smoothness = v;
+    }
+    if let Some(v) = args.horizon_lock {
+        spec.horizon_lock = v;
+    }
+    if let Err(e) = spec.validate() {
+        return ToolResult::error(format!("invalid stabilization recipe: {e:?}"));
+    }
+
+    let mut new_clip = clip.clone();
+    new_clip.stabilization = Some(spec);
+    match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text(format!(
+                "Bound motion metadata: {} samples{}{}. Run analyze_stabilization next.",
+                series.samples.len(),
+                series
+                    .sample_rate_hz()
+                    .map(|hz| format!(", {hz:.0} Hz"))
+                    .unwrap_or_default(),
+                if series.has_accel() {
+                    ", with accelerometer"
+                } else {
+                    ", gyro only (horizon lock will have no effect)"
+                },
+            ))
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// Update an existing stabilization recipe. Only supplied fields change.
+pub async fn set_stabilization(state: &AppState, args: SetStabilizationArgs) -> ToolResult {
+    use photonic_core::timeline::StabilizationCropMode;
+
+    tracing::debug!("tool: set_stabilization {}", args.clip_id);
+    let mut doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(mut spec) = clip.stabilization.clone() else {
+        return ToolResult::error("clip has no motion metadata; call import_motion_metadata first");
+    };
+
+    if let Some(v) = args.smoothness {
+        spec.smoothness = v;
+    }
+    if let Some(v) = args.horizon_lock {
+        spec.horizon_lock = v;
+    }
+    if let Some(v) = args.max_zoom {
+        spec.max_zoom = v;
+    }
+    if let Some(m) = args.crop_mode.as_deref() {
+        spec.crop_mode = match m {
+            "static_safe" => StabilizationCropMode::StaticSafe,
+            "dynamic" => StabilizationCropMode::Dynamic,
+            "transparent_edges" => StabilizationCropMode::TransparentEdges,
+            other => {
+                return ToolResult::error(format!(
+                "unknown crop_mode {other:?}; expected static_safe, dynamic or transparent_edges"
+            ))
+            }
+        };
+    }
+    // Changing the recipe invalidates any prior analysis: the corrections were
+    // computed for the old settings.
+    if args.smoothness.is_some()
+        || args.horizon_lock.is_some()
+        || args.max_zoom.is_some()
+        || args.crop_mode.is_some()
+    {
+        spec.analysis_key = None;
+    }
+    // Reject rather than clamp (22 §6.6).
+    if let Err(e) = spec.validate() {
+        return ToolResult::error(format!("invalid stabilization recipe: {e:?}"));
+    }
+
+    let mut new_clip = clip.clone();
+    new_clip.stabilization = Some(spec);
+    match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
+        Ok(cmd) => {
+            history.execute_discrete(Command::Timeline(cmd), &mut doc);
+            ToolResult::text("Updated stabilization recipe; re-run analyze_stabilization")
+        }
+        Err(e) => map_edit_error(e),
+    }
+}
+
+/// Run the analysis and report its diagnostics.
+///
+/// Synchronous rather than a background job: the integration is a linear pass
+/// over the motion series and completes in well under a second for any
+/// realistic clip, so a job handle would add a polling round-trip and buy
+/// nothing. If a corpus ever proves otherwise this moves onto `JobRegistry`
+/// without changing the tool's contract.
+pub async fn analyze_stabilization(state: &AppState, args: AnalyzeStabilizationArgs) -> ToolResult {
+    use photonic_video::graph::stabilize::{analyze_clip, geometry_for_clip};
+
+    tracing::debug!("tool: analyze_stabilization {}", args.clip_id);
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(spec) = clip.stabilization.clone() else {
+        return ToolResult::error("clip has no motion metadata; call import_motion_metadata first");
+    };
+    let Some(seq) = project.sequences.get(&seq_id) else {
+        return ToolResult::error("sequence not found");
+    };
+    let format = seq.format();
+    let rate = seq.frame_rate;
+    let fps = rate.num as f64 / rate.den.max(1) as f64;
+    let geom = geometry_for_clip(format.width as f64, format.height as f64, fps, clip);
+
+    match analyze_clip(&spec, geom, |p| p.to_path_buf()) {
+        Ok(a) => {
+            let d = &a.diagnostics;
+            let mut out = format!(
+                "Analyzed {} frames at {:.3} fps.\n\
+                 Gyro bias: {}\n\
+                 Sample rate: {}\n\
+                 Clock: {:.1} ppm drift over {} anchor(s)\n\
+                 Max required zoom: {:.3}x",
+                a.frames.len(),
+                a.fps,
+                if d.bias.estimated {
+                    format!(
+                        "[{:.5}, {:.5}, {:.5}] rad/s",
+                        d.bias.bias_rad_s[0], d.bias.bias_rad_s[1], d.bias.bias_rad_s[2]
+                    )
+                } else {
+                    "not estimated (no sufficiently still span)".into()
+                },
+                d.sample_rate_hz
+                    .map(|hz| format!("{hz:.0} Hz"))
+                    .unwrap_or_else(|| "unknown".into()),
+                d.clock_drift_ppm,
+                d.anchors_used,
+                d.max_required_zoom,
+            );
+            if let Some((first, last)) = d.infeasible_range {
+                out.push_str(&format!(
+                    "\nWARNING: frames {first}-{last} cannot be covered within max_zoom \
+                     {:.2}x; they will show exposed edges.",
+                    spec.max_zoom
+                ));
+            }
+            if d.horizon_lock_unavailable {
+                out.push_str(
+                    "\nWARNING: horizon lock is set but the motion source carries no \
+                     accelerometer data, so it has no effect.",
+                );
+            }
+            if let Some(c) = d.mean_gravity_confidence {
+                out.push_str(&format!("\nMean gravity confidence: {c:.2}"));
+            }
+            ToolResult::text(out)
+        }
+        Err(e) => ToolResult::error(format!("analysis failed: {e}")),
+    }
+}
+
+/// Report a clip's stabilization state without running anything.
+pub async fn get_stabilization_status(
+    state: &AppState,
+    args: GetStabilizationStatusArgs,
+) -> ToolResult {
+    use photonic_core::timeline::{LensProfileRef, MotionSourceRef};
+
+    let doc = state.document.lock().await;
+    let Some(project) = doc.timeline.as_ref() else {
+        return ToolResult::error("no timeline project");
+    };
+    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
+        return ToolResult::error(format!("clip {} not found", args.clip_id));
+    };
+    let Some(spec) = clip.stabilization.as_ref() else {
+        return ToolResult::text("not stabilized");
+    };
+    // Only the file *name* is reported, never the full path: 23 §9.4 keeps
+    // location-bearing detail out of default tool output.
+    let source = match &spec.binding.source {
+        MotionSourceRef::Embedded { .. } => "embedded".to_string(),
+        MotionSourceRef::Sidecar { path, format, .. } => format!(
+            "{} ({format:?})",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<unnamed>".into())
+        ),
+    };
+    let lens = match &spec.binding.lens {
+        LensProfileRef::RotationOnly => "rotation only (uncalibrated)".to_string(),
+        LensProfileRef::UserFile { path, .. } => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unnamed>".into()),
+        LensProfileRef::Bundled { id } => format!("bundled {id}"),
+    };
+    ToolResult::text(format!(
+        "source: {source}\nlens: {lens}\nsmoothness: {:.2}\nhorizon_lock: {:.2}\n\
+         crop_mode: {:?}\nmax_zoom: {:.2}\nanalyzed: {}\nsync anchors: {}",
+        spec.smoothness,
+        spec.horizon_lock,
+        spec.crop_mode,
+        spec.max_zoom,
+        spec.analysis_key.is_some(),
+        spec.binding.sync.anchors.len(),
+    ))
 }
 
 #[cfg(test)]
@@ -12865,318 +13150,4 @@ mod tests {
         .await;
         assert_eq!(data(&r)["error_code"], json!("NotSupportedV1"));
     }
-}
-
-// ── D-12 gyro stabilization (22 §6.5) ───────────────────────────────────────
-
-/// Bind a gyro/IMU sidecar to a clip.
-///
-/// Parses eagerly so a bad file is rejected here, with a located error, rather
-/// than surfacing later as a failed analysis (22 §6.6: hard-fail, never guess).
-/// The response reports what the file actually contains — sample count, rate,
-/// and whether it carries accelerometer data — because "horizon lock does
-/// nothing" is otherwise a mystery.
-///
-/// Device serials, GPS and precise timestamps are never echoed (23 §9.4).
-pub async fn import_motion_metadata(
-    state: &AppState,
-    args: ImportMotionMetadataArgs,
-) -> ToolResult {
-    use photonic_core::timeline::{
-        LensProfileRef, MotionBinding, MotionSourceRef, StabilizationSpec,
-    };
-
-    tracing::debug!("tool: import_motion_metadata {}", args.clip_id);
-    // 28: every filesystem read goes through the path policy.
-    let path = match crate::path_guard::check_path(
-        state,
-        &args.path,
-        photonic_core::PathAccess::Read,
-    ) {
-        Ok(p) => p,
-        Err(denied) => return denied,
-    };
-    let series = match photonic_video::media::parse_motion(&path) {
-        Ok(s) => s,
-        Err(e) => return ToolResult::error(format!("motion metadata rejected: {e}")),
-    };
-
-    let lens = match args.lens_profile_path.as_deref() {
-        Some(p) => {
-            let lp = match crate::path_guard::check_path(
-                state,
-                p,
-                photonic_core::PathAccess::Read,
-            ) {
-                Ok(v) => v,
-                Err(denied) => return denied,
-            };
-            // Validate now, for the same reason as the motion file.
-            if let Err(e) = photonic_video::graph::stabilize::LensProfile::from_path(&lp) {
-                return ToolResult::error(format!("lens profile rejected: {e}"));
-            }
-            LensProfileRef::UserFile {
-                path: lp,
-                rel_path: None,
-            }
-        }
-        None => LensProfileRef::RotationOnly,
-    };
-
-    let mut doc = state.document.lock().await;
-    let mut history = state.history.lock().await;
-    let Some(project) = doc.timeline.as_ref() else {
-        return ToolResult::error("no timeline project");
-    };
-    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-
-    let mut spec = StabilizationSpec::new(MotionBinding {
-        source: MotionSourceRef::Sidecar {
-            path,
-            rel_path: None,
-            format: series.format,
-        },
-        sync: Default::default(),
-        lens,
-    });
-    if let Some(v) = args.smoothness {
-        spec.smoothness = v;
-    }
-    if let Some(v) = args.horizon_lock {
-        spec.horizon_lock = v;
-    }
-    if let Err(e) = spec.validate() {
-        return ToolResult::error(format!("invalid stabilization recipe: {e:?}"));
-    }
-
-    let mut new_clip = clip.clone();
-    new_clip.stabilization = Some(spec);
-    match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
-        Ok(cmd) => {
-            history.execute_discrete(Command::Timeline(cmd), &mut doc);
-            ToolResult::text(format!(
-                "Bound motion metadata: {} samples{}{}. Run analyze_stabilization next.",
-                series.samples.len(),
-                series
-                    .sample_rate_hz()
-                    .map(|hz| format!(", {hz:.0} Hz"))
-                    .unwrap_or_default(),
-                if series.has_accel() {
-                    ", with accelerometer"
-                } else {
-                    ", gyro only (horizon lock will have no effect)"
-                },
-            ))
-        }
-        Err(e) => map_edit_error(e),
-    }
-}
-
-/// Update an existing stabilization recipe. Only supplied fields change.
-pub async fn set_stabilization(state: &AppState, args: SetStabilizationArgs) -> ToolResult {
-    use photonic_core::timeline::StabilizationCropMode;
-
-    tracing::debug!("tool: set_stabilization {}", args.clip_id);
-    let mut doc = state.document.lock().await;
-    let mut history = state.history.lock().await;
-    let Some(project) = doc.timeline.as_ref() else {
-        return ToolResult::error("no timeline project");
-    };
-    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-    let Some(mut spec) = clip.stabilization.clone() else {
-        return ToolResult::error(
-            "clip has no motion metadata; call import_motion_metadata first",
-        );
-    };
-
-    if let Some(v) = args.smoothness {
-        spec.smoothness = v;
-    }
-    if let Some(v) = args.horizon_lock {
-        spec.horizon_lock = v;
-    }
-    if let Some(v) = args.max_zoom {
-        spec.max_zoom = v;
-    }
-    if let Some(m) = args.crop_mode.as_deref() {
-        spec.crop_mode = match m {
-            "static_safe" => StabilizationCropMode::StaticSafe,
-            "dynamic" => StabilizationCropMode::Dynamic,
-            "transparent_edges" => StabilizationCropMode::TransparentEdges,
-            other => {
-                return ToolResult::error(format!(
-                    "unknown crop_mode {other:?}; expected static_safe, dynamic or transparent_edges"
-                ))
-            }
-        };
-    }
-    // Changing the recipe invalidates any prior analysis: the corrections were
-    // computed for the old settings.
-    if args.smoothness.is_some()
-        || args.horizon_lock.is_some()
-        || args.max_zoom.is_some()
-        || args.crop_mode.is_some()
-    {
-        spec.analysis_key = None;
-    }
-    // Reject rather than clamp (22 §6.6).
-    if let Err(e) = spec.validate() {
-        return ToolResult::error(format!("invalid stabilization recipe: {e:?}"));
-    }
-
-    let mut new_clip = clip.clone();
-    new_clip.stabilization = Some(spec);
-    match ops::set_clip_prop(project, seq_id, track_id, new_clip) {
-        Ok(cmd) => {
-            history.execute_discrete(Command::Timeline(cmd), &mut doc);
-            ToolResult::text("Updated stabilization recipe; re-run analyze_stabilization")
-        }
-        Err(e) => map_edit_error(e),
-    }
-}
-
-/// Run the analysis and report its diagnostics.
-///
-/// Synchronous rather than a background job: the integration is a linear pass
-/// over the motion series and completes in well under a second for any
-/// realistic clip, so a job handle would add a polling round-trip and buy
-/// nothing. If a corpus ever proves otherwise this moves onto `JobRegistry`
-/// without changing the tool's contract.
-pub async fn analyze_stabilization(
-    state: &AppState,
-    args: AnalyzeStabilizationArgs,
-) -> ToolResult {
-    use photonic_video::graph::stabilize::{analyze_clip, geometry_for_clip};
-
-    tracing::debug!("tool: analyze_stabilization {}", args.clip_id);
-    let doc = state.document.lock().await;
-    let Some(project) = doc.timeline.as_ref() else {
-        return ToolResult::error("no timeline project");
-    };
-    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-    let Some(spec) = clip.stabilization.clone() else {
-        return ToolResult::error(
-            "clip has no motion metadata; call import_motion_metadata first",
-        );
-    };
-    let Some(seq) = project.sequences.get(&seq_id) else {
-        return ToolResult::error("sequence not found");
-    };
-    let format = seq.format();
-    let rate = seq.frame_rate;
-    let fps = rate.num as f64 / rate.den.max(1) as f64;
-    let geom = geometry_for_clip(format.width as f64, format.height as f64, fps, clip);
-
-    match analyze_clip(&spec, geom, |p| p.to_path_buf()) {
-        Ok(a) => {
-            let d = &a.diagnostics;
-            let mut out = format!(
-                "Analyzed {} frames at {:.3} fps.\n\
-                 Gyro bias: {}\n\
-                 Sample rate: {}\n\
-                 Clock: {:.1} ppm drift over {} anchor(s)\n\
-                 Max required zoom: {:.3}x",
-                a.frames.len(),
-                a.fps,
-                if d.bias.estimated {
-                    format!(
-                        "[{:.5}, {:.5}, {:.5}] rad/s",
-                        d.bias.bias_rad_s[0], d.bias.bias_rad_s[1], d.bias.bias_rad_s[2]
-                    )
-                } else {
-                    "not estimated (no sufficiently still span)".into()
-                },
-                d.sample_rate_hz
-                    .map(|hz| format!("{hz:.0} Hz"))
-                    .unwrap_or_else(|| "unknown".into()),
-                d.clock_drift_ppm,
-                d.anchors_used,
-                d.max_required_zoom,
-            );
-            if let Some((first, last)) = d.infeasible_range {
-                out.push_str(&format!(
-                    "\nWARNING: frames {first}-{last} cannot be covered within max_zoom \
-                     {:.2}x; they will show exposed edges.",
-                    spec.max_zoom
-                ));
-            }
-            if d.horizon_lock_unavailable {
-                out.push_str(
-                    "\nWARNING: horizon lock is set but the motion source carries no \
-                     accelerometer data, so it has no effect.",
-                );
-            }
-            if let Some(c) = d.mean_gravity_confidence {
-                out.push_str(&format!("\nMean gravity confidence: {c:.2}"));
-            }
-            ToolResult::text(out)
-        }
-        Err(e) => ToolResult::error(format!("analysis failed: {e}")),
-    }
-}
-
-/// Report a clip's stabilization state without running anything.
-pub async fn get_stabilization_status(
-    state: &AppState,
-    args: GetStabilizationStatusArgs,
-) -> ToolResult {
-    use photonic_core::timeline::{LensProfileRef, MotionSourceRef};
-
-    let doc = state.document.lock().await;
-    let Some(project) = doc.timeline.as_ref() else {
-        return ToolResult::error("no timeline project");
-    };
-    let Some((seq_id, track_id)) = locate_clip(project, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-    let Some(clip) = find_clip(project, seq_id, track_id, args.clip_id) else {
-        return ToolResult::error(format!("clip {} not found", args.clip_id));
-    };
-    let Some(spec) = clip.stabilization.as_ref() else {
-        return ToolResult::text("not stabilized");
-    };
-    // Only the file *name* is reported, never the full path: 23 §9.4 keeps
-    // location-bearing detail out of default tool output.
-    let source = match &spec.binding.source {
-        MotionSourceRef::Embedded { .. } => "embedded".to_string(),
-        MotionSourceRef::Sidecar { path, format, .. } => format!(
-            "{} ({format:?})",
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "<unnamed>".into())
-        ),
-    };
-    let lens = match &spec.binding.lens {
-        LensProfileRef::RotationOnly => "rotation only (uncalibrated)".to_string(),
-        LensProfileRef::UserFile { path, .. } => path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "<unnamed>".into()),
-        LensProfileRef::Bundled { id } => format!("bundled {id}"),
-    };
-    ToolResult::text(format!(
-        "source: {source}\nlens: {lens}\nsmoothness: {:.2}\nhorizon_lock: {:.2}\n\
-         crop_mode: {:?}\nmax_zoom: {:.2}\nanalyzed: {}\nsync anchors: {}",
-        spec.smoothness,
-        spec.horizon_lock,
-        spec.crop_mode,
-        spec.max_zoom,
-        spec.analysis_key.is_some(),
-        spec.binding.sync.anchors.len(),
-    ))
 }

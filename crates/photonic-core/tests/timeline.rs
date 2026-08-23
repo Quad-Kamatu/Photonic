@@ -563,16 +563,13 @@ fn marker_category_crud_roundtrips() {
     assert!(ops::add_marker_category(d2.timeline.as_ref().unwrap(), fresh.clone()).is_err());
 
     // Editing an unknown category is an error, not a silent no-op.
-    assert_eq!(
-        ops::set_marker_category(
-            f.project(),
-            MarkerCategory::new("ghost", photonic_core::Color::rgb(0.0, 0.0, 0.0)),
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("NoMarkerCategory"),
-        true
-    );
+    assert!(ops::set_marker_category(
+        f.project(),
+        MarkerCategory::new("ghost", photonic_core::Color::rgb(0.0, 0.0, 0.0)),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("NoMarkerCategory"));
 }
 
 /// Deleting a category retargets every referencing marker, in BOTH scopes, as

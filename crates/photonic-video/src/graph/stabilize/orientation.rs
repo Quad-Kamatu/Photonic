@@ -113,7 +113,11 @@ pub fn estimate_bias(samples: &[MotionSample]) -> BiasEstimate {
     if eligible.is_empty() {
         return BiasEstimate::ZERO;
     }
-    eligible.sort_by(|a, b| a.var.partial_cmp(&b.var).unwrap_or(std::cmp::Ordering::Equal));
+    eligible.sort_by(|a, b| {
+        a.var
+            .partial_cmp(&b.var)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let take = (eligible.len() / 4).max(1);
     let mut bias = [0.0; 3];
     for w in &eligible[..take] {
@@ -324,12 +328,7 @@ pub fn gravity_confidence(accel_mps2: [f64; 3]) -> f64 {
 /// Only roll is corrected. Levelling pitch too would fight the operator's
 /// framing — pointing the camera down is a deliberate choice in a way that
 /// banking sideways usually is not.
-pub fn apply_horizon_lock(
-    q: DQuat,
-    accel_mps2: [f64; 3],
-    strength: f64,
-    confidence: f64,
-) -> DQuat {
+pub fn apply_horizon_lock(q: DQuat, accel_mps2: [f64; 3], strength: f64, confidence: f64) -> DQuat {
     let gain = strength.clamp(0.0, 1.0) * confidence.clamp(0.0, 1.0);
     if gain <= 0.0 {
         return q;
@@ -419,9 +418,7 @@ mod tests {
                 // gyro path is not silently preferred.
                 gyro_rad_s: [9.0, 9.0, 9.0],
                 accel_mps2: None,
-                orientation: Some([
-                    expect.x, expect.y, expect.z, expect.w,
-                ]),
+                orientation: Some([expect.x, expect.y, expect.z, expect.w]),
             })
             .collect();
         let curve = integrate(&s, &BiasEstimate::ZERO);
@@ -474,7 +471,11 @@ mod tests {
         let s = series(bias, 500.0, 5.0);
         let drifted = integrate(&s, &BiasEstimate::ZERO);
         let corrected = integrate(&s, &estimate_bias(&s));
-        let drift_angle = drifted.q[drifted.len() - 1].dot(DQuat::IDENTITY).abs().acos() * 2.0;
+        let drift_angle = drifted.q[drifted.len() - 1]
+            .dot(DQuat::IDENTITY)
+            .abs()
+            .acos()
+            * 2.0;
         let residual = corrected.q[corrected.len() - 1]
             .dot(DQuat::IDENTITY)
             .abs()
@@ -498,14 +499,19 @@ mod tests {
     #[test]
     fn bias_estimation_declines_on_too_few_samples() {
         assert_eq!(estimate_bias(&[]), BiasEstimate::ZERO);
-        assert_eq!(estimate_bias(&series([0.01; 3], 100.0, 0.01)), BiasEstimate::ZERO);
+        assert_eq!(
+            estimate_bias(&series([0.01; 3], 100.0, 0.01)),
+            BiasEstimate::ZERO
+        );
     }
 
     // ── smoothing ───────────────────────────────────────────────────────
 
     #[test]
     fn zero_smoothness_is_a_no_op() {
-        let q: Vec<DQuat> = (0..50).map(|i| DQuat::from_rotation_y(i as f64 * 0.01)).collect();
+        let q: Vec<DQuat> = (0..50)
+            .map(|i| DQuat::from_rotation_y(i as f64 * 0.01))
+            .collect();
         assert_eq!(smooth(&q, 1.0 / 60.0, 0.0), q);
     }
 
@@ -522,7 +528,12 @@ mod tests {
         };
         let noisy: Vec<DQuat> = (0..600)
             .map(|_| {
-                DQuat::from_euler(glam::EulerRot::XYZ, rng() * 0.05, rng() * 0.05, rng() * 0.05)
+                DQuat::from_euler(
+                    glam::EulerRot::XYZ,
+                    rng() * 0.05,
+                    rng() * 0.05,
+                    rng() * 0.05,
+                )
             })
             .collect();
         let out = smooth(&noisy, 1.0 / 60.0, 0.8);
@@ -545,14 +556,19 @@ mod tests {
             .map(|q| q.dot(DQuat::IDENTITY).abs().clamp(-1.0, 1.0).acos() * 2.0)
             .sum::<f64>()
             / out.len() as f64;
-        assert!(mean_angle < 0.05, "smoothed pose drifted by {mean_angle} rad");
+        assert!(
+            mean_angle < 0.05,
+            "smoothed pose drifted by {mean_angle} rad"
+        );
     }
 
     #[test]
     fn smoothing_has_no_phase_lag_on_a_ramp() {
         // A causal-only filter would trail a steady ramp by a fixed offset.
         // The forward-backward construction must not.
-        let q: Vec<DQuat> = (0..400).map(|i| DQuat::from_rotation_y(i as f64 * 0.002)).collect();
+        let q: Vec<DQuat> = (0..400)
+            .map(|i| DQuat::from_rotation_y(i as f64 * 0.002))
+            .collect();
         let out = smooth(&q, 1.0 / 60.0, 0.6);
         let mid = q.len() / 2;
         let err = out[mid].dot(q[mid]).abs().clamp(-1.0, 1.0).acos() * 2.0;
@@ -602,7 +618,12 @@ mod tests {
     fn horizon_lock_ignores_untrustworthy_gravity() {
         // Under 2 g the accelerometer is measuring the manoeuvre, not gravity.
         let q = DQuat::from_rotation_z(0.3);
-        let out = apply_horizon_lock(q, [0.0, G0 * 2.0, 0.0], 1.0, gravity_confidence([0.0, G0 * 2.0, 0.0]));
+        let out = apply_horizon_lock(
+            q,
+            [0.0, G0 * 2.0, 0.0],
+            1.0,
+            gravity_confidence([0.0, G0 * 2.0, 0.0]),
+        );
         assert!(out.dot(q).abs() > 1.0 - 1e-12, "must be a no-op");
     }
 

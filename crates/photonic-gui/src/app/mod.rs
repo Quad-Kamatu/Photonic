@@ -671,20 +671,12 @@ pub struct ClaudeChatState {
 }
 
 /// State for the floating MCP audit log panel.
+#[derive(Default)]
 pub struct AuditPanelState {
     /// Shared MCP audit log (set by main.rs after construction).
     pub log: Option<Arc<std::sync::Mutex<photonic_core::AuditLog>>>,
     pub panel_open: bool,
     pub filter: String,
-}
-impl Default for AuditPanelState {
-    fn default() -> Self {
-        Self {
-            log: None,
-            panel_open: false,
-            filter: String::new(),
-        }
-    }
 }
 
 /// State for the diff highlight overlay shown after AI edits.
@@ -3498,9 +3490,9 @@ impl PhotonicApp {
         // when the context returns) via `effective_open` — no state churn.
         let node_sel_count = doc.selection.node_ids.len();
         let clip_sel_count = self.timeline_selection.len();
-        let effective_open =
-            self.open_drawer
-                .filter(|g| g.has_content(node_sel_count, clip_sel_count));
+        let effective_open = self
+            .open_drawer
+            .filter(|g| g.has_content(node_sel_count, clip_sel_count));
         // ── Rail / drawer card layout ─────────────────────────────────────────
         // Shared knobs for the floating rail + drawer "cards". Both use the same
         // corner radius, border, and vertical float; the rail stays flush with
@@ -3513,12 +3505,12 @@ impl PhotonicApp {
         const RAIL_PAD_Y: f32 = 4.0; // rail inner top/bottom padding
         const RAIL_GAP: f32 = 4.0; // gap on the rail's right, before the drawer
         const DRAWER_GAP: f32 = 3.0; // gap on the drawer's left, after the rail
-        // Gap on the drawer's right, off the canvas. Kept at 0 so the floating
-        // card does not leave a pure-black window-fill strip between the left
-        // drawer and the preview — that strip stacked with the monitor's
-        // pillarbox and read as a stubborn "black box" when flipping tabs.
-        // Top/bottom float (`CARD_FLOAT_Y`) still gives the card its rounded
-        // corners against the window fill.
+                                     // Gap on the drawer's right, off the canvas. Kept at 0 so the floating
+                                     // card does not leave a pure-black window-fill strip between the left
+                                     // drawer and the preview — that strip stacked with the monitor's
+                                     // pillarbox and read as a stubborn "black box" when flipping tabs.
+                                     // Top/bottom float (`CARD_FLOAT_Y`) still gives the card its rounded
+                                     // corners against the window fill.
         const DRAWER_FLOAT_X: f32 = 0.0;
         const DRAWER_PAD_X: f32 = 10.0; // drawer inner left/right content gutter
         const DRAWER_PAD_Y: f32 = 8.0; // drawer inner top/bottom content gutter
@@ -3649,9 +3641,9 @@ impl PhotonicApp {
         // `animate_bool_with_time_and_easing` requests repaint while in flight.
         // Reduced-motion makes the transition instant.
         // Recompute after the rail click so opening/closing animates this frame.
-        let effective_open =
-            self.open_drawer
-                .filter(|g| g.has_content(node_sel_count, clip_sel_count));
+        let effective_open = self
+            .open_drawer
+            .filter(|g| g.has_content(node_sel_count, clip_sel_count));
         let drawer_open = effective_open.is_some();
         let anim_time = if self.prefs.reduced_motion { 0.0 } else { 0.18 };
         let t = ctx.animate_bool_with_time_and_easing(
@@ -3765,29 +3757,31 @@ impl PhotonicApp {
                     .auto_shrink([false, false])
                     .drag_to_scroll(!speed_dragging)
                     .show(ui, |ui| {
-                    if render_group == DrawerGroup::Tools {
-                        // Tools drawer: render the tool palette + apply selection.
-                        if let Some(tool) =
-                            panels::draw_tools_panel(ui, self.active_tool, &self.prefs.pinned_tools)
-                        {
-                            self.pen_points.clear();
-                            self.pencil_points.clear();
-                            self.lasso_points.clear();
-                            self.isolated_group = None;
-                            self.clear_point_edit();
-                            self.active_tool = tool;
-                            if tool != Tool::Select
-                                && tool != Tool::DirectSelect
-                                && tool != Tool::ProportionalMove
-                            {
-                                self.selected_id = None;
-                                doc.selection.clear();
+                        if render_group == DrawerGroup::Tools {
+                            // Tools drawer: render the tool palette + apply selection.
+                            if let Some(tool) = panels::draw_tools_panel(
+                                ui,
+                                self.active_tool,
+                                &self.prefs.pinned_tools,
+                            ) {
+                                self.pen_points.clear();
+                                self.pencil_points.clear();
+                                self.lasso_points.clear();
+                                self.isolated_group = None;
+                                self.clear_point_edit();
+                                self.active_tool = tool;
+                                if tool != Tool::Select
+                                    && tool != Tool::DirectSelect
+                                    && tool != Tool::ProportionalMove
+                                {
+                                    self.selected_id = None;
+                                    doc.selection.clear();
+                                }
                             }
+                            return;
                         }
-                        return;
-                    }
-                    self.draw_property_drawer_content(ui, doc, history, render_group);
-                });
+                        self.draw_property_drawer_content(ui, doc, history, render_group);
+                    });
             });
             // Capture a user resize of the fully-open drawer so it persists
             // (in-memory now; flushed to disk on the next toggle/close). Only a
@@ -4924,7 +4918,7 @@ impl PhotonicApp {
                                 let area = handle_rect.union(name_rect).expand(3.0);
                                 let hovered_area = ui
                                     .input(|i| i.pointer.hover_pos())
-                                    .map_or(false, |p| area.contains(p));
+                                    .is_some_and(|p| area.contains(p));
 
                                 // Name → select / rename, with a text-edit cursor.
                                 let nresp = ui.interact(
@@ -5058,7 +5052,7 @@ impl PhotonicApp {
                                             let diff = tx - mx;
                                             if diff.abs() < thresh
                                                 && best_dx
-                                                    .map_or(true, |bb: f64| diff.abs() < bb.abs())
+                                                    .is_none_or(|bb: f64| diff.abs() < bb.abs())
                                             {
                                                 best_dx = Some(diff);
                                                 guide_x = Some(tx);
@@ -5070,7 +5064,7 @@ impl PhotonicApp {
                                             let diff = ty - my;
                                             if diff.abs() < thresh
                                                 && best_dy
-                                                    .map_or(true, |bb: f64| diff.abs() < bb.abs())
+                                                    .is_none_or(|bb: f64| diff.abs() < bb.abs())
                                             {
                                                 best_dy = Some(diff);
                                                 guide_y = Some(ty);
@@ -5128,7 +5122,7 @@ impl PhotonicApp {
                                                 let a = t - nx;
                                                 if a.abs() < thresh
                                                     && best_adj
-                                                        .map_or(true, |b: f64| a.abs() < b.abs())
+                                                        .is_none_or(|b: f64| a.abs() < b.abs())
                                                 {
                                                     best_adj = Some(a);
                                                     snap_g = Some(g);
@@ -5187,7 +5181,7 @@ impl PhotonicApp {
                                                 let a = t - ny;
                                                 if a.abs() < thresh
                                                     && best_adj
-                                                        .map_or(true, |b: f64| a.abs() < b.abs())
+                                                        .is_none_or(|b: f64| a.abs() < b.abs())
                                                 {
                                                     best_adj = Some(a);
                                                     snap_g = Some(g);
@@ -5659,7 +5653,7 @@ impl PhotonicApp {
                         let on_peek = self
                             .radial_wheel
                             .as_ref()
-                            .map_or(false, |w| w.peek_hovered.is_some());
+                            .is_some_and(|w| w.peek_hovered.is_some());
                         if on_peek {
                             if let Some(ref mut wheel) = self.radial_wheel {
                                 wheel.jump_peek(now);
@@ -6067,7 +6061,7 @@ impl PhotonicApp {
                                             pn.path_data.split_at_point(lpt.x, lpt.y)
                                         {
                                             let layer_id = node.layer_id;
-                                            let t = node.transform.clone();
+                                            let t = node.transform;
                                             let opacity = node.opacity;
                                             let blend_mode = node.blend_mode;
                                             let name_base = node.name.clone();
@@ -6082,7 +6076,7 @@ impl PhotonicApp {
                                                     },
                                                 ),
                                             );
-                                            na.transform = t.clone();
+                                            na.transform = t;
                                             na.opacity = opacity;
                                             na.blend_mode = blend_mode;
 
@@ -6368,7 +6362,7 @@ impl PhotonicApp {
                             }
                             if let Ok(path) = PathData::from_svg(&svg) {
                                 let num = doc.node_count() + 1;
-                                let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
+                                let stroke_arg = self.prefs.default_stroke_enabled.then_some({
                                     (
                                         self.prefs.default_stroke_color,
                                         self.prefs.default_stroke_width,
@@ -6500,7 +6494,7 @@ impl PhotonicApp {
                         };
                         if (ex - sx).abs() > 2.0 || (ey - sy).abs() > 2.0 {
                             if let Some(path) = self.build_shape(bsx, bsy, bex, bey) {
-                                let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
+                                let stroke_arg = self.prefs.default_stroke_enabled.then_some({
                                     (
                                         self.prefs.default_stroke_color,
                                         self.prefs.default_stroke_width,
@@ -6525,7 +6519,7 @@ impl PhotonicApp {
                         if let Some(path) =
                             self.build_shape(cx - 50.0, cy - 50.0, cx + 50.0, cy + 50.0)
                         {
-                            let stroke_arg = self.prefs.default_stroke_enabled.then(|| {
+                            let stroke_arg = self.prefs.default_stroke_enabled.then_some({
                                 (
                                     self.prefs.default_stroke_color,
                                     self.prefs.default_stroke_width,

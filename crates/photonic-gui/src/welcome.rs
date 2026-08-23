@@ -849,6 +849,12 @@ pub struct WelcomeState {
     disk_scanned: bool,
 }
 
+impl Default for WelcomeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WelcomeState {
     pub fn new() -> Self {
         Self {

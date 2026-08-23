@@ -155,10 +155,11 @@ mod tests {
 
     /// `Limits` that clear every limit-gated requirement.
     fn good_limits() -> wgpu::Limits {
-        let mut l = wgpu::Limits::default();
-        l.max_texture_dimension_2d = MIN_TEXTURE_DIMENSION_2D;
-        l.max_storage_textures_per_shader_stage = 1;
-        l
+        wgpu::Limits {
+            max_texture_dimension_2d: MIN_TEXTURE_DIMENSION_2D,
+            max_storage_textures_per_shader_stage: 1,
+            ..Default::default()
+        }
     }
 
     #[test]

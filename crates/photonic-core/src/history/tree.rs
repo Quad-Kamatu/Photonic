@@ -210,9 +210,9 @@ impl CommandHistory {
     pub(crate) fn ancestor_edges(&self, mut id: u64) -> Vec<u64> {
         let mut out = vec![];
         while let Some(node) = self.nodes.get(&id) {
-            if node.parent.is_some() {
+            if let Some(parent) = node.parent {
                 out.push(id);
-                id = node.parent.unwrap();
+                id = parent;
             } else {
                 break;
             }
@@ -353,7 +353,7 @@ impl CommandHistory {
                     .unwrap_or(HistoryEntryKind::Root),
             })
             .collect();
-        out.sort_by(|a, b| b.id.cmp(&a.id));
+        out.sort_by_key(|entry| std::cmp::Reverse(entry.id));
         out
     }
 

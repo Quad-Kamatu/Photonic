@@ -45,7 +45,7 @@ fn main() {
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     for (name, doc) in fixtures() {
-        let dir = root.join(&name);
+        let dir = root.join(name);
         std::fs::create_dir_all(dir.join("expected")).expect("create case dir");
         let json = save_photon(&doc, None).expect("serialize fixture");
         std::fs::write(dir.join("project.photon"), json).expect("write project.photon");

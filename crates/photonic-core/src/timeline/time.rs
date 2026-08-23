@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn nondrop_round_trips_through_parse() {
         let fr = FrameRate::FPS_30;
-        let t = Tick(fr.ticks_per_frame().0 * (1 * 3600 * 30 + 2 * 60 * 30 + 3 * 30 + 4));
+        let t = Tick(fr.ticks_per_frame().0 * (3600 * 30 + 2 * 60 * 30 + 3 * 30 + 4));
         let tc = Timecode::from_frame_index(fr.frame_at(t), fr, false);
         assert_eq!(tc.format(), "01:02:03:04");
         assert!(!tc.drop_frame);

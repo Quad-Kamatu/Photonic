@@ -1123,10 +1123,7 @@ impl Mixer {
         // 31 §3: pre-sync chains so latency_samples is current, then equalise
         // every track path to max_track_latency before the master sum.
         for track in tracks.iter() {
-            let fx = self
-                .track_fx
-                .entry(track.id)
-                .or_insert_with(FxChainState::new);
+            let fx = self.track_fx.entry(track.id).or_default();
             if let Some(i) = fx.sync(&track.audio.fx_chain) {
                 fx.reset_from(i, AudioDiscontinuity::GraphChanged);
                 master_needs_reset = true;
@@ -1216,10 +1213,7 @@ impl Mixer {
             }
 
             // ── 31 §8 step 2: process the (already-synced) track fx chain. ──
-            let fx = self
-                .track_fx
-                .entry(track.id)
-                .or_insert_with(FxChainState::new);
+            let fx = self.track_fx.entry(track.id).or_default();
             fx.set_block_params(&track.audio.fx_chain, block_start_tick);
             fx.process_block(&track.audio.fx_chain, sr, &mut self.track_bus_scratch);
             let track_lat = fx.latency_samples(&track.audio.fx_chain);

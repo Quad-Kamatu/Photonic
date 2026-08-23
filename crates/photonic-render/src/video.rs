@@ -5,7 +5,8 @@
 //! share the constants in [`crate::color`] (§4.4 rule 1), and
 //! `wgsl_yuv_constants_match_rust` asserts the shader source contains each one.
 
-use wgpu::util::DeviceExt;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::color::{Colorimetry, Matrix, Range};
 use crate::pipeline::WORKING_FORMAT;
@@ -273,15 +274,9 @@ fn fullscreen_pipeline(
     })
 }
 
-fn r8_plane(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    w: u32,
-    h: u32,
-    data: &[u8],
-) -> wgpu::Texture {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("yuv_plane"),
+fn r8_texture(device: &wgpu::Device, w: u32, h: u32, label: &'static str) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
         size: wgpu::Extent3d {
             width: w,
             height: h,
@@ -293,7 +288,10 @@ fn r8_plane(
         format: wgpu::TextureFormat::R8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
-    });
+    })
+}
+
+fn write_r8_plane(queue: &wgpu::Queue, tex: &wgpu::Texture, w: u32, h: u32, data: &[u8]) {
     queue.write_texture(
         tex.as_image_copy(),
         data,
@@ -308,7 +306,162 @@ fn r8_plane(
             depth_or_array_layers: 1,
         },
     );
-    tex
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum YuvUploadLayout {
+    Yuv420 { width: u32, height: u32 },
+    Yuva444 { width: u32, height: u32 },
+}
+
+impl YuvUploadLayout {
+    fn from_planes(planes: &YuvPlanes, width: u32, height: u32) -> Self {
+        match planes {
+            YuvPlanes::Yuv420 { .. } => Self::Yuv420 { width, height },
+            YuvPlanes::Yuva444 { .. } => Self::Yuva444 { width, height },
+        }
+    }
+
+    fn has_alpha(self) -> u32 {
+        match self {
+            Self::Yuv420 { .. } => 0,
+            Self::Yuva444 { .. } => 1,
+        }
+    }
+}
+
+struct YuvUploadScratch {
+    y: wgpu::Texture,
+    cb: wgpu::Texture,
+    cr: wgpu::Texture,
+    a: wgpu::Texture,
+    params: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    last_used: u64,
+}
+
+struct YuvUploadScratchCache {
+    entries: HashMap<YuvUploadLayout, YuvUploadScratch>,
+    use_counter: u64,
+}
+
+/// Decoded clips commonly keep one source layout for a long run. Four layouts
+/// cover normal A/B editing without letting a project with mixed source sizes
+/// retain unbounded GPU upload surfaces.
+const YUV_UPLOAD_SCRATCH_CAP: usize = 4;
+
+impl YuvUploadScratchCache {
+    fn get_or_create<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        bgl: &wgpu::BindGroupLayout,
+        nearest: &wgpu::Sampler,
+        linear: &wgpu::Sampler,
+        layout: YuvUploadLayout,
+    ) -> &'a mut YuvUploadScratch {
+        self.use_counter = self.use_counter.wrapping_add(1);
+        let stamp = self.use_counter;
+        if !self.entries.contains_key(&layout) {
+            if self.entries.len() >= YUV_UPLOAD_SCRATCH_CAP {
+                if let Some(victim) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, scratch)| scratch.last_used)
+                    .map(|(layout, _)| *layout)
+                {
+                    self.entries.remove(&victim);
+                }
+            }
+            self.entries.insert(
+                layout,
+                YuvUploadScratch::new(device, bgl, nearest, linear, layout, stamp),
+            );
+        }
+        let scratch = self
+            .entries
+            .get_mut(&layout)
+            .expect("scratch inserted or already present");
+        scratch.last_used = stamp;
+        scratch
+    }
+}
+
+impl YuvUploadScratch {
+    fn new(
+        device: &wgpu::Device,
+        bgl: &wgpu::BindGroupLayout,
+        nearest: &wgpu::Sampler,
+        linear: &wgpu::Sampler,
+        layout: YuvUploadLayout,
+        last_used: u64,
+    ) -> Self {
+        let (w, h) = match layout {
+            YuvUploadLayout::Yuv420 { width, height }
+            | YuvUploadLayout::Yuva444 { width, height } => (width, height),
+        };
+        let (cw, ch) = match layout {
+            YuvUploadLayout::Yuv420 { .. } => (w.div_ceil(2), h.div_ceil(2)),
+            YuvUploadLayout::Yuva444 { .. } => (w, h),
+        };
+        let y = r8_texture(device, w, h, "yuv_plane_y");
+        let cb = r8_texture(device, cw, ch, "yuv_plane_cb");
+        let cr = r8_texture(device, cw, ch, "yuv_plane_cr");
+        // The non-alpha path still binds this texture, but never samples it.
+        let a = match layout {
+            YuvUploadLayout::Yuv420 { .. } => r8_texture(device, 1, 1, "yuv_plane_a_dummy"),
+            YuvUploadLayout::Yuva444 { .. } => r8_texture(device, w, h, "yuv_plane_a"),
+        };
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("yuv_params"),
+            size: std::mem::size_of::<YuvParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let v = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("yuv_bg"),
+            layout: bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&v(&y)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&v(&cb)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&v(&cr)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&v(&a)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(nearest),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        });
+        Self {
+            y,
+            cb,
+            cr,
+            a,
+            params,
+            bind,
+            last_used,
+        }
+    }
 }
 
 /// Persistent YUV→working conversion resources for one wgpu device.
@@ -317,6 +470,10 @@ pub struct YuvConverter {
     pipeline: wgpu::RenderPipeline,
     nearest: wgpu::Sampler,
     linear: wgpu::Sampler,
+    /// Reuses upload-side resources across cache misses. The mutex makes the
+    /// write + submission sequence atomic if a caller shares a converter; each
+    /// conversion submits before another can overwrite its source planes.
+    scratch: Mutex<YuvUploadScratchCache>,
 }
 
 impl YuvConverter {
@@ -343,6 +500,10 @@ impl YuvConverter {
             pipeline,
             nearest,
             linear,
+            scratch: Mutex::new(YuvUploadScratchCache {
+                entries: HashMap::new(),
+                use_counter: 0,
+            }),
         }
     }
 
@@ -357,28 +518,30 @@ impl YuvConverter {
     ) -> wgpu::Texture {
         let (w, h) = planes.dims();
         let (w, h) = (w.max(1), h.max(1));
+        self.convert_to_size(device, queue, planes, colorimetry, (w, h))
+    }
 
-        // Plane textures.
-        let (y_tex, cb_tex, cr_tex, a_tex, has_alpha) = match *planes {
-            YuvPlanes::Yuv420 { y, cb, cr, .. } => {
-                let cw = w.div_ceil(2);
-                let ch = h.div_ceil(2);
-                (
-                    r8_plane(device, queue, w, h, y),
-                    r8_plane(device, queue, cw, ch, cb),
-                    r8_plane(device, queue, cw, ch, cr),
-                    r8_plane(device, queue, 1, 1, &[255]), // dummy, unsampled
-                    0u32,
-                )
-            }
-            YuvPlanes::Yuva444 { y, cb, cr, a, .. } => (
-                r8_plane(device, queue, w, h, y),
-                r8_plane(device, queue, w, h, cb),
-                r8_plane(device, queue, w, h, cr),
-                r8_plane(device, queue, w, h, a),
-                1u32,
-            ),
-        };
+    /// Like [`Self::convert`], but writes the logical source image into the
+    /// upper-left region of a larger working texture. Preview graph textures
+    /// use 64px pool buckets; rendering directly into that bucket avoids a
+    /// second full-frame working texture plus a GPU copy for every cache miss.
+    ///
+    /// `output_size` must cover the source dimensions. The remaining texture
+    /// area is transparent and is outside the logical frame region.
+    pub fn convert_to_size(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        planes: &YuvPlanes,
+        colorimetry: Colorimetry,
+        output_size: (u32, u32),
+    ) -> wgpu::Texture {
+        let (w, h) = planes.dims();
+        let (w, h) = (w.max(1), h.max(1));
+        let (out_w, out_h) = (output_size.0.max(w), output_size.1.max(h));
+
+        let layout = YuvUploadLayout::from_planes(planes, w, h);
+        let has_alpha = layout.has_alpha();
 
         let params = YuvParams {
             matrix_id: match colorimetry.matrix {
@@ -392,53 +555,35 @@ impl YuvConverter {
             has_alpha,
             _pad: 0,
         };
-        let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("yuv_params"),
-            contents: bytemuck::bytes_of(&params),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
-        let v = |t: &wgpu::Texture| t.create_view(&Default::default());
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("yuv_bg"),
-            layout: &self.bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&v(&y_tex)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&v(&cb_tex)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&v(&cr_tex)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&v(&a_tex)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.nearest),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(&self.linear),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: pbuf.as_entire_binding(),
-                },
-            ],
-        });
+        // Queue writes and the conversion submission under one scratch lock.
+        // This preserves the queue order when callers share a converter: a
+        // later frame cannot overwrite the reused upload textures before this
+        // frame's render pass has been submitted.
+        let mut scratch_cache = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch =
+            scratch_cache.get_or_create(device, &self.bgl, &self.nearest, &self.linear, layout);
+        match *planes {
+            YuvPlanes::Yuv420 { y, cb, cr, .. } => {
+                let cw = w.div_ceil(2);
+                let ch = h.div_ceil(2);
+                write_r8_plane(queue, &scratch.y, w, h, y);
+                write_r8_plane(queue, &scratch.cb, cw, ch, cb);
+                write_r8_plane(queue, &scratch.cr, cw, ch, cr);
+            }
+            YuvPlanes::Yuva444 { y, cb, cr, a, .. } => {
+                write_r8_plane(queue, &scratch.y, w, h, y);
+                write_r8_plane(queue, &scratch.cb, w, h, cb);
+                write_r8_plane(queue, &scratch.cr, w, h, cr);
+                write_r8_plane(queue, &scratch.a, w, h, a);
+            }
+        }
+        queue.write_buffer(&scratch.params, 0, bytemuck::bytes_of(&params));
 
         let out = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("yuv_working"),
             size: wgpu::Extent3d {
-                width: w,
-                height: h,
+                width: out_w,
+                height: out_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -468,11 +613,25 @@ impl YuvConverter {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, &scratch.bind, &[]);
+            // The source planes use logical-size UVs. Restrict rasterization to
+            // that logical rectangle so a padded pool bucket does not stretch
+            // the image into its transparent margin.
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
             pass.draw(0..6, 0..1);
         }
         queue.submit([enc.finish()]);
+        drop(scratch_cache);
         out
+    }
+
+    #[cfg(test)]
+    fn scratch_layout_count(&self) -> usize {
+        self.scratch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .len()
     }
 }
 
@@ -841,6 +1000,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A source frame may be rendered directly into a larger evaluator pool
+    /// bucket. Its logical pixels must stay unchanged rather than stretching to
+    /// fill the padded extent, and the unused margin must remain transparent.
+    #[test]
+    fn padded_yuv_output_keeps_logical_extent() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter — skipping padded YUV output test");
+            return;
+        };
+        let (w, h) = (2u32, 2u32);
+        let planes = YuvPlanes::Yuv420 {
+            width: w,
+            height: h,
+            y: &[16, 235, 16, 235],
+            cb: &[128],
+            cr: &[128],
+        };
+        let tex = YuvConverter::new(&device).convert_to_size(
+            &device,
+            &queue,
+            &planes,
+            Colorimetry::BT709_LIMITED,
+            (4, 4),
+        );
+        assert_eq!((tex.width(), tex.height()), (4, 4));
+
+        let bytes = readback(&device, &queue, &tex, 4, 4, 8);
+        let at = |x: usize, y: usize| &bytes[(y * 4 + x) * 8..(y * 4 + x + 1) * 8];
+        let logical_white = f16_to_f32(u16::from_le_bytes([at(1, 0)[0], at(1, 0)[1]]));
+        assert!(
+            logical_white > 0.9,
+            "logical YUV pixels must not be scaled away"
+        );
+        let padding = at(3, 3);
+        assert!(
+            padding.iter().all(|&byte| byte == 0),
+            "padded margin must be transparent"
+        );
+    }
+
+    /// Reusing a layout's upload textures must preserve every submitted frame:
+    /// the second plane write cannot leak back into the first conversion. This
+    /// is both the scratch-cache regression test and the queue-ordering guard.
+    #[test]
+    fn yuv_upload_scratch_reuses_layout_without_overwriting_prior_output() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter — skipping YUV scratch reuse test");
+            return;
+        };
+        let converter = YuvConverter::new(&device);
+        let black = YuvPlanes::Yuv420 {
+            width: 2,
+            height: 2,
+            y: &[16; 4],
+            cb: &[128],
+            cr: &[128],
+        };
+        let white = YuvPlanes::Yuv420 {
+            width: 2,
+            height: 2,
+            y: &[235; 4],
+            cb: &[128],
+            cr: &[128],
+        };
+        let first = converter.convert(&device, &queue, &black, Colorimetry::BT709_LIMITED);
+        let second = converter.convert(&device, &queue, &white, Colorimetry::BT709_LIMITED);
+
+        assert_eq!(converter.scratch_layout_count(), 1);
+        let first_px = readback(&device, &queue, &first, 2, 2, 8);
+        let second_px = readback(&device, &queue, &second, 2, 2, 8);
+        let first_luma = f16_to_f32(u16::from_le_bytes([first_px[0], first_px[1]]));
+        let second_luma = f16_to_f32(u16::from_le_bytes([second_px[0], second_px[1]]));
+        assert!(first_luma < 0.01, "first conversion must remain black");
+        assert!(second_luma > 0.9, "second conversion must be white");
     }
 
     /// 03 §6 / §5: the present pass round-trips a known linear value to the

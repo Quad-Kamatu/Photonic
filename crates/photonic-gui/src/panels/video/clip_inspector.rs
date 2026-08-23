@@ -330,9 +330,7 @@ fn default_three_section_ramp(duration: Tick, base: Ratio) -> Vec<SpeedKey> {
     let at = |fraction: f64| {
         Tick((duration.0 as f64 * fraction).round() as i64).clamp(Tick::ZERO, duration)
     };
-    let ratio = |speed: f64| {
-        Ratio::new((sign * speed * 1000.0).round() as i32, 1000)
-    };
+    let ratio = |speed: f64| Ratio::new((sign * speed * 1000.0).round() as i32, 1000);
     let ease = EasePreset::EaseInOut.interp();
     vec![
         SpeedKey::eased(at(0.0), ratio(base_f), ease),
@@ -415,14 +413,11 @@ fn speed_curve_canvas(
     let mut live = ui
         .data(|d| d.get_temp::<SpeedCurveDrag>(drag_id))
         .filter(|d| d.clip == clip.id);
-    let mut sorted = live
-        .as_ref()
-        .map(|d| d.keys.clone())
-        .unwrap_or_else(|| {
-            let mut k = keys.to_vec();
-            k.sort_by_key(|key| key.at.0);
-            k
-        });
+    let mut sorted = live.as_ref().map(|d| d.keys.clone()).unwrap_or_else(|| {
+        let mut k = keys.to_vec();
+        k.sort_by_key(|key| key.at.0);
+        k
+    });
 
     let dur = clip.duration.0.max(1) as f32;
     let tick_to_x = |t: i64| rect.left() + rect.width() * (t as f32 / dur).clamp(0.0, 1.0);
@@ -568,8 +563,7 @@ fn speed_curve_canvas(
                     let speed =
                         curve_y_to_speed(pos.y, rect).clamp(-SPEED_CURVE_MAX, SPEED_CURVE_MAX);
                     drag.keys[drag.index].at = Tick(at);
-                    drag.keys[drag.index].ratio =
-                        Ratio::new((speed * 1000.0).round() as i32, 1000);
+                    drag.keys[drag.index].ratio = Ratio::new((speed * 1000.0).round() as i32, 1000);
                     sorted = drag.keys.clone();
                     result = Some(sorted.clone());
                     ui.data_mut(|d| d.insert_temp(drag_id, drag.clone()));
@@ -614,8 +608,7 @@ fn speed_curve_canvas(
                 && !primary_down
             {
                 let ft = frame_ticks.max(1);
-                let snapped =
-                    ((drag.keys[drag.index].at.0 as f64 / ft as f64).round() as i64) * ft;
+                let snapped = ((drag.keys[drag.index].at.0 as f64 / ft as f64).round() as i64) * ft;
                 let lo = drag.keys[drag.index - 1].at.0 + 1;
                 let hi = (drag.keys[drag.index + 1].at.0 - 1).max(lo);
                 drag.keys[drag.index].at = Tick(snapped.clamp(lo, hi));
@@ -644,8 +637,7 @@ fn speed_curve_canvas(
                     Tick(((raw as f64 / ft as f64).round() as i64 * ft).clamp(0, clip.duration.0));
                 if !sorted.iter().any(|key| key.at == at) {
                     let ratio = Ratio::new(
-                        (curve_y_to_speed(pos.y, rect)
-                            .clamp(-SPEED_CURVE_MAX, SPEED_CURVE_MAX)
+                        (curve_y_to_speed(pos.y, rect).clamp(-SPEED_CURVE_MAX, SPEED_CURVE_MAX)
                             * 1000.0)
                             .round() as i32,
                         1000,
@@ -836,10 +828,7 @@ fn draw_speed_ramp_editor(
     // time the curve is shown — never stomp a multi-point ramp the user has
     // already shaped (2–3 custom handles stay as-is).
     if editing_curve && sorted.len() <= 1 && new_keys.is_none() {
-        let base = sorted
-            .first()
-            .map(|k| k.ratio)
-            .unwrap_or(Ratio::ONE);
+        let base = sorted.first().map(|k| k.ratio).unwrap_or(Ratio::ONE);
         new_keys = Some(default_three_section_ramp(clip.duration, base));
         discrete = true;
         sorted = new_keys.clone().unwrap_or(sorted);
@@ -1230,9 +1219,7 @@ fn draw_stabilization_section(
     clip: &Clip,
     action: &mut Option<PanelAction>,
 ) {
-    use photonic_core::timeline::{
-        LensProfileRef, MotionSourceRef, StabilizationCropMode,
-    };
+    use photonic_core::timeline::{LensProfileRef, MotionSourceRef, StabilizationCropMode};
 
     let Some(sequence) = project.sequences.get(&seq) else {
         return;
@@ -1282,13 +1269,14 @@ fn draw_stabilization_section(
             };
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Source").color(MUTED).small());
-                ui.label(RichText::new(source_label).small())
-                    .on_hover_text(match &spec.binding.source {
+                ui.label(RichText::new(source_label).small()).on_hover_text(
+                    match &spec.binding.source {
                         MotionSourceRef::Sidecar { path, .. } => path.display().to_string(),
                         MotionSourceRef::Embedded { .. } => {
                             "Telemetry carried inside the media file.".to_string()
                         }
-                    });
+                    },
+                );
             });
 
             // Whether an analysis exists is the single most useful status:
@@ -1422,9 +1410,7 @@ fn draw_stabilization_section(
                             StabilizationCropMode::Dynamic,
                             StabilizationCropMode::TransparentEdges,
                         ] {
-                            if ui
-                                .selectable_label(current == m, mode_label(m))
-                                .clicked()
+                            if ui.selectable_label(current == m, mode_label(m)).clicked()
                                 && current != m
                             {
                                 let mut new_spec = spec.clone();

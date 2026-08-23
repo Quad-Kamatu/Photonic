@@ -479,8 +479,8 @@ impl MediaPoolUi {
                     }
                     _ => false,
                 };
-                if waveform_ready {
-                    if meta_tx
+                if waveform_ready
+                    && meta_tx
                         .send(ImportMetaResult {
                             asset: asset_id,
                             probe: None,
@@ -491,9 +491,8 @@ impl MediaPoolUi {
                             waveform_only: true,
                         })
                         .is_err()
-                    {
-                        return;
-                    }
+                {
+                    return;
                 }
             }
         });
@@ -1129,8 +1128,8 @@ fn draw_relink_section(
             )
             .clicked()
         {
-            let dialog = rfd::FileDialog::new()
-                .set_title("Relink: choose the folder the media moved to");
+            let dialog =
+                rfd::FileDialog::new().set_title("Relink: choose the folder the media moved to");
             if let Some(dir) = crate::app::run_file_dialog(move || dialog.pick_folder()) {
                 ctx.media_ui.spawn_relink_scan(dir);
             }

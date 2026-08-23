@@ -126,10 +126,7 @@ impl PathPolicy {
         }
 
         // Reject `..` components before canonicalize for clearer errors.
-        if path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir))
-        {
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
             // Still try to resolve — parent dirs can be legitimate relative paths.
             // Containment after canonicalize is the real gate.
         }
@@ -256,7 +253,10 @@ pub fn is_within(root: &Path, child: &Path) -> bool {
     if child_comps.len() < root_comps.len() {
         return false;
     }
-    root_comps.iter().zip(child_comps.iter()).all(|(a, b)| a == b)
+    root_comps
+        .iter()
+        .zip(child_comps.iter())
+        .all(|(a, b)| a == b)
 }
 
 #[cfg(test)]
@@ -293,10 +293,8 @@ mod tests {
     #[test]
     fn outside_root_write_denied() {
         let root = tmp_root();
-        let other = std::env::temp_dir().join(format!(
-            "photonic-path-policy-other-{}",
-            std::process::id()
-        ));
+        let other =
+            std::env::temp_dir().join(format!("photonic-path-policy-other-{}", std::process::id()));
         fs::create_dir_all(&other).unwrap();
         let file = other.join("secret.txt");
         fs::write(&file, b"x").unwrap();

@@ -2448,7 +2448,7 @@ pub async fn apply_grid_layout(state: &AppState, args: ApplyGridLayoutArgs) -> T
 
     // Compute column widths and row heights
     let n = children.len();
-    let rows = (n + cols - 1) / cols;
+    let rows = n.div_ceil(cols);
 
     let col_width: f64 = children.iter().map(|c| c.w).fold(0.0_f64, f64::max);
     let row_height: f64 = children.iter().map(|c| c.h).fold(0.0_f64, f64::max);
