@@ -3493,6 +3493,7 @@ mod tests {
             None,
             false,
             Some(&table),
+            None,
         );
         assert_eq!(gain_of(&measured), Some(1.25));
 
@@ -3507,6 +3508,7 @@ mod tests {
             None,
             false,
             Some(&table),
+            None,
         );
         assert_eq!(gain_of(&later), Some(0.80));
 
@@ -3532,6 +3534,7 @@ mod tests {
             None,
             false,
             Some(&other),
+            None,
         );
         assert_eq!(gain_of(&unrelated), None);
     }

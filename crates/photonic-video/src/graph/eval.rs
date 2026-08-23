@@ -4765,6 +4765,7 @@ mod tests {
                 None,
                 false,
                 Some(&table),
+                None,
             );
             // Guard the test itself: if the gain stopped being injected this
             // would silently become a parity check on a pass-through.
