@@ -40,6 +40,7 @@ fn needs_document_snapshot(name: &str) -> bool {
             | "add_export_profile"
             | "remove_export_profile"
             | "import_design_tokens"
+            | "apply_document_template"
             | "add_construction_line"
             | "set_document_bleed"
             | "set_document_color_mode"
@@ -2166,6 +2167,8 @@ mod tests {
     use crate::handlers::clipboard::new_clipboard_ring;
     use crate::server::McpServerConfig;
     use photonic_core::{
+        document::{ExportProfile, Guide, GuideOrientation},
+        layer::Layer,
         node::{PathNode, TextNode},
         AuditLog, Document, PathData, SceneNode, SceneNodeKind,
     };
@@ -2263,6 +2266,141 @@ mod tests {
         assert_eq!(state.history.lock().await.undo_depth(), 1);
         undo(&state).await;
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    #[tokio::test]
+    async fn apply_document_template_records_guides_and_profile_replacements_in_one_step() {
+        let state = test_state();
+        let (template_json, before) = {
+            let mut doc = state.document.lock().await;
+            doc.guides
+                .push(Guide::new(GuideOrientation::Horizontal, 12.0));
+            doc.export_profiles
+                .push(ExportProfile::new_png("social", Some(320), Some(240)));
+            let before = serde_json::to_value(&*doc).unwrap();
+
+            let mut template = doc.clone();
+            template
+                .guides
+                .push(Guide::new(GuideOrientation::Vertical, 37.0));
+            template.export_profiles = vec![ExportProfile {
+                name: "social".to_string(),
+                format: "png".to_string(),
+                width: Some(1024),
+                height: Some(768),
+                semantic_ids: Some(false),
+                precision: Some(6),
+            }];
+            (template.to_json().unwrap(), before)
+        };
+
+        let result = dispatch_tool(
+            &state,
+            "apply_document_template",
+            json!({ "template_json": template_json }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+
+        let after = {
+            let doc = state.document.lock().await;
+            assert_eq!(doc.guides.len(), 2);
+            assert!(doc
+                .guides
+                .iter()
+                .any(|g| g.orientation == GuideOrientation::Vertical && g.position == 37.0));
+            let profile = doc
+                .export_profiles
+                .iter()
+                .find(|p| p.name == "social")
+                .unwrap();
+            assert_eq!(profile.width, Some(1024));
+            assert_eq!(profile.height, Some(768));
+            assert_eq!(profile.semantic_ids, Some(false));
+            serde_json::to_value(&*doc).unwrap()
+        };
+
+        undo(&state).await;
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            before
+        );
+        let redo_result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+        assert_ne!(redo_result.is_error, Some(true));
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            after
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_document_template_records_mixed_changes_in_one_step() {
+        let state = test_state();
+        let (template_json, before) = {
+            let mut doc = state.document.lock().await;
+            doc.guides
+                .push(Guide::new(GuideOrientation::Horizontal, 12.0));
+            doc.export_profiles
+                .push(ExportProfile::new_png("print", Some(400), Some(300)));
+            let before = serde_json::to_value(&*doc).unwrap();
+
+            let mut template = doc.clone();
+            template.width = 640.0;
+            template.height = 480.0;
+            template
+                .guides
+                .push(Guide::new(GuideOrientation::Vertical, 37.0));
+            template.export_profiles = vec![ExportProfile {
+                name: "print".to_string(),
+                format: "png".to_string(),
+                width: Some(1600),
+                height: Some(1200),
+                semantic_ids: Some(true),
+                precision: Some(4),
+            }];
+            let template_layer = Layer::new("Template overlay");
+            template.layer_order.push(template_layer.id);
+            template.layers.insert(template_layer.id, template_layer);
+            (template.to_json().unwrap(), before)
+        };
+
+        let result = dispatch_tool(
+            &state,
+            "apply_document_template",
+            json!({ "template_json": template_json }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+
+        let after = {
+            let doc = state.document.lock().await;
+            assert_eq!((doc.width, doc.height), (640.0, 480.0));
+            assert_eq!(doc.guides.len(), 2);
+            assert!(doc.layers.values().any(|l| l.name == "Template overlay"));
+            let profile = doc
+                .export_profiles
+                .iter()
+                .find(|p| p.name == "print")
+                .unwrap();
+            assert_eq!((profile.width, profile.height), (Some(1600), Some(1200)));
+            serde_json::to_value(&*doc).unwrap()
+        };
+
+        undo(&state).await;
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            before
+        );
+        let redo_result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+        assert_ne!(redo_result.is_error, Some(true));
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            after
+        );
     }
 
     #[tokio::test]
