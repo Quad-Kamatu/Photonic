@@ -565,6 +565,55 @@ mod tests {
         assert!(!history.can_redo());
     }
 
+    #[test]
+    fn mcp_checkpoint_after_undo_and_redo_uses_latest_state_and_description() {
+        let mut doc = make_doc();
+        let mut history = CommandHistory::new(200);
+        let node = make_node(&doc);
+        let node_id = node.id;
+
+        history.execute(
+            Command::AddNode {
+                node,
+                layer_id: None,
+            },
+            &mut doc,
+        );
+        history.schedule_mcp_checkpoint("create_shape");
+        assert_eq!(
+            history.pending_mcp_checkpoint().as_deref(),
+            Some("create_shape")
+        );
+
+        assert!(history.undo(&mut doc));
+        history.schedule_mcp_checkpoint("undo");
+        history.mcp_debounce.last_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(61));
+        history.tick_mcp_checkpoint(&doc);
+
+        let undo_checkpoint = history.list_checkpoints().last().unwrap().clone();
+        assert_eq!(undo_checkpoint.name, "undo");
+        assert!(!history
+            .get_checkpoint_snapshot(undo_checkpoint.id)
+            .unwrap()
+            .nodes
+            .contains_key(&node_id));
+
+        assert!(history.redo(&mut doc));
+        history.schedule_mcp_checkpoint("redo");
+        history.mcp_debounce.last_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(61));
+        history.tick_mcp_checkpoint(&doc);
+
+        let redo_checkpoint = history.list_checkpoints().last().unwrap().clone();
+        assert_eq!(redo_checkpoint.name, "redo");
+        assert!(history
+            .get_checkpoint_snapshot(redo_checkpoint.id)
+            .unwrap()
+            .nodes
+            .contains_key(&node_id));
+    }
+
     // ── Persistence: snapshot / restore round-trips ──────────────────────────
 
     fn push_n_nodes(history: &mut CommandHistory, doc: &mut Document, n: usize) {

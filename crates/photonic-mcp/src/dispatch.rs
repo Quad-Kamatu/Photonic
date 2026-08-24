@@ -967,15 +967,21 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "undo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::undo(state, a).await,
-            ))
+            let (result, changed) = handlers::document::undo(state, a).await;
+            Ok(if changed {
+                ToolOutput::mutating(result)
+            } else {
+                ToolOutput::readonly(result)
+            })
         }
         "redo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::redo(state, a).await,
-            ))
+            let (result, changed) = handlers::document::redo(state, a).await;
+            Ok(if changed {
+                ToolOutput::mutating(result)
+            } else {
+                ToolOutput::readonly(result)
+            })
         }
         "screenshot" => {
             let a: ScreenshotArgs = serde_json::from_value(args).unwrap_or_default();
@@ -2263,6 +2269,50 @@ mod tests {
         assert_eq!(state.history.lock().await.undo_depth(), 1);
         undo(&state).await;
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    #[tokio::test]
+    async fn undo_and_redo_schedule_mcp_checkpoints_only_when_history_moves() {
+        let noop_state = test_state();
+        let result = dispatch_tool(&noop_state, "undo", json!({})).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            noop_state.history.lock().await.pending_mcp_checkpoint(),
+            None
+        );
+
+        let result = dispatch_tool(&noop_state, "redo", json!({})).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            noop_state.history.lock().await.pending_mcp_checkpoint(),
+            None
+        );
+
+        let state = test_state();
+        let result = dispatch_tool(&state, "set_document_bleed", json!({ "bleed_mm": 3.0 }))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            state.history.lock().await.pending_mcp_checkpoint(),
+            Some("set_document_bleed".to_string())
+        );
+
+        let result = dispatch_tool(&state, "undo", json!({})).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            state.history.lock().await.pending_mcp_checkpoint(),
+            Some("undo".to_string())
+        );
+        assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+
+        let result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            state.history.lock().await.pending_mcp_checkpoint(),
+            Some("redo".to_string())
+        );
+        assert_eq!(state.document.lock().await.bleed_mm, 3.0);
     }
 
     #[tokio::test]

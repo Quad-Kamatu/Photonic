@@ -44,6 +44,13 @@ impl CommandHistory {
         self.mcp_debounce.schedule(desc);
     }
 
+    /// Return the pending MCP checkpoint description, if the debounce window
+    /// has not flushed yet. This is also useful to inspect the pending state
+    /// without waiting for the background checkpoint task.
+    pub fn pending_mcp_checkpoint(&self) -> Option<String> {
+        self.mcp_debounce.pending_desc.clone()
+    }
+
     /// Called periodically by the MCP background task (every ~10 s).
     /// Flushes the pending checkpoint once 60 seconds have elapsed since the
     /// last MCP mutation — a true debounce so burst tool calls produce only
