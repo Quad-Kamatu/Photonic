@@ -242,10 +242,14 @@ fn build_element(
     is_root: bool,
 ) -> Result<CssVectorGroup, Vec<CssDiagnostic>> {
     let mut props = BTreeMap::new();
+    let mut background_declarations = Vec::new();
     if let Some(rules) = elements.get(selector) {
         for rule in rules {
             for (k, v) in &rule.declarations {
                 props.insert(k.clone(), v.clone());
+                if matches!(k.as_str(), "background" | "background-color") {
+                    background_declarations.push((k.as_str(), v.as_str()));
+                }
             }
         }
     }
@@ -372,7 +376,7 @@ fn build_element(
     .unwrap_or(0.0)
     .min(width.min(height) / 2.0);
     let mut children = Vec::new();
-    if let Some(fill) = background(&props, selector, diagnostics) {
+    if let Some(fill) = background(&background_declarations, selector, diagnostics) {
         let path = if radius >= width.min(height) / 2.0 && (width - height).abs() < 1e-6 {
             PathData::ellipse(x + width / 2.0, y + height / 2.0, width / 2.0, height / 2.0)
         } else {
@@ -531,13 +535,11 @@ fn selector_name(s: &str) -> String {
         .replace(" > ", "/")
 }
 fn background(
-    props: &BTreeMap<String, String>,
+    declarations: &[(&str, &str)],
     sel: &str,
     ds: &mut Vec<CssDiagnostic>,
 ) -> Option<Fill> {
-    let value = props
-        .get("background")
-        .or_else(|| props.get("background-color"))?;
+    let (property, value) = declarations.last()?;
     match color(value) {
         Some(c) => Some(Fill::solid(c)),
         None => {
@@ -545,7 +547,7 @@ fn background(
                 "CSS_UNSUPPORTED_PAINT",
                 "only solid background colors are currently vectorizable",
                 sel,
-                Some("background"),
+                Some(property),
                 Some(value),
             ));
             None
@@ -788,6 +790,71 @@ mod tests {
         };
         assert_eq!(border.stroke.width, 4.0);
         assert_eq!(border.stroke.color, Color::from_hex("#0000ff").unwrap());
+    }
+
+    #[test]
+    fn background_longhands_follow_css_source_order() {
+        let background_then_color = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; background: red; background-color: blue; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap();
+        let color_then_background = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; background-color: blue; background: red; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            lowered_background_fill(&background_then_color),
+            Fill::solid(Color::BLUE)
+        );
+        assert_eq!(
+            lowered_background_fill(&color_then_background),
+            Fill::solid(Color::RED)
+        );
+        assert!(background_then_color.diagnostics.is_empty());
+        assert!(color_then_background.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn solid_background_color_falls_back_from_unsupported_shorthand() {
+        let plan = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; background: linear-gradient(red, blue); background-color: blue; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(lowered_background_fill(&plan), Fill::solid(Color::BLUE));
+        assert!(plan.diagnostics.is_empty());
+    }
+
+    fn lowered_background_fill(plan: &CssVectorPlan) -> Fill {
+        let CssVectorNode::Group(group) = &plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        let CssVectorNode::Path(background) = &group.children[0] else {
+            panic!("background must be a path")
+        };
+        background.fill.clone()
     }
 
     #[test]
