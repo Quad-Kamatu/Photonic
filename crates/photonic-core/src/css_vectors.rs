@@ -573,11 +573,22 @@ fn border(
         .iter()
         .find_map(|token| length(Some(token), 1.0, 16.0));
     let shorthand_color = shorthand_tokens.iter().find_map(|token| color(token));
-    let width = props
-        .get("border-width")
-        .and_then(|value| length(Some(value), 1.0, 16.0))
-        .or(shorthand_width)
-        .unwrap_or(1.0);
+    let width = if let Some(value) = props.get("border-width") {
+        if value.split_whitespace().count() > 1 {
+            ds.push(diag(
+                "CSS_UNSUPPORTED_BORDER",
+                "border-width side-value lists are not supported",
+                sel,
+                Some("border-width"),
+                Some(value),
+            ));
+            return None;
+        }
+        length(Some(value), 1.0, 16.0)
+    } else {
+        shorthand_width
+    }
+    .unwrap_or(1.0);
     let c = props
         .get("border-color")
         .and_then(|value| color(value))
@@ -765,6 +776,76 @@ mod tests {
         assert_eq!(group.children.len(), 1);
         assert!(matches!(group.children[0], CssVectorNode::Path(_)));
         assert!(plan.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn border_width_side_lists_are_rejected_strictly_and_diagnosed_permissively() {
+        let scalar_plan = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; border-width: 4px; border-color: #fff; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            false,
+        )
+        .expect("permissive mode must preserve scalar border-width values");
+        assert!(scalar_plan.diagnostics.is_empty());
+        let CssVectorNode::Group(group) = &scalar_plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        let CssVectorNode::Path(border) = &group.children[0] else {
+            panic!("scalar border-width must lower to a path")
+        };
+        assert_eq!(border.stroke.width, 4.0);
+
+        for value in ["4px 2px", "1px 2px 3px", "1px 2px 3px 4px"] {
+            let diagnostics = compile_css_vectors(
+                &format!(
+                    ".badge {{ width: 40px; height: 20px; border-width: {value}; border-color: #fff; }}"
+                ),
+                Some(".badge"),
+                CssOrigin { x: 0.0, y: 0.0 },
+                CssViewport {
+                    width: 100.0,
+                    height: 100.0,
+                },
+                true,
+            )
+            .unwrap_err();
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.code == "CSS_UNSUPPORTED_BORDER")
+                .expect("strict mode must reject unsupported border-width side lists");
+            assert_eq!(diagnostic.property.as_deref(), Some("border-width"));
+            assert_eq!(diagnostic.value.as_deref(), Some(value));
+
+            let plan = compile_css_vectors(
+                &format!(
+                    ".badge {{ width: 40px; height: 20px; border-width: {value}; border-color: #fff; }}"
+                ),
+                Some(".badge"),
+                CssOrigin { x: 0.0, y: 0.0 },
+                CssViewport {
+                    width: 100.0,
+                    height: 100.0,
+                },
+                false,
+            )
+            .expect("permissive mode should retain a diagnostic plan");
+            assert!(plan
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "CSS_UNSUPPORTED_BORDER"));
+            let CssVectorNode::Group(group) = &plan.roots[0] else {
+                panic!("root must be a group")
+            };
+            assert!(
+                group.children.is_empty(),
+                "unsupported border must not default to 1px"
+            );
+        }
     }
 
     #[test]
