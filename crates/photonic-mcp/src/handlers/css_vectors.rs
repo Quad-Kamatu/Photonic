@@ -7,9 +7,11 @@ use photonic_core::{
 };
 use uuid::Uuid;
 
-/// Transport adapter for the reusable core compiler.  It deliberately builds
-/// the complete subtree before taking document/history locks so parser or
-/// lowering errors cannot leave partial artwork behind.
+/// Transport adapter for the reusable core compiler.  The core compiler owns
+/// the element and nesting bounds, so this adapter only lowers its already
+/// bounded plan.  It deliberately builds that complete subtree before taking
+/// document/history locks so parser or lowering errors cannot leave partial
+/// artwork behind.
 pub async fn create_vectors_from_css(
     state: &AppState,
     args: CreateVectorsFromCssArgs,
@@ -159,4 +161,64 @@ fn counts(nodes: &[SceneNode]) -> (usize, usize, usize) {
         .map(|p| p.path_data.as_svg().matches(char::is_alphabetic).count())
         .sum();
     (groups, paths.len(), segments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        handlers::clipboard::new_clipboard_ring,
+        protocol::ContentItem,
+        server::{AppState, McpServerConfig},
+    };
+    use photonic_core::{css_vectors::MAX_ELEMENTS, AuditLog, CommandHistory, Document};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state() -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("css bounds", 200.0, 100.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(new_clipboard_ring()),
+        }
+    }
+
+    #[tokio::test]
+    async fn permissive_mcp_plan_stays_within_core_element_bound() {
+        let mut css = String::new();
+        for i in 0..=MAX_ELEMENTS {
+            css.push_str(&format!(
+                ".root-{i} {{ width: 10px; height: 10px; background: red; }}"
+            ));
+        }
+        let state = test_state();
+        let result = create_vectors_from_css(
+            &state,
+            CreateVectorsFromCssArgs {
+                css,
+                selector: None,
+                origin: None,
+                viewport: None,
+                layer_id: None,
+                group_name: None,
+                strict: false,
+                dry_run: true,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true));
+        let ContentItem::Text { text } = &result.content[1] else {
+            panic!("dry-run result should include JSON plan data")
+        };
+        let data: Value = serde_json::from_str(text).expect("plan data should be JSON");
+        assert_eq!(data["node_counts"]["groups"], json!(MAX_ELEMENTS));
+        assert_eq!(data["node_counts"]["paths"], json!(MAX_ELEMENTS));
+        assert_eq!(data["diagnostics"][0]["code"], "CSS_LIMIT");
+    }
 }

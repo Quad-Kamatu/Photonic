@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 pub const CONTRACT_VERSION: u32 = 1;
 pub const MAX_CSS_BYTES: usize = 256 * 1024;
 pub const MAX_ELEMENTS: usize = 512;
+pub const MAX_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct CssViewport {
@@ -71,7 +72,9 @@ struct Rule {
 /// Compile supported CSS without a browser, DOM, SVG, or external resources.
 /// Unsupported declarations are errors in strict mode and recorded omissions in
 /// permissive mode.  The parser intentionally rejects constructs it cannot
-/// lower faithfully instead of accepting and silently dropping them.
+/// lower faithfully instead of accepting and silently dropping them.  Strict
+/// mode rejects element and nesting limit violations before lowering; permissive
+/// mode returns a bounded plan with the omitted work recorded as diagnostics.
 pub fn compile_css_vectors(
     css: &str,
     selector: Option<&str>,
@@ -148,14 +151,33 @@ pub fn compile_css_vectors(
             elements.entry(key).or_default().push(rule);
         }
     }
-    if elements.len() > MAX_ELEMENTS {
+    let over_element_limit = elements.len() > MAX_ELEMENTS;
+    if over_element_limit {
         diagnostics.push(diag(
             "CSS_LIMIT",
-            "CSS creates more than 512 virtual elements",
+            &format!("CSS creates more than {MAX_ELEMENTS} virtual elements"),
             "",
             None,
             None,
         ));
+    }
+    let depth_limited_selector = elements
+        .keys()
+        .filter(|sel| selector_depth(sel) > MAX_DEPTH)
+        .min_by_key(|sel| element_order.get(*sel).copied().unwrap_or(usize::MAX))
+        .cloned();
+    let over_depth_limit = depth_limited_selector.is_some();
+    if let Some(sel) = depth_limited_selector {
+        diagnostics.push(diag(
+            "CSS_DEPTH_LIMIT",
+            &format!("CSS nesting exceeds {MAX_DEPTH} levels; descendants are omitted"),
+            &sel,
+            None,
+            None,
+        ));
+    }
+    if strict && (over_element_limit || over_depth_limit) {
+        return Err(diagnostics);
     }
     let selected: Vec<String> = match selector {
         Some(s) if elements.contains_key(s) => vec![s.to_string()],
@@ -189,16 +211,21 @@ pub fn compile_css_vectors(
         ));
     }
     let mut roots = Vec::new();
-    for (root_ix, root) in selected.iter().enumerate() {
-        let node = build_element(
+    let mut built_elements = 0;
+    for root in &selected {
+        let Some(node) = build_element(
             root,
             &elements,
             &element_order,
             origin,
             viewport,
             &mut diagnostics,
-            root_ix == 0,
-        )?;
+            &mut built_elements,
+            1,
+        )?
+        else {
+            break;
+        };
         roots.push(CssVectorNode::Group(node));
     }
     if strict && diagnostics.iter().any(|d| d.severity == "error") {
@@ -239,8 +266,13 @@ fn build_element(
     origin: CssOrigin,
     viewport: CssViewport,
     diagnostics: &mut Vec<CssDiagnostic>,
-    is_root: bool,
-) -> Result<CssVectorGroup, Vec<CssDiagnostic>> {
+    built_elements: &mut usize,
+    depth: usize,
+) -> Result<Option<CssVectorGroup>, Vec<CssDiagnostic>> {
+    if *built_elements >= MAX_ELEMENTS {
+        return Ok(None);
+    }
+    *built_elements += 1;
     let mut props = BTreeMap::new();
     if let Some(rules) = elements.get(selector) {
         for rule in rules {
@@ -264,12 +296,12 @@ fn build_element(
     // empty group also prevents descendants from being lowered: `display:none`
     // and `visibility:hidden` both suppress the element's rendered subtree.
     if css_element_hidden(&props) {
-        return Ok(CssVectorGroup {
+        return Ok(Some(CssVectorGroup {
             name: selector_name(selector),
             children: vec![],
             opacity: 1.0,
             provenance: selector.into(),
-        });
+        }));
     }
     if let Some(value) = props.get("z-index") {
         let value = value.trim();
@@ -317,12 +349,12 @@ fn build_element(
             None,
             None,
         ));
-        return Ok(CssVectorGroup {
+        return Ok(Some(CssVectorGroup {
             name: selector_name(selector),
             children: vec![],
             opacity: 1.0,
             provenance: selector.into(),
-        });
+        }));
     };
     if !(width.is_finite()
         && height.is_finite()
@@ -402,60 +434,78 @@ fn build_element(
     }
     let child_origin = CssOrigin { x, y };
     let child_viewport = CssViewport { width, height };
-    // Direct children and pseudo elements are ordered per the contract. A prefix
-    // check alone turns grandchildren into siblings; only the remaining selector
-    // segment after `parent > ` may be a direct child here.
-    for suffix in ["::before", ""] {
-        let mut direct_children: Vec<_> = elements
-            .keys()
-            .filter(|child| is_direct_child(selector, child, suffix))
-            .cloned()
-            .collect();
-        direct_children.sort_by_key(|child| {
-            let z = z_index(elements.get(child));
-            (z, element_order.get(child).copied().unwrap_or(usize::MAX))
-        });
-        for child in direct_children {
-            children.push(CssVectorNode::Group(build_element(
-                &child,
-                elements,
-                element_order,
-                child_origin,
-                child_viewport,
-                diagnostics,
-                false,
-            )?));
+    if depth < MAX_DEPTH {
+        // Direct children and pseudo elements are ordered per the contract. A
+        // prefix check alone turns grandchildren into siblings; only the
+        // remaining selector segment after `parent > ` may be a direct child here.
+        for suffix in ["::before", ""] {
+            if *built_elements >= MAX_ELEMENTS {
+                break;
+            }
+            let mut direct_children: Vec<_> = elements
+                .keys()
+                .filter(|child| is_direct_child(selector, child, suffix))
+                .cloned()
+                .collect();
+            direct_children.sort_by_key(|child| {
+                let z = z_index(elements.get(child));
+                (z, element_order.get(child).copied().unwrap_or(usize::MAX))
+            });
+            for child in direct_children {
+                if *built_elements >= MAX_ELEMENTS {
+                    break;
+                }
+                if let Some(group) = build_element(
+                    &child,
+                    elements,
+                    element_order,
+                    child_origin,
+                    child_viewport,
+                    diagnostics,
+                    built_elements,
+                    depth + 1,
+                )? {
+                    children.push(CssVectorNode::Group(group));
+                }
+            }
+        }
+        if *built_elements < MAX_ELEMENTS {
+            let mut after_children: Vec<_> = elements
+                .keys()
+                .filter(|child| child == &&format!("{selector}::after"))
+                .cloned()
+                .collect();
+            after_children.sort_by_key(|child| {
+                (
+                    z_index(elements.get(child)),
+                    element_order.get(child).copied().unwrap_or(usize::MAX),
+                )
+            });
+            for child in after_children {
+                if *built_elements >= MAX_ELEMENTS {
+                    break;
+                }
+                if let Some(group) = build_element(
+                    &child,
+                    elements,
+                    element_order,
+                    child_origin,
+                    child_viewport,
+                    diagnostics,
+                    built_elements,
+                    depth + 1,
+                )? {
+                    children.push(CssVectorNode::Group(group));
+                }
+            }
         }
     }
-    let mut after_children: Vec<_> = elements
-        .keys()
-        .filter(|child| child == &&format!("{selector}::after"))
-        .cloned()
-        .collect();
-    after_children.sort_by_key(|child| {
-        (
-            z_index(elements.get(child)),
-            element_order.get(child).copied().unwrap_or(usize::MAX),
-        )
-    });
-    for child in after_children {
-        children.push(CssVectorNode::Group(build_element(
-            &child,
-            elements,
-            element_order,
-            child_origin,
-            child_viewport,
-            diagnostics,
-            false,
-        )?));
-    }
-    let _ = is_root;
-    Ok(CssVectorGroup {
+    Ok(Some(CssVectorGroup {
         name: selector_name(selector),
         children,
         opacity,
         provenance: selector.into(),
-    })
+    }))
 }
 
 fn is_direct_child(parent: &str, child: &str, suffix: &str) -> bool {
@@ -468,6 +518,10 @@ fn is_direct_child(parent: &str, child: &str, suffix: &str) -> bool {
         } else {
             rest.ends_with(suffix)
         }
+}
+
+fn selector_depth(selector: &str) -> usize {
+    selector.split(" > ").count()
 }
 
 fn z_index(rules: Option<&Vec<&Rule>>) -> i32 {
@@ -906,5 +960,127 @@ mod tests {
             vec!["root/background", "root/.shown/background"],
             "hidden elements and their descendants must not lower to paths"
         );
+    }
+
+    fn independent_roots(count: usize) -> String {
+        let mut css = String::new();
+        for i in 0..count {
+            css.push_str(&format!(
+                ".root-{i} {{ width: 10px; height: 10px; background: red; }}"
+            ));
+        }
+        css
+    }
+
+    #[test]
+    fn strict_element_limit_rejects_before_lowering() {
+        let css =
+            independent_roots(MAX_ELEMENTS + 1).replace("background: red", "unsupported: value");
+        let diagnostics = compile_css_vectors(
+            &css,
+            None,
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "CSS_LIMIT")
+                .count(),
+            1
+        );
+        assert!(!diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "CSS_UNSUPPORTED_PROPERTY"));
+    }
+
+    #[test]
+    fn permissive_element_limit_caps_the_plan() {
+        let plan = compile_css_vectors(
+            &independent_roots(MAX_ELEMENTS + 1),
+            None,
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(plan.roots.len(), MAX_ELEMENTS);
+        assert!(plan
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "CSS_LIMIT"));
+    }
+
+    fn direct_child_chain(length: usize) -> String {
+        let mut css = String::new();
+        for i in 0..length {
+            let selector = (0..=i)
+                .map(|part| format!(".node-{part}"))
+                .collect::<Vec<_>>()
+                .join(" > ");
+            css.push_str(&format!(
+                "{selector} {{ width: 10px; height: 10px; background: red; }}"
+            ));
+        }
+        css
+    }
+
+    #[test]
+    fn nesting_limit_reports_a_diagnostic_and_bounds_permissive_plans() {
+        let css = direct_child_chain(MAX_DEPTH + 2);
+        let diagnostics = compile_css_vectors(
+            &css,
+            None,
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        )
+        .unwrap_err();
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "CSS_DEPTH_LIMIT"));
+
+        let plan = compile_css_vectors(
+            &css,
+            None,
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(plan
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "CSS_DEPTH_LIMIT"));
+
+        let mut current = &plan.roots[0];
+        for depth in 1..=MAX_DEPTH {
+            let CssVectorNode::Group(group) = current else {
+                panic!("chain node must be a group")
+            };
+            let child = group
+                .children
+                .iter()
+                .find(|node| matches!(node, CssVectorNode::Group(_)));
+            if depth == MAX_DEPTH {
+                assert!(child.is_none(), "nesting limit must omit deeper children");
+            } else {
+                current = child.expect("chain should reach the depth limit");
+            }
+        }
     }
 }
