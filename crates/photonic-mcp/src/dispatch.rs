@@ -54,6 +54,7 @@ fn needs_document_snapshot(name: &str) -> bool {
             | "define_symbol"
             | "delete_symbol"
             | "add_color_swatch"
+            | "update_color_swatch"
             | "delete_color_swatch"
             | "load_swatch_library"
             | "define_pattern"
@@ -2166,10 +2167,12 @@ mod tests {
     use crate::handlers::clipboard::new_clipboard_ring;
     use crate::server::McpServerConfig;
     use photonic_core::{
+        color::Color,
         node::{PathNode, TextNode},
-        AuditLog, Document, PathData, SceneNode, SceneNodeKind,
+        style::Fill,
+        AuditLog, ColorSwatch, Document, PathData, SceneNode, SceneNodeKind,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Mutex;
 
@@ -2189,6 +2192,111 @@ mod tests {
     async fn undo(state: &AppState) {
         let result = dispatch_tool(state, "undo", json!({})).await.unwrap();
         assert_ne!(result.is_error, Some(true));
+    }
+
+    async fn palette_and_nodes(state: &AppState) -> (Value, Value) {
+        let doc = state.document.lock().await;
+        (
+            serde_json::to_value(&doc.color_swatches).unwrap(),
+            serde_json::to_value(&doc.nodes).unwrap(),
+        )
+    }
+
+    async fn swatch_state(with_matching_node: bool) -> AppState {
+        let state = test_state();
+        let mut doc = state.document.lock().await;
+        doc.color_swatches
+            .push(ColorSwatch::new("Brand", "#112233"));
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let fill = if with_matching_node {
+            Fill::solid(Color::from_hex("#112233").unwrap())
+        } else {
+            Fill::solid(Color::from_hex("#AABBCC").unwrap())
+        };
+        doc.add_node(
+            SceneNode::new(
+                "swatch target",
+                layer_id,
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0)).with_fill(fill),
+                ),
+            ),
+            Some(layer_id),
+        );
+        drop(doc);
+        state
+    }
+
+    #[tokio::test]
+    async fn update_color_swatch_undo_redo_restores_palette_and_nodes() {
+        let cases = [
+            (
+                "rename only",
+                false,
+                json!({
+                    "name": "Brand",
+                    "new_name": "Primary",
+                    "propagate": false
+                }),
+            ),
+            (
+                "recolor without propagation",
+                false,
+                json!({
+                    "name": "Brand",
+                    "new_color_hex": "#445566",
+                    "propagate": false
+                }),
+            ),
+            (
+                "recolor with no matching nodes",
+                false,
+                json!({
+                    "name": "Brand",
+                    "new_color_hex": "#445566"
+                }),
+            ),
+            (
+                "recolor with matching nodes",
+                true,
+                json!({
+                    "name": "Brand",
+                    "new_color_hex": "#445566"
+                }),
+            ),
+        ];
+
+        for (label, with_matching_node, args) in cases {
+            let state = swatch_state(with_matching_node).await;
+            let before = palette_and_nodes(&state).await;
+
+            let result = dispatch_tool(&state, "update_color_swatch", args)
+                .await
+                .unwrap();
+            assert_ne!(result.is_error, Some(true), "{label}: update failed");
+            let after = palette_and_nodes(&state).await;
+            assert_ne!(after, before, "{label}: update was a no-op");
+            assert_eq!(
+                state.history.lock().await.undo_depth(),
+                1,
+                "{label}: update must be one undo step"
+            );
+
+            undo(&state).await;
+            assert_eq!(
+                palette_and_nodes(&state).await,
+                before,
+                "{label}: undo did not restore the document"
+            );
+
+            let result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{label}: redo failed");
+            assert_eq!(
+                palette_and_nodes(&state).await,
+                after,
+                "{label}: redo did not reapply the document"
+            );
+        }
     }
 
     #[tokio::test]
