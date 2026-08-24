@@ -15,8 +15,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{oneshot, Mutex};
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer};
 use tracing::info;
+
+/// Maximum size of one MCP JSON-RPC request body.
+pub(crate) const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 
 /// Configuration for the MCP server.
 #[derive(Debug, Clone)]
@@ -145,6 +148,7 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp))
         .layer(CorsLayer::permissive())
+        .layer(RequestBodyLimitLayer::new(MAX_MCP_REQUEST_BYTES))
         .with_state(state)
 }
 
@@ -210,3 +214,45 @@ async fn dispatch(state: AppState, method: &str, params: Option<Value>) -> Resul
 }
 
 pub(crate) use crate::dispatch::dispatch_tool_inner;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use photonic_core::Document;
+    use tower::ServiceExt;
+
+    fn test_state() -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new(
+                "request limit test",
+                200.0,
+                100.0,
+            ))),
+            history: Arc::new(Mutex::new(photonic_core::CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_over_limit_request_before_jsonrpc_dispatch() {
+        let state = test_state();
+        let router = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(vec![b'x'; MAX_MCP_REQUEST_BYTES + 1]))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(state.audit_log.lock().unwrap().entries().is_empty());
+    }
+}

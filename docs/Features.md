@@ -334,8 +334,8 @@ Complete inventory of features implemented as of 2026-03-23.
 ### Audit Log
 | Tool | Description |
 |---|---|
-| `list_audit_log` | Return the most recent N MCP tool calls (default 50) with timestamp, tool name, full args, result summary, and duration; newest first |
-| `export_audit_log` | Export the complete in-memory audit log as a JSON array (oldest first); includes every call since server start, up to 1000 entries |
+| `list_audit_log` | Return the most recent N MCP tool calls (default 50) with timestamp, tool name, bounded argument summaries, result summary, and duration; newest first |
+| `export_audit_log` | Export the complete in-memory audit log as a JSON array (oldest first); includes retained calls since server start, up to 1000 entries and the audit byte budget |
 
 ### Clipboard History
 | Tool | Description |

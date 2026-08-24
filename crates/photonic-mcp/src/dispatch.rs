@@ -1,7 +1,7 @@
 use crate::handlers;
 use crate::protocol::*;
 use crate::server::{AppState, ToolOutput};
-use photonic_core::{audit_timestamp, AuditEntry, Command, Document};
+use photonic_core::{audit_timestamp, summarize_audit_args, AuditEntry, Command, Document};
 use serde_json::Value;
 
 /// Notify the checkpoint system that a mutation has occurred.
@@ -90,7 +90,10 @@ pub async fn dispatch_tool(
     } else {
         None
     };
-    let output = dispatch_tool_inner(state, name, args.clone()).await;
+    // Summarize before handing the original value to the handler so the audit
+    // entry never retains the caller's potentially large argument tree.
+    let audit_args = summarize_audit_args(&args);
+    let output = dispatch_tool_inner(state, name, args).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     // Direct handlers leave the history head unchanged. Turn their completed
@@ -142,7 +145,7 @@ pub async fn dispatch_tool(
         id: 0, // assigned by AuditLog::record
         timestamp: audit_timestamp(),
         tool_name: name.to_string(),
-        args,
+        args: audit_args,
         result_summary,
         duration_ms,
         is_error,
@@ -2319,5 +2322,63 @@ mod tests {
             "pathless save should use the remembered path"
         );
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_large_unknown_calls_stay_within_audit_byte_budget() {
+        let state = test_state();
+        let args = json!({
+            "values": vec!["x".repeat(256); 12]
+        });
+
+        for _ in 0..400 {
+            assert!(dispatch_tool(&state, "unknown_tool", args.clone())
+                .await
+                .is_err());
+        }
+
+        let log = state.audit_log.lock().unwrap();
+        assert_eq!(log.total_recorded(), 400);
+        assert!(log.stored_bytes() <= log.max_bytes());
+        assert!(log.entries().len() < 400);
+        assert!(log.entries().iter().all(|entry| {
+            serde_json::to_vec(&entry.args).unwrap().len()
+                <= photonic_core::audit::AUDIT_MAX_ARGS_BYTES
+        }));
+    }
+
+    #[tokio::test]
+    async fn error_calls_are_recorded_with_bounded_args_and_audit_exports_work() {
+        let state = test_state();
+        let args = json!({
+            "payload": "x".repeat(photonic_core::audit::AUDIT_MAX_ARGS_BYTES * 8)
+        });
+
+        assert!(dispatch_tool(&state, "unknown_tool", args.clone())
+            .await
+            .is_err());
+        assert!(dispatch_tool(&state, "create_shape", args).await.is_err());
+
+        {
+            let log = state.audit_log.lock().unwrap();
+            assert_eq!(log.entries().len(), 2);
+            assert!(log.entries().iter().all(|entry| entry.is_error));
+            assert!(log.entries().iter().all(|entry| {
+                serde_json::to_vec(&entry.args).unwrap().len()
+                    <= photonic_core::audit::AUDIT_MAX_ARGS_BYTES
+            }));
+        }
+
+        let listed = dispatch_tool(&state, "list_audit_log", json!({}))
+            .await
+            .unwrap();
+        let listed_json = serde_json::to_string(&listed).unwrap();
+        assert!(listed_json.contains("truncated"));
+
+        let exported = dispatch_tool(&state, "export_audit_log", json!({}))
+            .await
+            .unwrap();
+        let exported_json = serde_json::to_string(&exported).unwrap();
+        assert!(exported_json.contains("truncated"));
     }
 }
