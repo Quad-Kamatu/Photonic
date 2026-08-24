@@ -304,6 +304,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn malformed_raster_image_is_rejected_before_open() {
+        let mut doc = sample_doc();
+        let layer_id = doc.layer_order[0];
+        let node = crate::node::SceneNode::new(
+            "image",
+            layer_id,
+            crate::node::SceneNodeKind::Raster(crate::node::RasterNode::new(
+                crate::raster::RasterImage::filled(1, 1, [1, 2, 3, 255]),
+            )),
+        );
+        doc.add_node(node, Some(layer_id));
+
+        let mut value = serde_json::to_value(&doc).unwrap();
+        let node = value["nodes"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        node["kind"]["image"]["width"] = serde_json::json!(2);
+
+        let err = load_photon(&serde_json::to_string(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("do not match decoded dimensions"));
+
+        let mut value = serde_json::to_value(&doc).unwrap();
+        let node = value["nodes"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        node["kind"]["mask"] = serde_json::json!({
+            "width": 0,
+            "height": 1,
+            "data": []
+        });
+
+        let err = load_photon(&serde_json::to_string(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("mask dimensions must be non-zero"));
+    }
+
     fn test_dir(label: &str) -> PathBuf {
         let serial = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
