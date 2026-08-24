@@ -1332,6 +1332,19 @@ impl Evaluator {
                 ),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
+            IrOp::Resize { fit, .. } => match inputs.first() {
+                Some(src) => self.passes.resize(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    *fit,
+                    logical_w,
+                    logical_h,
+                    src.width,
+                    src.height,
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
             // Real grade kernel: run the resolved stack through the WGSL twins of
             // `eval_cpu`'s `apply_grade_cpu`, then blit the result into the pooled
             // cache target (07 §3, GPU/CPU parity 03 §4.4). An empty stack falls
@@ -1354,7 +1367,7 @@ impl Evaluator {
                 }
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
-            // Blit passthrough for Crop, Resize, Output, empty Grade, and the
+            // Blit passthrough for Crop, Output, empty Grade, and the
             // marker filter/color ops.
             _ => match inputs.first() {
                 Some(src) => self.passes.blit(&self.gpu, &src.texture, target),
@@ -1402,6 +1415,7 @@ struct Passes {
     blit_bgl: wgpu::BindGroupLayout,
     transform_pipeline: wgpu::RenderPipeline,
     transform_bgl: wgpu::BindGroupLayout,
+    resize_pipeline: wgpu::RenderPipeline,
     /// D-12 stabilization warp (22 §6.4); WGSL twin of `ops::stabilize_warp`.
     stabilize_pipeline: wgpu::RenderPipeline,
     stabilize_bgl: wgpu::BindGroupLayout,
@@ -1551,6 +1565,54 @@ impl Passes {
             "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct T {{ c0: vec4<f32>, c1: vec4<f32>, c2: vec4<f32>, info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> u: T;\nfn at(p: vec2<i32>) -> vec4<f32> {{\n  let hi = vec2<i32>(u.info.zw) - vec2<i32>(1);\n  return textureLoad(t, clamp(p, vec2<i32>(0), hi), 0);\n}}\nfn nearest(p: vec2<f32>) -> vec4<f32> {{ return at(vec2<i32>(floor(p))); }}\nfn bilinear(p: vec2<f32>) -> vec4<f32> {{\n  let q = p - vec2<f32>(0.5);\n  let p0f = floor(q);\n  let p0 = vec2<i32>(p0f);\n  let f = q - p0f;\n  let p00 = at(p0);\n  let p10 = at(p0 + vec2<i32>(1, 0));\n  let p01 = at(p0 + vec2<i32>(0, 1));\n  let p11 = at(p0 + vec2<i32>(1, 1));\n  return mix(mix(p00, p10, f.x), mix(p01, p11, f.x), f.y);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  if (pos.x >= u.info.x || pos.y >= u.info.y) {{ return vec4<f32>(0.0); }}\n  let canvas_src = u.c0.xy * pos.x + u.c1.xy * pos.y + u.c2.xy;\n  let src = canvas_src * u.info.zw / u.info.xy;\n  if (u.c0.w > 0.5) {{ return nearest(src); }}\n  return bilinear(src);\n}}\n"
         );
         let transform_pipeline = make_pipeline(device, &transform_bgl, &transform_src, "fs");
+
+        // Resize: preserve the source aspect ratio for Fit/Fill and leave Fit's
+        // letterbox/pillarbox bars transparent. The pass uses logical dimensions
+        // explicitly because pooled target textures are rounded up to 64px.
+        let resize_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n\
+struct R {{ info: vec4<f32>, params: vec4<f32> }}\n\
+@group(0) @binding(1) var<uniform> u: R;\n\
+fn at(p: vec2<i32>) -> vec4<f32> {{\n\
+  let hi = vec2<i32>(u.info.zw) - vec2<i32>(1);\n\
+  return textureLoad(t, clamp(p, vec2<i32>(0), hi), 0);\n\
+}}\n\
+fn bilinear(p: vec2<f32>) -> vec4<f32> {{\n\
+  let q = p - vec2<f32>(0.5);\n\
+  let p0f = floor(q);\n\
+  let p0 = vec2<i32>(p0f);\n\
+  let f = q - p0f;\n\
+  let p00 = at(p0);\n\
+  let p10 = at(p0 + vec2<i32>(1, 0));\n\
+  let p01 = at(p0 + vec2<i32>(0, 1));\n\
+  let p11 = at(p0 + vec2<i32>(1, 1));\n\
+  return mix(mix(p00, p10, f.x), mix(p01, p11, f.x), f.y);\n\
+}}\n\
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n\
+  let out_size = u.info.xy;\n\
+  let source_size = u.info.zw;\n\
+  if (pos.x >= out_size.x || pos.y >= out_size.y) {{ return vec4<f32>(0.0); }}\n\
+  var scale = out_size / source_size;\n\
+  var offset = vec2<f32>(0.0);\n\
+  if (u.params.x < 0.5) {{\n\
+    let uniform_scale = min(scale.x, scale.y);\n\
+    scale = vec2<f32>(uniform_scale);\n\
+    let content = source_size * scale;\n\
+    offset = (out_size - content) * 0.5;\n\
+    if (pos.x < offset.x || pos.x >= offset.x + content.x ||\n\
+        pos.y < offset.y || pos.y >= offset.y + content.y) {{\n\
+      return vec4<f32>(0.0);\n\
+    }}\n\
+  }} else if (u.params.x < 1.5) {{\n\
+    let uniform_scale = max(scale.x, scale.y);\n\
+    scale = vec2<f32>(uniform_scale);\n\
+    let content = source_size * scale;\n\
+    offset = (out_size - content) * 0.5;\n\
+  }}\n\
+  return bilinear((pos.xy - offset) / scale);\n\
+}}\n"
+        );
+        let resize_pipeline = make_pipeline(device, &transform_bgl, &resize_src, "fs");
 
         // D-12 StabilizeWarp: the WGSL twin of `ops::stabilize_warp`. Same
         // five steps in the same order, same fixed Newton iteration count, and
@@ -2042,6 +2104,7 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
             blit_bgl,
             transform_pipeline,
             transform_bgl,
+            resize_pipeline,
             stabilize_pipeline,
             stabilize_bgl,
             invert_pipeline,
@@ -2198,6 +2261,58 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
             ],
         });
         self.run(gpu, &self.transform_pipeline, &bind, target);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resize(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        fit: crate::graph::ir::FitMode,
+        output_w: u32,
+        output_h: u32,
+        source_w: u32,
+        source_h: u32,
+    ) {
+        let mode = match fit {
+            crate::graph::ir::FitMode::Fit => 0.0,
+            crate::graph::ir::FitMode::Fill => 1.0,
+            crate::graph::ir::FitMode::Stretch => 2.0,
+        };
+        let uniform = [
+            output_w as f32,
+            output_h as f32,
+            source_w as f32,
+            source_h as f32,
+            mode,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let buffer = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("resize_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let view = src.create_view(&Default::default());
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resize_bg"),
+            layout: &self.transform_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.resize_pipeline, &bind, target);
     }
 
     /// `StabilizeWarp` pass (D-12, 22 §6.4).

@@ -300,21 +300,46 @@ pub fn resize(input: &Image, w: u32, h: u32, fit: FitMode) -> Image {
     let mut out = Image::new(w, h);
     let (iw, ih) = (input.width as f32, input.height as f32);
     let (ow, oh) = (w as f32, h as f32);
-    let (sx, sy, ox, oy) = match fit {
-        FitMode::Stretch => (iw / ow, ih / oh, 0.0, 0.0),
+    let (sx, sy, ox, oy, content_w, content_h, letterbox) = match fit {
+        FitMode::Stretch => (iw / ow, ih / oh, 0.0, 0.0, ow, oh, false),
         FitMode::Fit => {
-            let s = (iw / ow).max(ih / oh);
-            (s, s, (iw - ow * s) * 0.5, (ih - oh * s) * 0.5)
+            let scale = (ow / iw).min(oh / ih);
+            let content_w = iw * scale;
+            let content_h = ih * scale;
+            (
+                1.0 / scale,
+                1.0 / scale,
+                (ow - content_w) * 0.5,
+                (oh - content_h) * 0.5,
+                content_w,
+                content_h,
+                true,
+            )
         }
         FitMode::Fill => {
-            let s = (iw / ow).min(ih / oh);
-            (s, s, (iw - ow * s) * 0.5, (ih - oh * s) * 0.5)
+            let scale = (ow / iw).max(oh / ih);
+            let content_w = iw * scale;
+            let content_h = ih * scale;
+            (
+                1.0 / scale,
+                1.0 / scale,
+                (ow - content_w) * 0.5,
+                (oh - content_h) * 0.5,
+                content_w,
+                content_h,
+                false,
+            )
         }
     };
     for y in 0..h {
         for x in 0..w {
-            let sxp = (x as f32 + 0.5) * sx + ox;
-            let syp = (y as f32 + 0.5) * sy + oy;
+            let dx = x as f32 + 0.5;
+            let dy = y as f32 + 0.5;
+            if letterbox && (dx < ox || dx >= ox + content_w || dy < oy || dy >= oy + content_h) {
+                continue;
+            }
+            let sxp = (dx - ox) * sx;
+            let syp = (dy - oy) * sy;
             out.set(x, y, input.sample_bilinear(sxp, syp));
         }
     }
@@ -2211,5 +2236,51 @@ mod deinterlace_tests {
             (o[0] - 1.0).abs() < 1e-5,
             "odd row should match field: {o:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn fit_adds_transparent_letterbox_bars() {
+        let source = Image::filled(
+            4,
+            2,
+            LinearColor {
+                r: 0.8,
+                g: 0.2,
+                b: 0.1,
+                a: 1.0,
+            },
+        );
+        let output = resize(&source, 4, 4, FitMode::Fit);
+
+        assert_eq!(output.pixel(1, 0), [0.0; 4], "top bar must be transparent");
+        assert_eq!(
+            output.pixel(1, 3),
+            [0.0; 4],
+            "bottom bar must be transparent"
+        );
+        assert_eq!(output.pixel(1, 1), [0.8, 0.2, 0.1, 1.0]);
+        assert_eq!(output.pixel(1, 2), [0.8, 0.2, 0.1, 1.0]);
+    }
+
+    #[test]
+    fn fill_crops_the_overflow_from_the_center() {
+        let mut source = Image::new(4, 2);
+        for y in 0..source.height {
+            for x in 0..source.width {
+                source.set(x, y, [x as f32, y as f32, 0.0, 1.0]);
+            }
+        }
+        let output = resize(&source, 2, 2, FitMode::Fill);
+
+        // A 4×2 -> 2×2 cover scale is 1, so the output coordinates are 1.5
+        // and 2.5 in source space. With pixel centers at n + 0.5, those land
+        // on source columns 1 and 2: the outer columns are cropped, not stretched in.
+        assert_eq!(output.pixel(0, 0), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(output.pixel(1, 0), [2.0, 0.0, 0.0, 1.0]);
     }
 }

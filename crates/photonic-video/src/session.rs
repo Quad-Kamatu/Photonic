@@ -52,7 +52,7 @@ use crate::decode::{PixFmt, SharedRing};
 use crate::export::presets::ExportPreset;
 use crate::graph::cache::CacheStats;
 use crate::graph::compile::{
-    compile_asset_peek, compile_full, compile_with_luts_and_opts, fit_long_edge, CompileDiagnostic,
+    compile_asset_peek, compile_full, compile_with_providers, fit_long_edge, CompileDiagnostic,
     DiagSeverity, LutProvider, Quality, ScopeTapPoint, DRAFT_MAX_LONG_EDGE,
 };
 use crate::graph::eval::{Evaluator, GpuContext, GpuFrame, GpuFrameSource};
@@ -1748,7 +1748,7 @@ impl EngineThread {
                 // nodes share content hashes with the full compile so the node
                 // cache pays only the look-stack delta.
                 let compare_clean = if self.compare_effects && preview_asset.is_none() {
-                    let clean = compile_with_luts_and_opts(
+                    let clean = compile_with_providers(
                         project.as_ref(),
                         seq_id,
                         format_index,
@@ -1756,6 +1756,7 @@ impl EngineThread {
                         quality,
                         None,
                         Some(&self.lut_cache),
+                        Some(&self.stabilization),
                         true,
                     );
                     self.evaluations = self.evaluations.saturating_add(1);
@@ -2378,11 +2379,13 @@ impl MediaSources {
     }
 
     /// Cut-ahead: warm the next clip's decode worker if it starts within `lead`
-    /// of `t` ([`cut_ahead_targets`]). Bounded to **one `build_source` per call**
-    /// so we never open dual always-on decoders for every upcoming cut.
+    /// of `t` ([`cut_ahead_targets`]). Bounded to **one source request per call**
+    /// so we never open dual always-on decoders for every upcoming cut. Playing
+    /// requests are queued through `ensure_source`; the expensive probe and index
+    /// build must not run on the present thread.
     fn prefetch_upcoming(&mut self, seq: &Sequence, t: Tick, lead: Tick, quality: Quality) {
         self.drain_pending();
-        let mut built_this_call = false;
+        let mut requested_this_call = false;
         let targets = cut_ahead_targets(seq, t, lead);
         for target in targets {
             let asset = target.asset;
@@ -2394,13 +2397,12 @@ impl MediaSources {
                 continue;
             };
             let key = input.key;
-            if !self.sources.contains_key(&key) {
-                if built_this_call {
+            if !self.sources.contains_key(&key) && !self.pending.contains_key(&key) {
+                if requested_this_call {
                     continue; // amortize builds across presents
                 }
-                let entry = self.build_source(input.path);
-                self.sources.insert(key, entry);
-                built_this_call = true;
+                self.ensure_source(input);
+                requested_this_call = true;
             }
             let stamp = self.next_use_stamp();
             if let Some(Some(entry)) = self.sources.get_mut(&key) {
@@ -3372,6 +3374,51 @@ mod tests {
         assert_eq!(unready_proxy_input.path, unready_original_input.path);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn playing_cut_ahead_queues_source_open_off_present_thread() {
+        use photonic_core::timeline::{
+            AssetKind, AssetSource, Clip, ClipSource, MediaAsset, Sequence, Track, TrackKind,
+        };
+
+        let mut project = TimelineProject::new();
+        let asset = MediaAsset::new(
+            AssetKind::Video,
+            AssetSource::File {
+                path: std::path::PathBuf::from("/missing/cut-ahead.mp4"),
+                rel_path: None,
+            },
+        );
+        let asset_id = asset.id;
+        project.media.assets.insert(asset_id, asset);
+
+        let mut seq = Sequence::new("seq", FrameRate::FPS_30, 320, 180);
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.clips.push(Clip::new(
+            ClipSource::Asset { asset: asset_id },
+            Tick(1_000_000),
+            Tick(1_000_000),
+        ));
+        seq.video_tracks.push(track);
+
+        let mut media = MediaSources::new(Some(FfmpegTools {
+            ffmpeg: std::path::PathBuf::from("/missing/ffmpeg"),
+            ffprobe: std::path::PathBuf::from("/missing/ffprobe"),
+        }));
+        media.playing = true;
+        media.set_project(Arc::new(project));
+        media.prefetch_upcoming(&seq, Tick::ZERO, Tick(1_000_000), Quality::FULL);
+
+        let key = (asset_id, false);
+        assert!(
+            media.pending.contains_key(&key),
+            "playing cut-ahead must queue the expensive source build"
+        );
+        assert!(
+            !media.sources.contains_key(&key),
+            "the present thread must not synchronously insert a failed build"
+        );
     }
 
     #[test]

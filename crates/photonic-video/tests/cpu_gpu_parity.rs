@@ -544,22 +544,18 @@ fn fit_mode_cpu_gpu_parity() {
     let Some(gpu) = gpu_or_skip("FitMode parity") else {
         return;
     };
-    // A UNIFORM source makes the result fit-independent (a solid resizes to the same
-    // solid under every fit), so this row exercises the `FitMode` plumbing on both
-    // evaluators without depending on the P3-passthrough GPU `Resize` geometry.
-    let color = LinearColor {
-        r: 0.3,
-        g: 0.55,
-        b: 0.2,
-        a: 1.0,
-    };
-    for fit in ALL_FIT_MODES {
+    // A non-square, non-uniform source is intentional: a solid would make Fit,
+    // Fill, and Stretch indistinguishable and would let a GPU blit fallback pass.
+    let image = patterned_image(11, 7);
+    for (index, fit) in ALL_FIT_MODES.into_iter().enumerate() {
         let graph = FrameGraph {
             nodes: vec![
                 IrNode {
-                    op: IrOp::SolidColor { color },
+                    op: IrOp::DecodeStill {
+                        asset: AssetId::new(),
+                    },
                     inputs: vec![],
-                    content_hash: ContentHash(30),
+                    content_hash: ContentHash(30 + index as u128),
                 },
                 IrNode {
                     op: IrOp::Resize {
@@ -568,12 +564,30 @@ fn fit_mode_cpu_gpu_parity() {
                         fit,
                     },
                     inputs: vec![(IrNodeId(0), OutPort::default())],
-                    content_hash: ContentHash(31),
+                    content_hash: ContentHash(40 + index as u128),
                 },
             ],
             output: Some(IrNodeId(1)),
         };
-        assert_parity_solid(&gpu, &format!("fit/{}", fit_label(fit)), &graph, 1e-3);
+        let cpu = eval_cpu::evaluate(
+            &graph,
+            CANVAS,
+            &mut PatternCpuSource {
+                image: image.clone(),
+            },
+        );
+        let mut source = PatternGpuSource {
+            frame: GpuFrame::new(upload_pattern(&gpu, &image), image.width, image.height),
+        };
+        let gpu_image = eval_gpu(&gpu, &graph, &mut source);
+        let metric = measure(&cpu, &gpu_image).expect("measurable");
+        assert!(
+            metric.psnr_db >= 35.0,
+            "fit/{}: PSNR {:.2} dB < 35 (max_abs {:.5})",
+            fit_label(fit),
+            metric.psnr_db,
+            metric.max_abs
+        );
     }
 }
 

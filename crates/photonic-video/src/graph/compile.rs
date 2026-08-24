@@ -3676,6 +3676,108 @@ mod tests {
     }
 
     #[test]
+    fn compare_clean_preserves_stabilization_provider() {
+        use crate::graph::stabilize::{
+            BiasEstimate, FrameCorrection, StabilizationAnalysis, StabilizationCache,
+            StabilizationDiagnostics,
+        };
+        use photonic_core::timeline::{
+            LensProfileRef, MotionBinding, MotionFormat, MotionSourceRef, StabilizationSpec,
+        };
+        use std::path::PathBuf;
+
+        let (mut project, seq_id) = base_project();
+        let tk = add_video_track(&mut project, seq_id);
+        let mut clip = solid_clip(Color::WHITE, 0, Tick::from_seconds(2).0);
+        let mut spec = StabilizationSpec::new(MotionBinding {
+            source: MotionSourceRef::Sidecar {
+                path: PathBuf::from("/missing/stabilization.gcsv"),
+                rel_path: None,
+                format: MotionFormat::Gcsv,
+            },
+            sync: Default::default(),
+            lens: LensProfileRef::RotationOnly,
+        });
+        spec.analysis_key = Some("analysis-key".into());
+        clip.stabilization = Some(spec);
+        let clip_id = clip.id;
+        let source_range = crate::graph::stabilize::source_time_range(&clip);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(clip);
+
+        let mut stabilization = StabilizationCache::default();
+        stabilization.insert(
+            clip_id,
+            "analysis-key".into(),
+            StabilizationAnalysis {
+                frames: vec![FrameCorrection {
+                    rotation: [0.999, 0.0, 0.045, 0.0, 1.0, 0.0, -0.045, 0.0, 0.999],
+                    zoom: 1.1,
+                }],
+                diagnostics: StabilizationDiagnostics {
+                    bias: BiasEstimate::ZERO,
+                    sample_rate_hz: None,
+                    clock_drift_ppm: 0.0,
+                    sync_residual_ns: 0.0,
+                    anchors_used: 0,
+                    max_required_zoom: 1.1,
+                    infeasible_range: None,
+                    mean_gravity_confidence: None,
+                    horizon_lock_unavailable: false,
+                },
+                fps: 30.0,
+                source_start_s: source_range.0,
+                source_end_s: source_range.1,
+                width: 320.0,
+                height: 180.0,
+                intrinsics: [0.5, 0.5, 0.5, 0.5],
+                k: [0.0; 4],
+                fisheye: false,
+            },
+        );
+
+        let full = compile_full(
+            &project,
+            seq_id,
+            0,
+            Tick(0),
+            Quality::PREVIEW,
+            None,
+            None,
+            false,
+            None,
+            Some(&stabilization),
+        );
+        let clean = compile_with_providers(
+            &project,
+            seq_id,
+            0,
+            Tick(0),
+            Quality::PREVIEW,
+            None,
+            None,
+            Some(&stabilization),
+            true,
+        );
+        let has_stabilization = |frame: &CompiledFrame| {
+            frame
+                .graph
+                .nodes
+                .iter()
+                .any(|node| matches!(node.op, IrOp::StabilizeWarp { .. }))
+        };
+        assert!(
+            has_stabilization(&full),
+            "full compile must lower stabilization"
+        );
+        assert!(
+            has_stabilization(&clean),
+            "compare-clean must preserve stabilization while skipping only clip looks"
+        );
+    }
+
+    #[test]
     fn bare_solid_clip_is_solid_transform_output() {
         let (mut project, seq_id) = base_project();
         let tk = add_video_track(&mut project, seq_id);
