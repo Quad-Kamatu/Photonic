@@ -2667,6 +2667,33 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "create_checkpoint",
+            "description": "Save a named snapshot of the current document state and return its checkpoint ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name for the checkpoint." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "list_checkpoints",
+            "description": "List all saved document checkpoints, including their IDs, names, and creation timestamps.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "restore_checkpoint",
+            "description": "Restore the document to a saved checkpoint by ID and clear undo/redo history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "checkpoint_id": { "type": "string", "description": "UUID of the checkpoint to restore." }
+                },
+                "required": ["checkpoint_id"]
+            }
+        },
+        {
             "name": "diff_checkpoints",
             "description": "Compare two checkpoint snapshots and return a structured JSON diff of added, removed, and modified nodes and layers. Use list_checkpoints first to get checkpoint IDs.",
             "inputSchema": {

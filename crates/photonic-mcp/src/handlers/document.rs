@@ -21,12 +21,12 @@ pub use crate::handlers::doc_export::{
     reorder_layers, run_export_profile, set_active_layer,
 };
 pub use crate::handlers::doc_state::{
-    add_construction_line, add_dimension, apply_document_template, diff_checkpoints,
-    fit_to_margins, get_artboard_margins, get_canvas_overview, get_document_bleed,
-    get_document_color_mode, get_document_dpi, get_document_info, get_document_state,
-    get_document_template, jump_to_history, list_checkpoints, list_dimensions, list_history, redo,
-    remove_dimension, resize_canvas, restore_checkpoint, set_artboard_margins, set_document_bleed,
-    set_document_color_mode, set_document_dpi, undo,
+    add_construction_line, add_dimension, apply_document_template, create_checkpoint,
+    diff_checkpoints, fit_to_margins, get_artboard_margins, get_canvas_overview,
+    get_document_bleed, get_document_color_mode, get_document_dpi, get_document_info,
+    get_document_state, get_document_template, jump_to_history, list_checkpoints, list_dimensions,
+    list_history, redo, remove_dimension, resize_canvas, restore_checkpoint, set_artboard_margins,
+    set_document_bleed, set_document_color_mode, set_document_dpi, undo,
 };
 pub use crate::handlers::doc_styles_symbols::{
     apply_graphic_style, apply_width_profile, break_link_to_symbol, define_graphic_style,

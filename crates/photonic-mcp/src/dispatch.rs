@@ -1122,6 +1122,23 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::audit::export_audit_log(state, a).await,
             ))
         }
+        "create_checkpoint" => {
+            let a: CreateCheckpointArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::readonly(
+                handlers::document::create_checkpoint(state, a).await,
+            ))
+        }
+        "list_checkpoints" => Ok(ToolOutput::readonly(
+            handlers::document::list_checkpoints(state).await,
+        )),
+        "restore_checkpoint" => {
+            let a: RestoreCheckpointArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::restore_checkpoint(state, a).await,
+            ))
+        }
         "diff_checkpoints" => {
             let a: DiffCheckpointsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::readonly(
@@ -2186,6 +2203,13 @@ mod tests {
         }
     }
 
+    fn result_data(result: &ToolResult) -> serde_json::Value {
+        let Some(crate::protocol::ContentItem::Text { text }) = result.content.get(1) else {
+            panic!("expected structured tool data")
+        };
+        serde_json::from_str(text).expect("structured tool data must be JSON")
+    }
+
     async fn undo(state: &AppState) {
         let result = dispatch_tool(state, "undo", json!({})).await.unwrap();
         assert_ne!(result.is_error, Some(true));
@@ -2263,6 +2287,75 @@ mod tests {
         assert_eq!(state.history.lock().await.undo_depth(), 1);
         undo(&state).await;
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_lifecycle_is_available_through_mcp_dispatch() {
+        let state = test_state();
+        let initial_node_count = state.document.lock().await.nodes.len();
+
+        let created = dispatch_tool(&state, "create_checkpoint", json!({ "name": "initial" }))
+            .await
+            .unwrap();
+        assert_ne!(created.is_error, Some(true));
+        let created_data = result_data(&created);
+        let initial_id = created_data["id"].as_str().unwrap().to_owned();
+
+        let listed = dispatch_tool(&state, "list_checkpoints", json!({}))
+            .await
+            .unwrap();
+        assert_ne!(listed.is_error, Some(true));
+        let listed_data = result_data(&listed);
+        assert_eq!(listed_data["checkpoints"].as_array().unwrap().len(), 1);
+        assert_eq!(listed_data["checkpoints"][0]["id"], initial_id);
+
+        let created_shape = dispatch_tool(
+            &state,
+            "create_shape",
+            json!({
+                "shape_type": "rectangle",
+                "x": 10.0,
+                "y": 20.0,
+                "width": 30.0,
+                "height": 40.0
+            }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(created_shape.is_error, Some(true));
+        assert!(state.document.lock().await.nodes.len() > initial_node_count);
+
+        let second = dispatch_tool(&state, "create_checkpoint", json!({ "name": "updated" }))
+            .await
+            .unwrap();
+        assert_ne!(second.is_error, Some(true));
+        let second_id = result_data(&second)["id"].as_str().unwrap().to_owned();
+
+        let diff = dispatch_tool(
+            &state,
+            "diff_checkpoints",
+            json!({ "from_id": initial_id, "to_id": second_id }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(diff.is_error, Some(true));
+        assert_eq!(
+            result_data(&diff)["nodes"]["added"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let restored = dispatch_tool(
+            &state,
+            "restore_checkpoint",
+            json!({ "checkpoint_id": initial_id }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(restored.is_error, Some(true));
+        assert_eq!(state.document.lock().await.nodes.len(), initial_node_count);
     }
 
     #[tokio::test]

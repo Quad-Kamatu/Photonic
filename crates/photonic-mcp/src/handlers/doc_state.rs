@@ -1,9 +1,9 @@
 use crate::protocol::{
-    AddConstructionLineArgs, AddDimensionArgs, ApplyDocumentTemplateArgs, DiffCheckpointsArgs,
-    FitToMarginsArgs, GetCanvasOverviewArgs, GetDocumentStateArgs, JumpToHistoryArgs,
-    ListHistoryArgs, RemoveDimensionArgs, ResizeCanvasArgs, RestoreCheckpointArgs,
-    SetArtboardMarginsArgs, SetDocumentBleedArgs, SetDocumentColorModeArgs, SetDocumentDpiArgs,
-    ToolResult, UndoRedoArgs,
+    AddConstructionLineArgs, AddDimensionArgs, ApplyDocumentTemplateArgs, CreateCheckpointArgs,
+    DiffCheckpointsArgs, FitToMarginsArgs, GetCanvasOverviewArgs, GetDocumentStateArgs,
+    JumpToHistoryArgs, ListHistoryArgs, RemoveDimensionArgs, ResizeCanvasArgs,
+    RestoreCheckpointArgs, SetArtboardMarginsArgs, SetDocumentBleedArgs, SetDocumentColorModeArgs,
+    SetDocumentDpiArgs, ToolResult, UndoRedoArgs,
 };
 use crate::server::AppState;
 use photonic_core::node::SceneNodeKind;
@@ -285,6 +285,17 @@ pub async fn resize_canvas(state: &AppState, args: ResizeCanvasArgs) -> ToolResu
         "old_width": old_w, "old_height": old_h,
         "new_width": args.width, "new_height": args.height,
     }))
+}
+
+/// Save a named snapshot of the current document.
+pub async fn create_checkpoint(state: &AppState, args: CreateCheckpointArgs) -> ToolResult {
+    tracing::debug!("tool: create_checkpoint");
+    let doc = state.document.lock().await;
+    let mut history = state.history.lock().await;
+    let id = history.create_checkpoint(args.name.clone(), &doc);
+
+    ToolResult::text(format!("Created checkpoint '{}'", args.name))
+        .with_data(json!({ "id": id.to_string(), "name": args.name }))
 }
 
 /// List all saved checkpoints.
