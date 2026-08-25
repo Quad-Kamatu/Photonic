@@ -17,11 +17,14 @@ env:
 jobs:
   build-test:
     name: Build & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner && fromJSON(matrix.runner) || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            runner: '["self-hosted","linux","unn"]'
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +58,7 @@ jobs:
 
   lint:
     name: Lint (fmt + clippy)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, unn]
     # Blocking: `cargo fmt --all --check` is enforced (the tree is now
     # rustfmt-clean). clippy runs but warnings are not denied yet (~50 in the
     # backlog) — add `-D warnings` to enforce once those are cleared.
@@ -107,7 +110,7 @@ jobs:
 
   preflight-gate:
     name: PDF/X-1a preflight gate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, unn]
     # Proves the print-export conformance checker actually says NO: a self-test
     # runs it against known-good and known-bad fixtures (RGB, missing
     # OutputIntent, wrong version, transparency, non-embedded font, encryption),
