@@ -4190,12 +4190,15 @@ export function ModeSelector() { return (
         assert_eq!(baseline["theme"]["muted_foreground"], "#646a77");
         assert_eq!(baseline["theme"]["border"], "#e5e7eb");
         let resolved = baseline["resolved_files"].as_array().unwrap();
-        assert!(resolved
-            .iter()
-            .any(|path| path.as_str().unwrap().ends_with("packages/ui/src/card.jsx")));
         assert!(resolved.iter().any(|path| path
             .as_str()
             .unwrap()
+            .replace('\\', "/")
+            .ends_with("packages/ui/src/card.jsx")));
+        assert!(resolved.iter().any(|path| path
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
             .ends_with("packages/theme/tokens.css")));
 
         let card_path = root.join("packages/ui/src/card.jsx");
