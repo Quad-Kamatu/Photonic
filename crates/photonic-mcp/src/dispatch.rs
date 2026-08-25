@@ -967,15 +967,11 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "undo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::undo(state, a).await,
-            ))
+            Ok(handlers::document::undo(state, a).await)
         }
         "redo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::redo(state, a).await,
-            ))
+            Ok(handlers::document::redo(state, a).await)
         }
         "screenshot" => {
             let a: ScreenshotArgs = serde_json::from_value(args).unwrap_or_default();
@@ -2263,6 +2259,35 @@ mod tests {
         assert_eq!(state.history.lock().await.undo_depth(), 1);
         undo(&state).await;
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    #[tokio::test]
+    async fn undo_and_redo_report_only_real_state_changes_as_mutations() {
+        let state = test_state();
+        let result = dispatch_tool(&state, "set_document_bleed", json!({ "bleed_mm": 3.0 }))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+
+        let undone = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(undone.mutates, "a successful undo must report a mutation");
+
+        let no_undo = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(!no_undo.mutates, "a no-op undo must remain readonly");
+
+        let redone = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(redone.mutates, "a successful redo must report a mutation");
+
+        let no_redo = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(!no_redo.mutates, "a no-op redo must remain readonly");
     }
 
     #[tokio::test]

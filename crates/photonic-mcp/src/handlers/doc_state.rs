@@ -5,7 +5,7 @@ use crate::protocol::{
     SetArtboardMarginsArgs, SetDocumentBleedArgs, SetDocumentColorModeArgs, SetDocumentDpiArgs,
     ToolResult, UndoRedoArgs,
 };
-use crate::server::AppState;
+use crate::server::{AppState, ToolOutput};
 use photonic_core::node::SceneNodeKind;
 use photonic_core::style::FillKind;
 use serde_json::json;
@@ -211,7 +211,7 @@ pub async fn get_document_info(state: &AppState) -> ToolResult {
     }))
 }
 
-pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
+pub(crate) async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolOutput {
     tracing::debug!("tool: undo");
     let steps = args.steps.unwrap_or(1);
     // Acquire both locks once so the render thread is only blocked for one
@@ -226,14 +226,19 @@ pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
             break;
         }
     }
-    if count > 0 {
+    let result = if count > 0 {
         ToolResult::text(format!("Undid {} step(s)", count))
     } else {
         ToolResult::text("Nothing to undo")
+    };
+    if count > 0 {
+        ToolOutput::mutating(result)
+    } else {
+        ToolOutput::readonly(result)
     }
 }
 
-pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
+pub(crate) async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolOutput {
     tracing::debug!("tool: redo");
     let steps = args.steps.unwrap_or(1);
     let mut doc = state.document.lock().await;
@@ -246,10 +251,15 @@ pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
             break;
         }
     }
-    if count > 0 {
+    let result = if count > 0 {
         ToolResult::text(format!("Redid {} step(s)", count))
     } else {
         ToolResult::text("Nothing to redo")
+    };
+    if count > 0 {
+        ToolOutput::mutating(result)
+    } else {
+        ToolOutput::readonly(result)
     }
 }
 
