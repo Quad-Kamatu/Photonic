@@ -967,15 +967,21 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "undo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::undo(state, a).await,
-            ))
+            let (result, moved) = handlers::document::undo(state, a).await;
+            Ok(if moved {
+                ToolOutput::mutating(result)
+            } else {
+                ToolOutput::readonly(result)
+            })
         }
         "redo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::redo(state, a).await,
-            ))
+            let (result, moved) = handlers::document::redo(state, a).await;
+            Ok(if moved {
+                ToolOutput::mutating(result)
+            } else {
+                ToolOutput::readonly(result)
+            })
         }
         "screenshot" => {
             let a: ScreenshotArgs = serde_json::from_value(args).unwrap_or_default();
@@ -2263,6 +2269,41 @@ mod tests {
         assert_eq!(state.history.lock().await.undo_depth(), 1);
         undo(&state).await;
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    #[tokio::test]
+    async fn undo_and_redo_are_mutating_only_when_history_moves() {
+        let state = test_state();
+
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(!output.mutates, "undo with no history must be read-only");
+
+        dispatch_tool(&state, "set_document_bleed", json!({ "bleed_mm": 3.0 }))
+            .await
+            .unwrap();
+
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(output.mutates, "successful undo must be mutating");
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            !output.mutates,
+            "undo at the history root must be read-only"
+        );
+
+        let output = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(output.mutates, "successful redo must be mutating");
+        let output = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(!output.mutates, "redo at the history tip must be read-only");
     }
 
     #[tokio::test]
