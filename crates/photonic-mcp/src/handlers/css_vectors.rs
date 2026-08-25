@@ -79,10 +79,19 @@ pub async fn create_vectors_from_css(
         }
         roots.push(id);
     }
-    let created: Vec<Uuid> = nodes.iter().map(|n| n.id).collect();
+    let root_node_ids = if args.dry_run {
+        Vec::new()
+    } else {
+        roots.clone()
+    };
+    let created: Vec<Uuid> = if args.dry_run {
+        Vec::new()
+    } else {
+        nodes.iter().map(|n| n.id).collect()
+    };
     let (groups, paths, segments) = counts(&nodes);
     let data = serde_json::json!({
-        "root_node_ids": roots, "created_node_ids": created,
+        "root_node_ids": root_node_ids, "created_node_ids": created,
         "bounds": {"x":plan.bounds.0,"y":plan.bounds.1,"width":plan.bounds.2,"height":plan.bounds.3},
         "node_counts": {"groups":groups,"paths":paths,"segments":segments},
         "resolved_viewport": {"width":viewport.width,"height":viewport.height},
@@ -159,4 +168,93 @@ fn counts(nodes: &[SceneNode]) -> (usize, usize, usize) {
         .map(|p| p.path_data.as_svg().matches(char::is_alphabetic).count())
         .sum();
     (groups, paths.len(), segments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::McpServerConfig;
+    use photonic_core::{history::CommandHistory, AuditLog, Document};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state() -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("t", 512.0, 512.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    fn args(dry_run: bool) -> CreateVectorsFromCssArgs {
+        CreateVectorsFromCssArgs {
+            css: ".badge { width: 240px; height: 96px; background: #6941c6; border: 3px solid #fff; border-radius: 24px; }".into(),
+            selector: Some(".badge".into()),
+            origin: None,
+            viewport: None,
+            layer_id: None,
+            group_name: None,
+            strict: true,
+            dry_run,
+        }
+    }
+
+    fn plan_json(result: &ToolResult) -> serde_json::Value {
+        let crate::protocol::ContentItem::Text { text } = &result.content[1] else {
+            panic!("missing JSON plan")
+        };
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn dry_run_is_repeatable_without_node_ids_or_mutation() {
+        let state = test_state();
+        let before_document = serde_json::to_value(&*state.document.lock().await).unwrap();
+        let before_history = state.history.lock().await.undo_depth();
+
+        let first = create_vectors_from_css(&state, args(true)).await;
+        let second = create_vectors_from_css(&state, args(true)).await;
+        assert_ne!(first.is_error, Some(true), "{first:?}");
+        assert_ne!(second.is_error, Some(true), "{second:?}");
+
+        let first_plan = plan_json(&first);
+        let second_plan = plan_json(&second);
+        assert_eq!(first_plan, second_plan);
+        assert!(first_plan["root_node_ids"].as_array().unwrap().is_empty());
+        assert!(first_plan["created_node_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        assert_eq!(
+            before_document,
+            serde_json::to_value(&*state.document.lock().await).unwrap()
+        );
+        assert_eq!(before_history, state.history.lock().await.undo_depth());
+    }
+
+    #[tokio::test]
+    async fn non_dry_run_reports_ids_inserted_into_document() {
+        let state = test_state();
+        let result = create_vectors_from_css(&state, args(false)).await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let plan = plan_json(&result);
+        let created = plan["created_node_ids"].as_array().unwrap();
+        let roots = plan["root_node_ids"].as_array().unwrap();
+        assert!(!created.is_empty());
+        assert!(!roots.is_empty());
+
+        let doc = state.document.lock().await;
+        assert_eq!(created.len(), doc.nodes.len());
+        for id in created.iter().chain(roots) {
+            let id = Uuid::parse_str(id.as_str().unwrap()).unwrap();
+            assert!(doc.nodes.contains_key(&id));
+        }
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+    }
 }
