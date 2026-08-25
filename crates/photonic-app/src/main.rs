@@ -15,6 +15,7 @@ use photonic_mcp::{McpServer, McpServerConfig};
 use photonic_render::PhotonicRenderer;
 use repl::LuaRepl;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -1091,39 +1092,88 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
 /// Uses the HTTP transport — Claude Code connects directly to the already-running
 /// Photonic MCP HTTP server on port 7842.  No proxy subprocess needed.
 fn write_mcp_config() {
-    let server_entry = serde_json::json!({
-        "type": "http",
-        "url": format!("http://127.0.0.1:{}/mcp", 7842)
-    });
-
-    let claude_settings_path = claude_settings_path();
-    if let Some(p) = &claude_settings_path {
-        let mut settings: serde_json::Value = p
-            .exists()
-            .then(|| std::fs::read_to_string(p).ok())
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        if !settings["mcpServers"].is_object() {
-            settings["mcpServers"] = serde_json::json!({});
-        }
-        settings["mcpServers"]["photonic"] = server_entry;
-
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::write(
-            p,
-            serde_json::to_string_pretty(&settings).unwrap_or_default(),
-        ) {
-            Ok(_) => info!(
-                "Registered Photonic MCP server in Claude settings at {:?}",
-                p
-            ),
-            Err(e) => tracing::warn!("Could not update Claude settings: {e}"),
-        }
+    if let Some(p) = claude_settings_path() {
+        write_mcp_config_at(&p);
     }
+}
+
+fn write_mcp_config_at(path: &Path) {
+    match update_mcp_config_file(path) {
+        Ok(()) => info!(
+            "Registered Photonic MCP server in Claude settings at {:?}",
+            path
+        ),
+        Err(error) => tracing::warn!("{error}"),
+    }
+}
+
+fn update_mcp_config_file(path: &Path) -> Result<(), String> {
+    let mut settings: serde_json::Value = match std::fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents).map_err(|error| {
+            format!(
+                "Could not parse Claude settings at {:?}; leaving the file unchanged: {error}",
+                path
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => {
+            return Err(format!(
+                "Could not read Claude settings at {:?}; leaving the file unchanged: {error}",
+                path
+            ));
+        }
+    };
+
+    let Some(settings_object) = settings.as_object_mut() else {
+        return Err(format!(
+            "Could not update Claude settings at {:?}; expected a JSON object and left the file unchanged",
+            path
+        ));
+    };
+
+    let mcp_servers = settings_object
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(mcp_servers) = mcp_servers.as_object_mut() else {
+        return Err(format!(
+            "Could not update Claude settings at {:?}; expected mcpServers to be a JSON object and left the file unchanged",
+            path
+        ));
+    };
+
+    mcp_servers.insert(
+        "photonic".to_string(),
+        serde_json::json!({
+            "type": "http",
+            "url": format!("http://127.0.0.1:{}/mcp", 7842)
+        }),
+    );
+
+    let serialized = serde_json::to_string_pretty(&settings).map_err(|error| {
+        format!(
+            "Could not serialize Claude settings at {:?}; leaving the file unchanged: {error}",
+            path
+        )
+    })?;
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Could not prepare Claude settings directory {:?}; leaving the file unchanged: {error}",
+                parent
+            )
+        })?;
+    }
+
+    photonic_core::write_atomic_file(path, serialized.as_bytes()).map_err(|error| {
+        format!(
+            "Could not update Claude settings at {:?}; leaving the existing file unchanged: {error}",
+            path
+        )
+    })
 }
 
 /// Return the path to Claude Code's `~/.claude.json`.
@@ -1368,4 +1418,145 @@ fn run_claude_stream(user_msg: String, is_first: bool, tx: std::sync::mpsc::Send
         let _ = tx.send(ClaudeEvent::Error("(no response from claude)".into()));
     }
     let _ = tx.send(ClaudeEvent::Done);
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+    use super::write_mcp_config_at;
+    use serde_json::json;
+    use std::fs;
+    use std::io::{self, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log writer lock poisoned")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_settings_file(label: &str) -> (PathBuf, PathBuf) {
+        let serial = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "photonic-claude-settings-{label}-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create settings test directory");
+        let path = dir.join(".claude.json");
+        (dir, path)
+    }
+
+    fn cleanup(dir: &Path) {
+        fs::remove_dir_all(dir).expect("remove settings test directory");
+    }
+
+    fn staging_files(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .expect("read settings test directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".photonic-tmp-"))
+            })
+            .collect()
+    }
+
+    fn capture_logs(path: &Path) -> String {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || LogWriter(Arc::clone(&writer_output)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || write_mcp_config_at(path));
+
+        let bytes = output.lock().expect("log output lock poisoned").clone();
+        String::from_utf8(bytes).expect("warning log should be valid UTF-8")
+    }
+
+    #[test]
+    fn valid_settings_are_preserved_and_replaced_atomically() {
+        let (dir, path) = test_settings_file("valid");
+        let original = json!({
+            "theme": "dark",
+            "mcpServers": {
+                "existing": {
+                    "command": "npx",
+                    "args": ["existing-server"]
+                }
+            }
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+
+        write_mcp_config_at(&path);
+
+        let updated: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(updated["theme"], original["theme"]);
+        assert_eq!(
+            updated["mcpServers"]["existing"],
+            original["mcpServers"]["existing"]
+        );
+        assert_eq!(
+            updated["mcpServers"]["photonic"],
+            json!({
+                "type": "http",
+                "url": "http://127.0.0.1:7842/mcp"
+            })
+        );
+        assert!(staging_files(&dir).is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn malformed_settings_are_unchanged_and_emit_a_warning() {
+        let (dir, path) = test_settings_file("malformed");
+        let original = br#"{"mcpServers":{"existing":{"command":"keep"}},"#;
+        fs::write(&path, original).unwrap();
+
+        let logs = capture_logs(&path);
+
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(
+            logs.contains("Could not parse Claude settings"),
+            "logs: {logs}"
+        );
+        assert!(logs.contains("leaving the file unchanged"), "logs: {logs}");
+        assert!(staging_files(&dir).is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn missing_settings_are_created_with_the_photonic_entry() {
+        let (dir, path) = test_settings_file("missing");
+
+        write_mcp_config_at(&path);
+
+        let updated: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            updated["mcpServers"]["photonic"],
+            json!({
+                "type": "http",
+                "url": "http://127.0.0.1:7842/mcp"
+            })
+        );
+        assert!(staging_files(&dir).is_empty());
+        cleanup(&dir);
+    }
 }
