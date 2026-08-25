@@ -1122,6 +1122,16 @@ pub(crate) async fn dispatch_tool_inner(
                 handlers::audit::export_audit_log(state, a).await,
             ))
         }
+        "list_checkpoints" => Ok(ToolOutput::readonly(
+            handlers::document::list_checkpoints(state).await,
+        )),
+        "restore_checkpoint" => {
+            let a: RestoreCheckpointArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::restore_checkpoint(state, a).await,
+            ))
+        }
         "diff_checkpoints" => {
             let a: DiffCheckpointsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
             Ok(ToolOutput::readonly(
@@ -2263,6 +2273,124 @@ mod tests {
         assert_eq!(state.history.lock().await.undo_depth(), 1);
         undo(&state).await;
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    #[test]
+    fn tool_list_exposes_checkpoint_lifecycle() {
+        let tools = crate::schema_gen::tool_list();
+        let tools = tools.as_array().expect("tool list array");
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+        };
+
+        let list = find("list_checkpoints");
+        assert_eq!(list["inputSchema"]["type"], "object");
+        assert_eq!(list["inputSchema"]["properties"], json!({}));
+        assert_eq!(list["inputSchema"]["required"], json!([]));
+
+        let restore = find("restore_checkpoint");
+        assert_eq!(restore["inputSchema"]["type"], "object");
+        assert_eq!(
+            restore["inputSchema"]["properties"]["checkpoint_id"]["type"],
+            "string"
+        );
+        assert_eq!(restore["inputSchema"]["required"], json!(["checkpoint_id"]));
+    }
+
+    fn structured_data(result: &ToolResult) -> Value {
+        let Some(ContentItem::Text { text }) = result.content.last() else {
+            panic!("expected structured JSON content");
+        };
+        serde_json::from_str(text).expect("valid structured JSON content")
+    }
+
+    #[tokio::test]
+    async fn checkpoint_lifecycle_is_reachable_through_mcp() {
+        let state = test_state();
+        let from_id = {
+            let doc = state.document.lock().await;
+            state
+                .history
+                .lock()
+                .await
+                .create_checkpoint("baseline".to_string(), &doc)
+        };
+
+        let listed = dispatch_tool(&state, "list_checkpoints", json!({}))
+            .await
+            .unwrap();
+        assert_ne!(listed.is_error, Some(true));
+        let listed_data = structured_data(&listed);
+        assert_eq!(listed_data["checkpoints"][0]["id"], from_id.to_string());
+        assert_eq!(listed_data["checkpoints"][0]["name"], "baseline");
+
+        let created = dispatch_tool(
+            &state,
+            "create_shape",
+            json!({
+                "shape_type": "rectangle",
+                "x": 0.0,
+                "y": 0.0,
+                "width": 10.0,
+                "height": 10.0,
+                "name": "checkpoint-node"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(created.is_error, Some(true));
+
+        let to_id = {
+            let doc = state.document.lock().await;
+            state
+                .history
+                .lock()
+                .await
+                .create_checkpoint("updated".to_string(), &doc)
+        };
+        let diff = dispatch_tool(
+            &state,
+            "diff_checkpoints",
+            json!({ "from_id": from_id.to_string(), "to_id": to_id.to_string() }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(diff.is_error, Some(true));
+        let diff_data = structured_data(&diff);
+        assert_eq!(diff_data["nodes"]["added"].as_array().unwrap().len(), 1);
+        assert_eq!(diff_data["nodes"]["removed"].as_array().unwrap().len(), 0);
+        assert_eq!(diff_data["nodes"]["modified"].as_array().unwrap().len(), 0);
+        assert!(diff_data["total_changes"].as_u64().unwrap() >= 1);
+
+        let route = dispatch_tool_inner(
+            &state,
+            "restore_checkpoint",
+            json!({ "checkpoint_id": "not-a-uuid" }),
+        )
+        .await
+        .unwrap();
+        assert!(route.mutates, "restore_checkpoint must be marked mutating");
+        assert_eq!(route.result.is_error, Some(true));
+
+        let restored = dispatch_tool(
+            &state,
+            "restore_checkpoint",
+            json!({ "checkpoint_id": from_id.to_string() }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(restored.is_error, Some(true));
+        assert!(state.document.lock().await.nodes.is_empty());
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+
+        let audit = state.audit_log.lock().unwrap();
+        let entry = audit.entries().back().expect("restore audit entry");
+        assert_eq!(entry.tool_name, "restore_checkpoint");
+        assert_eq!(entry.args["checkpoint_id"], from_id.to_string());
+        assert!(!entry.is_error);
     }
 
     #[tokio::test]
