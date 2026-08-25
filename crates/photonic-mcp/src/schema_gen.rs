@@ -2667,6 +2667,25 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "list_checkpoints",
+            "description": "List all saved document checkpoints, including their IDs, names, and creation times. Use these IDs with diff_checkpoints or restore_checkpoint.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "restore_checkpoint",
+            "description": "Restore the document to a saved checkpoint by ID, clearing undo/redo history. This mutates the document.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "checkpoint_id": {
+                        "type": "string",
+                        "description": "UUID of the checkpoint to restore"
+                    }
+                },
+                "required": ["checkpoint_id"]
+            }
+        },
+        {
             "name": "diff_checkpoints",
             "description": "Compare two checkpoint snapshots and return a structured JSON diff of added, removed, and modified nodes and layers. Use list_checkpoints first to get checkpoint IDs.",
             "inputSchema": {
