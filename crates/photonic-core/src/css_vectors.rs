@@ -571,14 +571,45 @@ fn border(
     let shorthand_tokens = shorthand
         .map(|value| value.split_whitespace().collect::<Vec<_>>())
         .unwrap_or_default();
-    let shorthand_width = shorthand_tokens
+    let shorthand_widths: Vec<_> = shorthand_tokens
         .iter()
-        .find_map(|token| length(Some(token), 1.0, 16.0));
+        .filter_map(|token| length(Some(token), 1.0, 16.0))
+        .collect();
+    if shorthand_widths.len() > 1 {
+        ds.push(diag(
+            "CSS_UNSUPPORTED_BORDER_WIDTH",
+            "uniform border strokes do not support multiple width values",
+            sel,
+            Some("border"),
+            shorthand.map(String::as_str),
+        ));
+    }
+    let shorthand_width = if shorthand_widths.len() == 1 {
+        Some(shorthand_widths[0])
+    } else {
+        None
+    };
     let shorthand_color = shorthand_tokens.iter().find_map(|token| color(token));
     let width = props
         .get("border-width")
-        .and_then(|value| length(Some(value), 1.0, 16.0))
+        .and_then(|value| {
+            if value.split_whitespace().count() > 1 {
+                ds.push(diag(
+                    "CSS_UNSUPPORTED_BORDER_WIDTH",
+                    "uniform border strokes do not support multiple width values",
+                    sel,
+                    Some("border-width"),
+                    Some(value),
+                ));
+                None
+            } else {
+                length(Some(value), 1.0, 16.0)
+            }
+        })
         .or(shorthand_width)
+        // In permissive mode, unsupported side-specific widths are ignored
+        // after recording the diagnostic; a uniform shorthand may still
+        // provide the width, otherwise the fallback is 1px.
         .unwrap_or(1.0);
     let c = props
         .get("border-color")
@@ -855,6 +886,99 @@ mod tests {
             panic!("background must be a path")
         };
         background.fill.clone()
+    }
+
+    #[test]
+    fn strict_mode_rejects_multi_value_border_width() {
+        let result = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; border-width: 2px 4px; border-color: #fff; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        );
+        let Err(diagnostics) = result else {
+            panic!("strict mode must reject side-specific border widths")
+        };
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "CSS_UNSUPPORTED_BORDER_WIDTH"
+                && diagnostic.property.as_deref() == Some("border-width")
+                && diagnostic.value.as_deref() == Some("2px 4px")
+        }));
+    }
+
+    #[test]
+    fn permissive_mode_reports_and_falls_back_for_multi_value_border_width() {
+        let plan = compile_css_vectors(
+            ".badge { width: 40px; height: 20px; border-width: 2px 4px; border-color: #fff; }",
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            false,
+        )
+        .unwrap();
+        let CssVectorNode::Group(group) = &plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        let CssVectorNode::Path(border) = &group.children[0] else {
+            panic!("border must be a path")
+        };
+        assert_eq!(border.stroke.width, 1.0);
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "CSS_UNSUPPORTED_BORDER_WIDTH"
+                && diagnostic.property.as_deref() == Some("border-width")
+        }));
+    }
+
+    #[test]
+    fn multi_value_border_shorthand_is_rejected_and_permissively_uses_one_pixel() {
+        let css = ".badge { width: 40px; height: 20px; border: 2px 4px solid red; }";
+        let result = compile_css_vectors(
+            css,
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            true,
+        );
+        let Err(diagnostics) = result else {
+            panic!("strict mode must reject multi-value border shorthand")
+        };
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "CSS_UNSUPPORTED_BORDER_WIDTH"
+                && diagnostic.property.as_deref() == Some("border")
+        }));
+
+        let plan = compile_css_vectors(
+            css,
+            Some(".badge"),
+            CssOrigin { x: 0.0, y: 0.0 },
+            CssViewport {
+                width: 100.0,
+                height: 100.0,
+            },
+            false,
+        )
+        .unwrap();
+        let CssVectorNode::Group(group) = &plan.roots[0] else {
+            panic!("root must be a group")
+        };
+        let CssVectorNode::Path(border) = &group.children[0] else {
+            panic!("border must be a path")
+        };
+        assert_eq!(border.stroke.width, 1.0);
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "CSS_UNSUPPORTED_BORDER_WIDTH"
+                && diagnostic.property.as_deref() == Some("border")
+        }));
     }
 
     #[test]
