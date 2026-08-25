@@ -1113,19 +1113,47 @@ fn write_mcp_config(secret: Option<&str>) {
         }
         settings["mcpServers"]["photonic"] = server_entry;
 
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::write(
-            p,
-            serde_json::to_string_pretty(&settings).unwrap_or_default(),
-        ) {
+        let serialized = serde_json::to_string_pretty(&settings).unwrap_or_default();
+        match write_private_claude_settings(p, serialized.as_bytes()) {
             Ok(_) => info!(
                 "Registered Photonic MCP server in Claude settings at {:?}",
                 p
             ),
             Err(e) => tracing::warn!("Could not update Claude settings: {e}"),
         }
+    }
+}
+
+fn write_private_claude_settings(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        options.mode(0o600);
+        let mut file = options.open(path)?;
+        // `mode` only applies to newly-created files. Tighten an existing file
+        // before writing a secret so a permissive prior mode has no exposure
+        // window while the new contents are being written.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents)?;
+        file.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Windows user-profile files inherit the profile directory's ACL.
+        let mut file = options.open(path)?;
+        file.write_all(contents)?;
+        file.sync_all()
     }
 }
 
@@ -1371,4 +1399,38 @@ fn run_claude_stream(user_msg: String, is_first: bool, tx: std::sync::mpsc::Send
         let _ = tx.send(ClaudeEvent::Error("(no response from claude)".into()));
     }
     let _ = tx.send(ClaudeEvent::Done);
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+    use super::write_private_claude_settings;
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_settings_are_created_and_updated_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "photonic-private-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(".claude.json");
+
+        write_private_claude_settings(&path, br#"{"first":true}"#).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_claude_settings(&path, br#"{"secret":"private"}"#).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"secret":"private"}"#);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

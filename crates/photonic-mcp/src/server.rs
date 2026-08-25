@@ -4,12 +4,13 @@ use crate::handlers::clipboard::ClipboardRing;
 use crate::protocol::*;
 pub use crate::schema_gen::tool_list;
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, Request, State},
     http::{
         header::{self, HeaderName, HeaderValue},
         request::Parts as RequestParts,
         HeaderMap, Method, StatusCode, Uri,
     },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -26,6 +27,9 @@ use tracing::info;
 
 /// Header used to authenticate requests when `McpServerConfig::secret` is set.
 pub const MCP_SECRET_HEADER: &str = "x-mcp-secret";
+
+/// Maximum encoded JSON-RPC request size accepted by the MCP endpoint.
+const MCP_REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Configuration for the MCP server.
 #[derive(Debug, Clone)]
@@ -154,6 +158,12 @@ impl McpServer {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp))
+        // Authenticate the request metadata before any body extractor runs.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_authentication,
+        ))
+        .layer(DefaultBodyLimit::max(MCP_REQUEST_BODY_LIMIT))
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(is_loopback_origin))
@@ -164,6 +174,18 @@ fn build_router(state: AppState) -> Router {
                 ]),
         )
         .with_state(state)
+}
+
+async fn require_authentication(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !is_authorized(request.headers(), state.config.secret.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    next.run(request).await
 }
 
 fn is_loopback_origin(origin: &HeaderValue, _parts: &RequestParts) -> bool {
@@ -197,15 +219,7 @@ fn is_authorized(headers: &HeaderMap, secret: Option<&str>) -> bool {
 }
 
 /// Main MCP JSON-RPC handler.
-async fn handle_mcp(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<JsonRpcRequest>,
-) -> Response {
-    if !is_authorized(&headers, state.config.secret.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn handle_mcp(State(state): State<AppState>, Json(req): Json<JsonRpcRequest>) -> Response {
     if req.jsonrpc != "2.0" {
         return Json(JsonRpcResponse::error(
             req.id,
@@ -349,6 +363,37 @@ mod tests {
         assert!(path.exists(), "authenticated request should dispatch");
 
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_oversized_body_is_rejected_before_body_extraction() {
+        let app = build_router(test_state(Some("correct-secret")));
+        let oversized_body = vec![b' '; MCP_REQUEST_BODY_LIMIT + 1];
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn authenticated_oversized_body_is_capped() {
+        let app = build_router(test_state(Some("correct-secret")));
+        let oversized_body = vec![b' '; MCP_REQUEST_BODY_LIMIT + 1];
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(MCP_SECRET_HEADER, "correct-secret")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
