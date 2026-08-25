@@ -967,15 +967,13 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "undo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::undo(state, a).await,
-            ))
+            let (result, mutates) = handlers::document::undo(state, a).await;
+            Ok(ToolOutput { result, mutates })
         }
         "redo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::redo(state, a).await,
-            ))
+            let (result, mutates) = handlers::document::redo(state, a).await;
+            Ok(ToolOutput { result, mutates })
         }
         "screenshot" => {
             let a: ScreenshotArgs = serde_json::from_value(args).unwrap_or_default();
@@ -2189,6 +2187,51 @@ mod tests {
     async fn undo(state: &AppState) {
         let result = dispatch_tool(state, "undo", json!({})).await.unwrap();
         assert_ne!(result.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn undo_and_redo_report_mutation_only_when_history_moves() {
+        let state = test_state();
+
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(!output.mutates, "empty undo history must be read-only");
+
+        {
+            let mut doc = state.document.lock().await;
+            let mut history = state.history.lock().await;
+            history.execute_discrete(
+                Command::ResizeCanvas {
+                    old_width: doc.width,
+                    old_height: doc.height,
+                    new_width: 300.0,
+                    new_height: 150.0,
+                },
+                &mut doc,
+            );
+        }
+
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            output.mutates,
+            "successful undo must be treated as a mutation"
+        );
+
+        let output = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            output.mutates,
+            "successful redo must be treated as a mutation"
+        );
+
+        let output = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(!output.mutates, "empty redo history must be read-only");
     }
 
     #[tokio::test]
