@@ -1,7 +1,7 @@
 use crate::handlers;
 use crate::protocol::*;
 use crate::server::{AppState, ToolOutput};
-use photonic_core::{audit_timestamp, AuditEntry, Command, Document};
+use photonic_core::{audit_timestamp, summarize_audit_args, AuditEntry, Command, Document};
 use serde_json::Value;
 
 /// Notify the checkpoint system that a mutation has occurred.
@@ -90,7 +90,11 @@ pub async fn dispatch_tool(
     } else {
         None
     };
-    let output = dispatch_tool_inner(state, name, args.clone()).await;
+    // Summarize before constructing the audit entry so the original request
+    // value is never retained by the dispatcher. AuditLog repeats this at its
+    // storage boundary for callers that record entries directly.
+    let audit_args = summarize_audit_args(&args);
+    let output = dispatch_tool_inner(state, name, args).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     // Direct handlers leave the history head unchanged. Turn their completed
@@ -142,7 +146,7 @@ pub async fn dispatch_tool(
         id: 0, // assigned by AuditLog::record
         timestamp: audit_timestamp(),
         tool_name: name.to_string(),
-        args,
+        args: audit_args,
         result_summary,
         duration_ms,
         is_error,
@@ -2319,5 +2323,74 @@ mod tests {
             "pathless save should use the remembered path"
         );
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatch_stores_bounded_arguments_and_evicts_by_bytes() {
+        let state = test_state();
+        let args = json!({
+            "parts": vec!["x".repeat(256); 14],
+            "nested": {"level": {"level": {"value": true}}}
+        });
+
+        for _ in 0..400 {
+            assert!(dispatch_tool(&state, "unknown_tool", args.clone())
+                .await
+                .is_err());
+        }
+
+        let log = state.audit_log.lock().unwrap();
+        assert_eq!(log.total_recorded(), 400);
+        assert!(log.stored_bytes() <= log.max_bytes());
+        assert!(log.entries().len() < 400);
+        assert!(log.entries().iter().all(|entry| {
+            serde_json::to_vec(&entry.args).unwrap().len() <= photonic_core::AUDIT_MAX_ARGS_BYTES
+        }));
+        assert!(log.entries().iter().all(|entry| entry.is_error));
+    }
+
+    #[tokio::test]
+    async fn audit_list_and_export_responses_are_bounded_and_export_paginates() {
+        let state = test_state();
+        let args = json!({"parts": vec!["x".repeat(256); 14]});
+        for _ in 0..100 {
+            assert!(dispatch_tool(&state, "unknown_tool", args.clone())
+                .await
+                .is_err());
+        }
+
+        let list = dispatch_tool(&state, "list_audit_log", json!({"limit": 1000}))
+            .await
+            .unwrap();
+        let list_text = match &list.content[0] {
+            ContentItem::Text { text } => text,
+            _ => panic!("audit list should return text"),
+        };
+        assert!(list_text.len() <= photonic_core::AUDIT_EXPORT_MAX_BYTES);
+
+        let export = dispatch_tool(
+            &state,
+            "export_audit_log",
+            json!({"limit": 1000, "offset": 0}),
+        )
+        .await
+        .unwrap();
+        let export_text = match &export.content[0] {
+            ContentItem::Text { text } => text,
+            _ => panic!("audit export should return text"),
+        };
+        assert!(export_text.len() <= photonic_core::AUDIT_EXPORT_MAX_BYTES);
+        assert!(export_text.contains("has_more true"));
+        assert!(export_text.contains("next_offset"));
+
+        let page = dispatch_tool(&state, "export_audit_log", json!({"limit": 1, "offset": 0}))
+            .await
+            .unwrap();
+        let page_text = match &page.content[0] {
+            ContentItem::Text { text } => text,
+            _ => panic!("audit export page should return text"),
+        };
+        assert!(page_text.contains("returned 1"));
+        assert!(page_text.contains("next_offset 1"));
     }
 }

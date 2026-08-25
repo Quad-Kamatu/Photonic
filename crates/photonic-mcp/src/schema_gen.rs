@@ -2490,7 +2490,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "list_audit_log",
-            "description": "Return the most recent MCP tool calls recorded since the server started.\n\nEach entry includes: `id` (sequential), `timestamp` (ISO 8601), `tool_name`, `args` (full arguments), `result_summary` (first 200 chars of result text), `duration_ms`, and `is_error`.\n\nUseful for multi-agent accountability: see exactly what was called, by whom (if the calling agent passes an `author` in its args), and with what parameters.",
+            "description": "Return the most recent MCP tool calls recorded since the server started.\n\nEach entry includes: `id` (sequential), `timestamp` (ISO 8601), `tool_name`, `args` (a bounded argument summary), `result_summary` (first 200 chars of result text), `duration_ms`, and `is_error`. Large strings, collections, and deeply nested values are truncated before storage, and responses are byte-bounded.\n\nUseful for multi-agent accountability: see what was called, by whom (if the calling agent passes an `author` in its args), and with which bounded parameters.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2503,10 +2503,13 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_audit_log",
-            "description": "Export the complete in-memory MCP audit log as a JSON array (oldest first). Includes every tool call recorded since the server started, up to 1000 entries.",
+            "description": "Export a bounded page of the retained in-memory MCP audit log as a JSON array (oldest first). Argument values are bounded summaries and the response has a fixed byte cap. Use `offset` with `limit` to paginate through retained entries.",
             "inputSchema": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "limit": { "type": "integer", "description": "Maximum number of retained entries to return, oldest first. Default: 100; maximum: 1000." },
+                    "offset": { "type": "integer", "description": "Number of retained entries to skip from the oldest entry. Default: 0." }
+                }
             }
         },
         {

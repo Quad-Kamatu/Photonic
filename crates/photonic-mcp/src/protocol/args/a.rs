@@ -83,9 +83,17 @@ pub struct ListAuditLogArgs {
     pub limit: Option<usize>,
 }
 
-/// Arguments for `export_audit_log` tool (no parameters needed).
+/// Arguments for `export_audit_log` tool.
 #[derive(Debug, Deserialize, Default)]
-pub struct ExportAuditLogArgs {}
+pub struct ExportAuditLogArgs {
+    /// Maximum number of retained entries to return, oldest first. Defaults to
+    /// 100 and is capped at 1000.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Number of retained entries to skip from the oldest entry. Defaults to 0.
+    #[serde(default)]
+    pub offset: Option<usize>,
+}
 
 /// Arguments for `export_svg` tool
 #[derive(Debug, Deserialize, Default)]

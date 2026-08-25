@@ -24,7 +24,10 @@ pub mod units;
 
 // Re-export the most commonly used types at the crate root
 pub use annotation::{Annotation, AnnotationId};
-pub use audit::{audit_timestamp, AuditEntry, AuditLog};
+pub use audit::{
+    audit_timestamp, summarize_audit_args, AuditEntry, AuditLog, AUDIT_EXPORT_MAX_BYTES,
+    AUDIT_MAX_ARGS_BYTES, AUDIT_MAX_BYTES, AUDIT_MAX_ENTRIES,
+};
 pub use color::Color;
 pub use diagnostics::{crash_dir, CrashReport};
 pub use document::{

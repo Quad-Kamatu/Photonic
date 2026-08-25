@@ -1599,9 +1599,12 @@ Export one or more artboards to raster images — one image per artboard. Return
 
 ## `export_audit_log`
 
-Export the complete in-memory MCP audit log as a JSON array (oldest first). Includes every tool call recorded since the server started, up to 1000 entries.
+Export a bounded page of the retained in-memory MCP audit log as a JSON array (oldest first). Argument values are bounded summaries and the response has a fixed byte cap. Use `offset` with `limit` to paginate through retained entries.
 
-_No parameters._
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | no | Maximum number of retained entries to return, oldest first. Default: 100; maximum: 1000. |
+| `offset` | integer | no | Number of retained entries to skip from the oldest entry. Default: 0. |
 
 ## `export_design_tokens`
 
@@ -2108,9 +2111,9 @@ _No parameters._
 
 Return the most recent MCP tool calls recorded since the server started.
 
-Each entry includes: `id` (sequential), `timestamp` (ISO 8601), `tool_name`, `args` (full arguments), `result_summary` (first 200 chars of result text), `duration_ms`, and `is_error`.
+Each entry includes: `id` (sequential), `timestamp` (ISO 8601), `tool_name`, `args` (a bounded argument summary), `result_summary` (first 200 chars of result text), `duration_ms`, and `is_error`. Large strings, collections, and deeply nested values are truncated before storage, and responses are byte-bounded.
 
-Useful for multi-agent accountability: see exactly what was called, by whom (if the calling agent passes an `author` in its args), and with what parameters.
+Useful for multi-agent accountability: see what was called, by whom (if the calling agent passes an `author` in its args), and with which bounded parameters.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
