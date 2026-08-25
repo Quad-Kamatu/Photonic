@@ -40,6 +40,7 @@ fn needs_document_snapshot(name: &str) -> bool {
             | "add_export_profile"
             | "remove_export_profile"
             | "import_design_tokens"
+            | "apply_document_template"
             | "add_construction_line"
             | "set_document_bleed"
             | "set_document_color_mode"
@@ -54,6 +55,7 @@ fn needs_document_snapshot(name: &str) -> bool {
             | "define_symbol"
             | "delete_symbol"
             | "add_color_swatch"
+            | "update_color_swatch"
             | "delete_color_swatch"
             | "load_swatch_library"
             | "define_pattern"
@@ -2166,8 +2168,12 @@ mod tests {
     use crate::handlers::clipboard::new_clipboard_ring;
     use crate::server::McpServerConfig;
     use photonic_core::{
+        color::Color,
+        document::{ExportProfile, Guide, GuideOrientation},
+        layer::Layer,
         node::{PathNode, TextNode},
-        AuditLog, Document, PathData, SceneNode, SceneNodeKind,
+        style::Fill,
+        AuditLog, ColorSwatch, Document, PathData, SceneNode, SceneNodeKind,
     };
     use serde_json::json;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -2263,6 +2269,154 @@ mod tests {
         assert_eq!(state.history.lock().await.undo_depth(), 1);
         undo(&state).await;
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
+    }
+
+    async fn swatch_state(with_matching_node: bool) -> AppState {
+        let state = test_state();
+        let mut doc = state.document.lock().await;
+        doc.color_swatches
+            .push(ColorSwatch::new("Brand", "#112233"));
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let fill = if with_matching_node {
+            Fill::solid(Color::from_hex("#112233").unwrap())
+        } else {
+            Fill::solid(Color::from_hex("#AABBCC").unwrap())
+        };
+        doc.add_node(
+            SceneNode::new(
+                "swatch target",
+                layer_id,
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0)).with_fill(fill),
+                ),
+            ),
+            Some(layer_id),
+        );
+        drop(doc);
+        state
+    }
+
+    #[tokio::test]
+    async fn update_color_swatch_undo_redo_restores_palette_and_nodes() {
+        let cases = [
+            (
+                "recolor without propagation",
+                false,
+                json!({
+                    "name": "Brand",
+                    "new_color_hex": "#445566",
+                    "propagate": false
+                }),
+            ),
+            (
+                "recolor with matching nodes",
+                true,
+                json!({
+                    "name": "Brand",
+                    "new_color_hex": "#445566"
+                }),
+            ),
+        ];
+
+        for (label, with_matching_node, args) in cases {
+            let state = swatch_state(with_matching_node).await;
+            let before = serde_json::to_value(&*state.document.lock().await).unwrap();
+
+            let result = dispatch_tool(&state, "update_color_swatch", args)
+                .await
+                .unwrap();
+            assert_ne!(result.is_error, Some(true), "{label}: update failed");
+            let after = serde_json::to_value(&*state.document.lock().await).unwrap();
+            assert_ne!(after, before, "{label}: update was a no-op");
+            assert_eq!(
+                state.history.lock().await.undo_depth(),
+                1,
+                "{label}: update must be one undo step"
+            );
+
+            undo(&state).await;
+            assert_eq!(
+                serde_json::to_value(&*state.document.lock().await).unwrap(),
+                before,
+                "{label}: undo did not restore the document"
+            );
+
+            let result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{label}: redo failed");
+            assert_eq!(
+                serde_json::to_value(&*state.document.lock().await).unwrap(),
+                after,
+                "{label}: redo did not reapply the document"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_document_template_records_all_changes_in_one_step() {
+        let state = test_state();
+        let (template_json, before) = {
+            let mut doc = state.document.lock().await;
+            doc.guides
+                .push(Guide::new(GuideOrientation::Horizontal, 12.0));
+            doc.export_profiles
+                .push(ExportProfile::new_png("print", Some(400), Some(300)));
+            let before = serde_json::to_value(&*doc).unwrap();
+
+            let mut template = doc.clone();
+            template.width = 640.0;
+            template.height = 480.0;
+            template
+                .guides
+                .push(Guide::new(GuideOrientation::Vertical, 37.0));
+            template.export_profiles = vec![ExportProfile {
+                name: "print".to_string(),
+                format: "png".to_string(),
+                width: Some(1600),
+                height: Some(1200),
+                semantic_ids: Some(true),
+                precision: Some(4),
+            }];
+            let template_layer = Layer::new("Template overlay");
+            template.layer_order.push(template_layer.id);
+            template.layers.insert(template_layer.id, template_layer);
+            (template.to_json().unwrap(), before)
+        };
+
+        let result = dispatch_tool(
+            &state,
+            "apply_document_template",
+            json!({ "template_json": template_json }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+
+        let after = serde_json::to_value(&*state.document.lock().await).unwrap();
+        {
+            let doc = state.document.lock().await;
+            assert_eq!((doc.width, doc.height), (640.0, 480.0));
+            assert_eq!(doc.guides.len(), 2);
+            assert!(doc.layers.values().any(|l| l.name == "Template overlay"));
+            let profile = doc
+                .export_profiles
+                .iter()
+                .find(|p| p.name == "print")
+                .unwrap();
+            assert_eq!((profile.width, profile.height), (Some(1600), Some(1200)));
+        }
+
+        undo(&state).await;
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            before
+        );
+        let redo_result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+        assert_ne!(redo_result.is_error, Some(true));
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            after
+        );
     }
 
     #[tokio::test]

@@ -175,11 +175,9 @@ pub async fn apply_color_swatch(state: &AppState, args: ApplyColorSwatchArgs) ->
 /// nodes whose fill color matches the old color are updated to the new color.
 pub async fn update_color_swatch(state: &AppState, args: UpdateColorSwatchArgs) -> ToolResult {
     tracing::debug!("tool: update_color_swatch");
-    use photonic_core::history::Command;
     use photonic_core::style::FillKind;
 
     let mut doc = state.document.lock().await;
-    let mut history = state.history.lock().await;
 
     let old_swatch = match doc
         .color_swatches
@@ -202,6 +200,29 @@ pub async fn update_color_swatch(state: &AppState, args: UpdateColorSwatchArgs) 
     };
 
     let new_name = args.new_name.as_deref().unwrap_or(&args.name).to_string();
+    if new_name.trim().is_empty() {
+        return ToolResult::error("Swatch name must not be empty");
+    }
+
+    // Validate every value needed by propagation before changing the palette.
+    let propagation_colors = if args.propagate && args.new_color_hex.is_some() {
+        let old_color = match photonic_core::color::Color::from_hex(&old_swatch.color_hex) {
+            Some(c) => c,
+            None => {
+                return ToolResult::error(format!(
+                    "Swatch has invalid color hex '{}'.",
+                    old_swatch.color_hex
+                ))
+            }
+        };
+        let new_color = match photonic_core::color::Color::from_hex(&new_hex) {
+            Some(c) => c,
+            None => return ToolResult::error(format!("New color '{}' is invalid.", new_hex)),
+        };
+        Some((old_color, new_color))
+    } else {
+        None
+    };
 
     // Update the swatch entry.
     if let Some(swatch) = doc.color_swatches.iter_mut().find(|s| s.name == args.name) {
@@ -212,25 +233,10 @@ pub async fn update_color_swatch(state: &AppState, args: UpdateColorSwatchArgs) 
     let mut nodes_updated = 0usize;
 
     // Optionally propagate color change.
-    if args.propagate && args.new_color_hex.is_some() {
-        let old_color = match photonic_core::color::Color::from_hex(&old_swatch.color_hex) {
-            Some(c) => c,
-            None => {
-                return ToolResult::text(format!(
-                    "Swatch '{}' updated (old color invalid, no propagation).",
-                    new_name
-                ))
-            }
-        };
-        let new_color = match photonic_core::color::Color::from_hex(&new_hex) {
-            Some(c) => c,
-            None => return ToolResult::error(format!("New color '{}' is invalid.", new_hex)),
-        };
-
+    if let Some((old_color, new_color)) = propagation_colors {
         let tol = 1.0_f32 / 255.0_f32; // exact match only
 
         let all_ids: Vec<photonic_core::NodeId> = doc.nodes.keys().copied().collect();
-        let mut commands = Vec::new();
 
         for nid in &all_ids {
             if let Some(node) = doc.nodes.get(nid).cloned() {
@@ -262,22 +268,10 @@ pub async fn update_color_swatch(state: &AppState, args: UpdateColorSwatchArgs) 
                         }
                         _ => {}
                     }
-                    commands.push(Command::UpdateNode {
-                        old: node,
-                        new: new_node,
-                    });
+                    doc.nodes.insert(*nid, new_node);
                     nodes_updated += 1;
                 }
             }
-        }
-
-        if !commands.is_empty() {
-            let batch = if commands.len() == 1 {
-                commands.remove(0)
-            } else {
-                Command::Batch(commands)
-            };
-            history.execute_discrete(batch, &mut doc);
         }
     }
 
