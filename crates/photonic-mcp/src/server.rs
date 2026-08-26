@@ -231,6 +231,10 @@ async fn handle_mcp(State(state): State<AppState>, Json(req): Json<JsonRpcReques
 
     let result = dispatch(state, &req.method, req.params).await;
 
+    if req.id.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     match result {
         Ok(value) => Json(JsonRpcResponse::success(req.id, value)).into_response(),
         Err(msg) => Json(JsonRpcResponse::error(req.id, -32000, msg)).into_response(),
@@ -285,7 +289,10 @@ pub(crate) use crate::dispatch::dispatch_tool_inner;
 mod tests {
     use super::*;
     use crate::handlers::clipboard::new_clipboard_ring;
-    use axum::body::Body;
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
     use photonic_core::{history::CommandHistory, AuditLog, Document};
     use serde_json::json;
     use std::sync::{mpsc, Arc, Mutex as StdMutex};
@@ -408,6 +415,62 @@ mod tests {
         assert!(path.exists());
 
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    async fn post_json(request: Value) -> (StatusCode, Vec<u8>) {
+        let response = build_router(test_state(None))
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn initialized_notification_returns_no_content() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notification_errors_emit_no_response_bytes() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_returns_id_matched_json_rpc_response() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        assert!(response["result"].is_object());
+        assert!(response.get("error").is_none());
     }
 
     #[tokio::test]
