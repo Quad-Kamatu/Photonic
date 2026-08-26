@@ -658,13 +658,13 @@ fn resolve_style(
     // 3. Presentation attributes (e.g. `fill="red"`)
     // 4. Inline style attribute (e.g. `style="fill:red"`)
 
-    let mut merged: HashMap<&str, String> = HashMap::new();
+    let mut merged: HashMap<String, String> = HashMap::new();
 
     // 1. Element-type CSS rule
     let tag = node.tag_name().name();
     if let Some(props) = ctx.css_rules.get(tag) {
         for (k, v) in props {
-            merged.insert(k.as_str(), v.clone());
+            merged.insert(k.clone(), v.clone());
         }
     }
 
@@ -674,7 +674,7 @@ fn resolve_style(
             let selector = format!(".{class_name}");
             if let Some(props) = ctx.css_rules.get(selector.as_str()) {
                 for (k, v) in props {
-                    merged.insert(k.as_str(), v.clone());
+                    merged.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -686,7 +686,7 @@ fn resolve_style(
         // Only known SVG presentation attributes
         if is_presentation_attr(&name) {
             merged
-                .entry(Box::leak(name.into_boxed_str()))
+                .entry(name)
                 .or_insert_with(|| attr.value().to_string());
         }
     }
@@ -701,7 +701,7 @@ fn resolve_style(
             let mut kv = decl.splitn(2, ':');
             if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
                 let k = k.trim().to_lowercase();
-                merged.insert(Box::leak(k.into_boxed_str()), v.trim().to_string());
+                merged.insert(k, v.trim().to_string());
             }
         }
     }
@@ -736,7 +736,7 @@ fn is_presentation_attr(name: &str) -> bool {
     )
 }
 
-fn apply_props(props: &HashMap<&str, String>, s: &mut ComputedStyle) {
+fn apply_props(props: &HashMap<String, String>, s: &mut ComputedStyle) {
     if let Some(v) = props.get("mix-blend-mode") {
         if let Some(mode) = BlendMode::from_css(v) {
             s.blend_mode = mode;
