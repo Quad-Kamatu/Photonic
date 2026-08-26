@@ -5,6 +5,7 @@ use crate::protocol::*;
 pub use crate::schema_gen::tool_list;
 use axum::{
     extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -161,6 +162,10 @@ async fn handle_mcp(State(state): State<AppState>, Json(req): Json<JsonRpcReques
 
     let result = dispatch(state, &req.method, req.params).await;
 
+    if req.id.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     match result {
         Ok(value) => Json(JsonRpcResponse::success(req.id, value)).into_response(),
         Err(msg) => Json(JsonRpcResponse::error(req.id, -32000, msg)).into_response(),
@@ -210,3 +215,88 @@ async fn dispatch(state: AppState, method: &str, params: Option<Value>) -> Resul
 }
 
 pub(crate) use crate::dispatch::dispatch_tool_inner;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use photonic_core::{history::CommandHistory, AuditLog, Document};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+    use tower::ServiceExt;
+
+    fn test_router() -> Router {
+        let (capture_tx, _capture_rx) = std::sync::mpsc::channel();
+        let state = AppState {
+            document: Arc::new(Mutex::new(Document::new("server test", 200.0, 100.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(capture_tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(handlers::clipboard::new_clipboard_ring()),
+        };
+
+        build_router(state)
+    }
+
+    async fn post_json(request: Value) -> (StatusCode, Vec<u8>) {
+        let response = test_router()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn initialized_notification_returns_no_content() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notification_errors_emit_no_response_bytes() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_returns_id_matched_json_rpc_response() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        assert!(response["result"].is_object());
+        assert!(response.get("error").is_none());
+    }
+}
