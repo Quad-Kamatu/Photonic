@@ -1,4 +1,7 @@
 mod args;
+#[cfg(test)]
+#[allow(dead_code)]
+mod claude_client;
 mod cli;
 mod mcp_proxy;
 mod repl;
@@ -420,6 +423,7 @@ impl PhotonicWinitApp {
             && !self.mcp_running.load(Ordering::Relaxed)
         {
             info!("Restarting MCP server on user request");
+            write_mcp_config(self.mcp_config.port);
             self.mcp_state = spawn_mcp_server(
                 Arc::clone(&self.document),
                 Arc::clone(&self.history),
@@ -595,7 +599,7 @@ impl ApplicationHandler for PhotonicWinitApp {
                 renderer.surface_format(),
             ));
 
-        write_mcp_config();
+        write_mcp_config(self.mcp_config.port);
         info!("GPU renderer + egui initialized — window open");
         window.request_redraw();
 
@@ -1089,12 +1093,9 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
 /// is always available when `claude` runs.
 ///
 /// Uses the HTTP transport — Claude Code connects directly to the already-running
-/// Photonic MCP HTTP server on port 7842.  No proxy subprocess needed.
-fn write_mcp_config() {
-    let server_entry = serde_json::json!({
-        "type": "http",
-        "url": format!("http://127.0.0.1:{}/mcp", 7842)
-    });
+/// Photonic MCP HTTP server on the configured port.  No proxy subprocess needed.
+fn write_mcp_config(port: u16) {
+    let server_entry = mcp_server_entry(port);
 
     let claude_settings_path = claude_settings_path();
     if let Some(p) = &claude_settings_path {
@@ -1124,6 +1125,13 @@ fn write_mcp_config() {
             Err(e) => tracing::warn!("Could not update Claude settings: {e}"),
         }
     }
+}
+
+fn mcp_server_entry(port: u16) -> serde_json::Value {
+    serde_json::json!({
+        "type": "http",
+        "url": format!("http://127.0.0.1:{port}/mcp")
+    })
 }
 
 /// Return the path to Claude Code's `~/.claude.json`.
@@ -1368,4 +1376,19 @@ fn run_claude_stream(user_msg: String, is_first: bool, tx: std::sync::mpsc::Send
         let _ = tx.send(ClaudeEvent::Error("(no response from claude)".into()));
     }
     let _ = tx.send(ClaudeEvent::Done);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mcp_server_entry;
+
+    #[test]
+    fn serialized_mcp_entry_uses_configured_port() {
+        let entry = serde_json::to_string(&mcp_server_entry(9000)).unwrap();
+
+        assert_eq!(
+            entry,
+            r#"{"type":"http","url":"http://127.0.0.1:9000/mcp"}"#
+        );
+    }
 }
