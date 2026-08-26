@@ -103,7 +103,7 @@ pub fn source_range_for_op(op: &IrOp, out: Tick) -> FrameRange {
         | IrOp::PushMix { .. }
         | IrOp::LumaWipeMix { .. }
         | IrOp::CaptionOverlay { .. }
-        | IrOp::Crop
+        | IrOp::Crop { .. }
         | IrOp::Resize { .. }
         | IrOp::MatteExtract { .. }
         | IrOp::TextGen { .. }

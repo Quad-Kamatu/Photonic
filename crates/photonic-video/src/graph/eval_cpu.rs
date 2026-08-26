@@ -303,8 +303,13 @@ fn eval_op(
             (Some(only), None) | (None, Some(only)) => (*only).clone(),
             (None, None) => Image::new(cw, ch),
         },
-        IrOp::Crop => match inputs.first() {
-            Some(input) => ops::crop(input),
+        IrOp::Crop {
+            left,
+            top,
+            right,
+            bottom,
+        } => match inputs.first() {
+            Some(input) => ops::crop(input, cw, ch, *left, *top, *right, *bottom),
             None => Image::new(cw, ch),
         },
         IrOp::Resize { w, h, fit } => match inputs.first() {

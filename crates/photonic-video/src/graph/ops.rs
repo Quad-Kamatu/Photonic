@@ -346,10 +346,44 @@ pub fn resize(input: &Image, w: u32, h: u32, fit: FitMode) -> Image {
     out
 }
 
-/// `Crop`: P3 passthrough (the region model finalizes with the node inspector /
-/// timeline crop UI); kept as a named op so the chain shape is right now.
-pub fn crop(input: &Image) -> Image {
-    input.clone()
+/// `Crop`: remove normalized margins while preserving the output canvas.
+///
+/// The cropped region remains at its original position and the removed edges
+/// become transparent. This makes Crop useful as a mask in a graph while
+/// leaving the canvas dimensions available to the following compositor.
+pub fn crop(
+    input: &Image,
+    width: u32,
+    height: u32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> Image {
+    let (width, height) = (width.max(1), height.max(1));
+    let mut out = Image::new(width, height);
+    let left = left.clamp(0.0, 1.0) * width as f32;
+    let top = top.clamp(0.0, 1.0) * height as f32;
+    let right = width as f32 - right.clamp(0.0, 1.0) * width as f32;
+    let bottom = height as f32 - bottom.clamp(0.0, 1.0) * height as f32;
+    if right <= left || bottom <= top {
+        return out;
+    }
+
+    for y in 0..height {
+        for x in 0..width {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            if px >= left && px < right && py >= top && py < bottom {
+                let sx =
+                    (px * input.width as f32 / width as f32).clamp(0.5, input.width as f32 - 0.5);
+                let sy = (py * input.height as f32 / height as f32)
+                    .clamp(0.5, input.height as f32 - 0.5);
+                out.set(x, y, input.sample_bilinear(sx, sy));
+            }
+        }
+    }
+    out
 }
 
 /// `Effect{Invert}` (08 §3 / §2 `Invert` row): invert the straight (unpremult)
@@ -2242,6 +2276,25 @@ mod deinterlace_tests {
 #[cfg(test)]
 mod resize_tests {
     use super::*;
+
+    #[test]
+    fn crop_removes_normalized_margins_without_resizing_canvas() {
+        let mut source = Image::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                source.set(x, y, [x as f32, y as f32, 0.0, 1.0]);
+            }
+        }
+
+        let output = crop(&source, 4, 4, 0.25, 0.25, 0.25, 0.25);
+
+        assert_eq!(output.width, 4);
+        assert_eq!(output.height, 4);
+        assert_eq!(output.pixel(0, 0), [0.0; 4]);
+        assert_eq!(output.pixel(1, 1), [1.0, 1.0, 0.0, 1.0]);
+        assert_eq!(output.pixel(2, 2), [2.0, 2.0, 0.0, 1.0]);
+        assert_eq!(output.pixel(3, 3), [0.0; 4]);
+    }
 
     #[test]
     fn fit_adds_transparent_letterbox_bars() {

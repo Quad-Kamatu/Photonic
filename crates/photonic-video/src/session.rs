@@ -259,6 +259,9 @@ pub enum EngineCmd {
 /// The present path is 03 §5's `present_engine_frame`.
 pub struct EngineFrame {
     pub texture: Arc<wgpu::Texture>,
+    /// Logical output dimensions; the backing texture may be rounded up by the
+    /// pool and the GUI must crop to this size, especially for asset peeks.
+    pub logical_size: (u32, u32),
     /// Exact frame-start tick this frame was evaluated at (sequence or source).
     pub time: Tick,
     pub sequence: SequenceId,
@@ -1738,12 +1741,16 @@ impl EngineThread {
                     None => (ScopeTapPoint::Program, None),
                 };
                 self.evaluations = self.evaluations.saturating_add(1);
-                let (frame_tex, tap_tex) = self.evaluator.evaluate_with_tap(
+                let (evaluated_frame, tap_tex) = self.evaluator.evaluate_with_tap_frame(
                     &compiled.graph,
                     canvas,
                     &mut self.media,
                     tap_node,
                 );
+                let logical_size = evaluated_frame
+                    .as_ref()
+                    .map(|frame| (frame.width, frame.height));
+                let frame_tex = evaluated_frame.map(|frame| frame.texture);
                 // K-B5: second compile with clip looks skipped. Upstream source
                 // nodes share content hashes with the full compile so the node
                 // cache pays only the look-stack delta.
@@ -1769,6 +1776,7 @@ impl EngineThread {
                 if let Some(texture) = frame_tex {
                     self.frame_out.store(Some(Arc::new(EngineFrame {
                         texture,
+                        logical_size: logical_size.expect("frame texture has logical size"),
                         time: frame_time,
                         sequence: seq_id,
                         preview_asset,

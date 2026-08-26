@@ -53,7 +53,7 @@ use photonic_core::timeline::{
     EffectParams, FrameRate, Grade, GradeOp, GradeOpKind, GradeOpParams, GraphId, GraphNode,
     GraphNodeId, GraphNodeParams, GraphOp, InPort, KaraokeMode, LutInterp, NodeGraph, PropPath,
     PropSet, PropTargetKind, PropValue, Ratio, ScanType, Sequence, SequenceFormat, SequenceId,
-    SpeedMap, TextClipContent, TimelineProject, TransitionKind,
+    SpeedMap, TextClipContent, TimeSource, TimelineProject, TransitionKind,
 };
 use photonic_core::Color;
 use photonic_render::caption::CaptionWordRun;
@@ -2180,7 +2180,7 @@ fn lower_node_uncached(
                 }
             }
         }
-        GraphOp::MediaIn { asset, .. } => {
+        GraphOp::MediaIn { asset, time_source } => {
             let kind = lc
                 .project
                 .media
@@ -2190,14 +2190,20 @@ fn lower_node_uncached(
                 .unwrap_or(AssetKind::Video);
             match kind {
                 AssetKind::Image => b.push(IrOp::DecodeStill { asset: *asset }, vec![]),
-                _ => b.push(
-                    IrOp::DecodeVideo {
-                        asset: *asset,
-                        src_time: tick,
-                        proxy: lc.quality.proxy,
-                    },
-                    vec![],
-                ),
+                _ => {
+                    let src_time = match time_source {
+                        TimeSource::Local => lc.clip.map(|clip| tick - clip.start).unwrap_or(tick),
+                        TimeSource::Sequence => tick,
+                    };
+                    b.push(
+                        IrOp::DecodeVideo {
+                            asset: *asset,
+                            src_time,
+                            proxy: lc.quality.proxy,
+                        },
+                        vec![],
+                    )
+                }
             }
         }
         GraphOp::VectorIn { vref } => b.push(
@@ -2249,11 +2255,9 @@ fn lower_node_uncached(
         }
         GraphOp::Transform2D => {
             let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
-            // Node transform params finalize with the node inspector (P8); P3
-            // emits an identity Transform2D so the pass exists and shape is right.
             b.push(
                 IrOp::Transform2D {
-                    mat: Mat3::IDENTITY,
+                    mat: graph_node_transform_matrix(&node.params, tick, lc.format),
                     sampling: Sampling::Bilinear,
                 },
                 vec![(input, OutPort::default())],
@@ -2261,14 +2265,22 @@ fn lower_node_uncached(
         }
         GraphOp::Crop => {
             let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
-            b.push(IrOp::Crop, vec![(input, OutPort::default())])
+            b.push(
+                IrOp::Crop {
+                    left: eval_node_f32(&node.params, "params.left", 0.0, tick),
+                    top: eval_node_f32(&node.params, "params.top", 0.0, tick),
+                    right: eval_node_f32(&node.params, "params.right", 0.0, tick),
+                    bottom: eval_node_f32(&node.params, "params.bottom", 0.0, tick),
+                },
+                vec![(input, OutPort::default())],
+            )
         }
         GraphOp::Resize { fit } => {
             let input = lower_primary_or_default(b, lc, primary(), tick, cycle);
             b.push(
                 IrOp::Resize {
-                    w: lc.format.width,
-                    h: lc.format.height,
+                    w: eval_node_dimension(&node.params, "params.width", lc.format.width, tick),
+                    h: eval_node_dimension(&node.params, "params.height", lc.format.height, tick),
                     fit: map_fit(*fit),
                 },
                 vec![(input, OutPort::default())],
@@ -2765,6 +2777,36 @@ fn eval_node_f32(anim: &AnimProps<GraphNodeParams>, path: &str, default: f32, t:
     }
 }
 
+/// Evaluate a graph-node `f64` lane for transforms, which share the clip
+/// transform property names but live in the node's open parameter bag.
+fn eval_node_f64(anim: &AnimProps<GraphNodeParams>, path: &str, default: f64, t: Tick) -> f64 {
+    let base = match anim.base.0.get(path) {
+        Some(PropValue::Float(v)) => *v,
+        _ => default,
+    };
+    match anim.track(&PropPath::new(path)) {
+        Some(track) => match timeline::eval(track, &PropValue::Float(base), t) {
+            PropValue::Float(v) => v,
+            _ => base,
+        },
+        None => base,
+    }
+}
+
+fn eval_node_dimension(
+    anim: &AnimProps<GraphNodeParams>,
+    path: &str,
+    default: u32,
+    t: Tick,
+) -> u32 {
+    let value = eval_node_f32(anim, path, default as f32, t);
+    if value.is_finite() {
+        value.round().clamp(1.0, 8192.0) as u32
+    } else {
+        default.max(1)
+    }
+}
+
 /// Evaluate a graph node's `Color` param lane at `t`.
 fn eval_node_color(
     anim: &AnimProps<GraphNodeParams>,
@@ -2783,6 +2825,26 @@ fn eval_node_color(
         },
         None => base,
     }
+}
+
+fn graph_node_transform_matrix(
+    anim: &AnimProps<GraphNodeParams>,
+    t: Tick,
+    format: &SequenceFormat,
+) -> Mat3 {
+    let defaults = ClipTransform::default();
+    let transform = ClipTransform {
+        x: eval_node_f64(anim, "transform.x", defaults.x, t),
+        y: eval_node_f64(anim, "transform.y", defaults.y, t),
+        scale_x: eval_node_f64(anim, "transform.scale_x", defaults.scale_x, t),
+        scale_y: eval_node_f64(anim, "transform.scale_y", defaults.scale_y, t),
+        rotation: eval_node_f64(anim, "transform.rotation", defaults.rotation, t),
+        anchor_space: AnchorSpace::CenterOffset,
+        anchor_x: eval_node_f64(anim, "transform.anchor_x", defaults.anchor_x, t),
+        anchor_y: eval_node_f64(anim, "transform.anchor_y", defaults.anchor_y, t),
+        opacity: defaults.opacity,
+    };
+    clip_transform_matrix(&transform, format)
 }
 
 /// Keyframe-resolve an effect's params into the ordered [`ResolvedParams`] bag
@@ -3076,8 +3138,17 @@ fn hash_op(h: &mut xxhash_rust::xxh3::Xxh3, op: &IrOp) {
             h.update(&[8]);
             hash_caption_batch(h, cue_batch);
         }
-        IrOp::Crop => {
+        IrOp::Crop {
+            left,
+            top,
+            right,
+            bottom,
+        } => {
             h.update(&[9]);
+            f32b(h, *left);
+            f32b(h, *top);
+            f32b(h, *right);
+            f32b(h, *bottom);
         }
         IrOp::Resize { w, h: gh, fit } => {
             h.update(&[10]);
@@ -3795,6 +3866,163 @@ mod tests {
             out.graph.nodes[output.0 as usize].op,
             IrOp::Output { .. }
         ));
+    }
+
+    #[test]
+    fn composition_media_in_local_time_uses_host_clip_offset() {
+        fn source_time(time_source: TimeSource) -> Tick {
+            let (mut project, seq_id) = base_project();
+            let graph_media = GraphNode::new(GraphOp::MediaIn {
+                asset: AssetId::new(),
+                time_source,
+            });
+            let graph_output = GraphNode::new(GraphOp::Output);
+            let media_id = graph_media.id;
+            let output_id = graph_output.id;
+            let graph = NodeGraph {
+                id: GraphId::new(),
+                name: "media-time-source".into(),
+                nodes: HashMap::from([(media_id, graph_media), (output_id, graph_output)]),
+                edges: vec![GraphEdge {
+                    from: (media_id, GOutPort::PRIMARY),
+                    to: (output_id, InPort::PRIMARY),
+                }],
+                output: output_id,
+                ui: HashMap::new(),
+            };
+            let graph_id = graph.id;
+            project.graphs.insert(graph_id, graph);
+
+            let tk = add_video_track(&mut project, seq_id);
+            let mut clip = solid_clip(Color::WHITE, 1_000_000, 1_000_000);
+            clip.composition = Some(graph_id);
+            project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+                .clips
+                .push(clip);
+
+            let compiled = compile(&project, seq_id, 0, Tick(1_250_000), Quality::FULL, None);
+            compiled
+                .graph
+                .nodes
+                .iter()
+                .find_map(|node| match &node.op {
+                    IrOp::DecodeVideo { src_time, .. } => Some(*src_time),
+                    _ => None,
+                })
+                .expect("MediaIn must lower to a video decode")
+        }
+
+        assert_eq!(source_time(TimeSource::Local), Tick(250_000));
+        assert_eq!(source_time(TimeSource::Sequence), Tick(1_250_000));
+    }
+
+    #[test]
+    fn composition_geometry_nodes_lower_resolved_parameters() {
+        let (mut project, seq_id) = base_project();
+        let clip_in = GraphNode::new(GraphOp::ClipIn);
+        let mut transform = GraphNode::new(GraphOp::Transform2D);
+        transform
+            .params
+            .base
+            .0
+            .set("transform.x", PropValue::Float(12.0));
+        transform
+            .params
+            .base
+            .0
+            .set("transform.scale_x", PropValue::Float(1.5));
+        let mut crop = GraphNode::new(GraphOp::Crop);
+        crop.params.base.0.set("params.left", PropValue::Float(0.1));
+        crop.params
+            .base
+            .0
+            .set("params.bottom", PropValue::Float(0.2));
+        let mut resize = GraphNode::new(GraphOp::Resize {
+            fit: photonic_core::timeline::FitMode::Contain,
+        });
+        resize
+            .params
+            .base
+            .0
+            .set("params.width", PropValue::Float(80.0));
+        resize
+            .params
+            .base
+            .0
+            .set("params.height", PropValue::Float(40.0));
+        let output = GraphNode::new(GraphOp::Output);
+        let (clip_id, transform_id, crop_id, resize_id, output_id) =
+            (clip_in.id, transform.id, crop.id, resize.id, output.id);
+        let graph = NodeGraph {
+            id: GraphId::new(),
+            name: "geometry-params".into(),
+            nodes: HashMap::from([
+                (clip_id, clip_in),
+                (transform_id, transform),
+                (crop_id, crop),
+                (resize_id, resize),
+                (output_id, output),
+            ]),
+            edges: vec![
+                GraphEdge {
+                    from: (clip_id, GOutPort::PRIMARY),
+                    to: (transform_id, InPort::PRIMARY),
+                },
+                GraphEdge {
+                    from: (transform_id, GOutPort::PRIMARY),
+                    to: (crop_id, InPort::PRIMARY),
+                },
+                GraphEdge {
+                    from: (crop_id, GOutPort::PRIMARY),
+                    to: (resize_id, InPort::PRIMARY),
+                },
+                GraphEdge {
+                    from: (resize_id, GOutPort::PRIMARY),
+                    to: (output_id, InPort::PRIMARY),
+                },
+            ],
+            output: output_id,
+            ui: HashMap::new(),
+        };
+        let graph_id = graph.id;
+        project.graphs.insert(graph_id, graph);
+        let tk = add_video_track(&mut project, seq_id);
+        let mut clip = solid_clip(Color::WHITE, 0, Tick::from_seconds(2).0);
+        clip.composition = Some(graph_id);
+        project.sequences.get_mut(&seq_id).unwrap().video_tracks[tk]
+            .clips
+            .push(clip);
+
+        let compiled = compile(&project, seq_id, 0, Tick(0), Quality::FULL, None);
+        assert!(
+            compiled.diagnostics.is_empty(),
+            "{:?}",
+            compiled.diagnostics
+        );
+        assert!(compiled.graph.nodes.iter().any(|node| {
+            matches!(&node.op, IrOp::Transform2D { mat, .. } if *mat != Mat3::IDENTITY)
+        }));
+        assert!(compiled.graph.nodes.iter().any(|node| {
+            matches!(
+                &node.op,
+                IrOp::Crop {
+                    left: 0.1,
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 0.2
+                }
+            )
+        }));
+        assert!(compiled.graph.nodes.iter().any(|node| {
+            matches!(
+                &node.op,
+                IrOp::Resize {
+                    w: 80,
+                    h: 40,
+                    fit: FitMode::Fit
+                }
+            )
+        }));
     }
 
     #[test]
@@ -4744,7 +4972,7 @@ mod tests {
             IrOp::PushMix { .. } => "PushMix",
             IrOp::LumaWipeMix { .. } => "LumaWipeMix",
             IrOp::CaptionOverlay { .. } => "CaptionOverlay",
-            IrOp::Crop => "Crop",
+            IrOp::Crop { .. } => "Crop",
             IrOp::Resize { .. } => "Resize",
             IrOp::MatteExtract { .. } => "MatteExtract",
             IrOp::TextGen { .. } => "TextGen",

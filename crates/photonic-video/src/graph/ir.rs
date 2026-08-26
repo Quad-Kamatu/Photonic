@@ -144,7 +144,7 @@ pub fn threading_for_op(op: &IrOp) -> Threading {
         | IrOp::WipeMix { .. }
         | IrOp::PushMix { .. }
         | IrOp::LumaWipeMix { .. }
-        | IrOp::Crop
+        | IrOp::Crop { .. }
         | IrOp::Resize { .. }
         | IrOp::ChannelSplit { .. }
         | IrOp::ChannelCombine
@@ -356,7 +356,14 @@ pub enum IrOp {
     CaptionOverlay {
         cue_batch: CaptionBatch,
     },
-    Crop,
+    /// Crop margins in normalized source coordinates. The output keeps the
+    /// current canvas size; pixels inside the margins are transparent.
+    Crop {
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    },
     Resize {
         w: u32,
         h: u32,

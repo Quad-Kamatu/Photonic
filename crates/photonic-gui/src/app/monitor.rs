@@ -1140,7 +1140,10 @@ impl PhotonicApp {
             if let (Some(tex), Some((_, fseq))) = (&bridge.monitor_tex, bridge.presented_frame) {
                 let active = doc.timeline.as_ref().and_then(|p| p.active_sequence);
                 if active == Some(fseq) {
-                    let uv = engine::padded_uv((format.width, format.height), tex.physical);
+                    let logical_size = bridge
+                        .presented_logical_size
+                        .unwrap_or((format.width, format.height));
+                    let uv = engine::padded_uv(logical_size, tex.physical);
                     // K-B5: vertical wipe — left clean (no clip looks), right graded.
                     if bridge.compare_effects {
                         if let Some(clean) = &bridge.compare_tex {

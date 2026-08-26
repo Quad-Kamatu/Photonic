@@ -36,7 +36,7 @@ use wgpu::util::DeviceExt;
 
 use crate::contract::{AssetId, Tick, VectorRef, VectorStateKey};
 use crate::graph::cache::{CacheStats, NodeCache};
-use crate::graph::ir::{FrameGraph, IrOp, TextureDesc, WipeDirection};
+use crate::graph::ir::{FitMode, FrameGraph, IrOp, TextureDesc, WipeDirection};
 use crate::pool::DEFAULT_BUDGET_BYTES;
 
 const WORKING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -570,6 +570,21 @@ impl Evaluator {
         source: &mut dyn GpuFrameSource,
         tap: Option<crate::graph::ir::IrNodeId>,
     ) -> (Option<Arc<wgpu::Texture>>, Option<GpuFrame>) {
+        let (output, tap) = self.evaluate_with_tap_frame(graph, canvas, source, tap);
+        (output.map(|frame| frame.texture), tap)
+    }
+
+    /// [`Evaluator::evaluate_with_tap`] with the output's logical dimensions
+    /// preserved alongside its texture. The session uses this for presentation
+    /// because an asset peek can have a different logical size than the active
+    /// sequence format even though both use pooled textures.
+    pub fn evaluate_with_tap_frame(
+        &mut self,
+        graph: &FrameGraph,
+        canvas: (u32, u32),
+        source: &mut dyn GpuFrameSource,
+        tap: Option<crate::graph::ir::IrNodeId>,
+    ) -> (Option<GpuFrame>, Option<GpuFrame>) {
         let (cw, ch) = (canvas.0.max(1), canvas.1.max(1));
         let mut results: Vec<Option<GpuFrame>> = (0..graph.nodes.len()).map(|_| None).collect();
 
@@ -651,10 +666,8 @@ impl Evaluator {
             }
         }
         self.cache.pin(out_hash);
-        let out_tex = results[out_node.0 as usize]
-            .clone()
-            .map(|frame| frame.texture);
-        (out_tex, tap_tex)
+        let out_frame = results[out_node.0 as usize].clone();
+        (out_frame, tap_tex)
     }
 
     /// Render a computed (non-source) op into a cached texture, or return the
@@ -1345,6 +1358,44 @@ impl Evaluator {
                 ),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
+            IrOp::Crop {
+                left,
+                top,
+                right,
+                bottom,
+            } => match inputs.first() {
+                Some(src) => self.passes.crop(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    logical_w,
+                    logical_h,
+                    src.width,
+                    src.height,
+                    *left,
+                    *top,
+                    *right,
+                    *bottom,
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
+            // The terminal output is also the boundary between a logical
+            // frame and its bucket-padded backing texture. Resample only the
+            // logical source extent so padding never becomes visible in the
+            // output's logical pixels.
+            IrOp::Output { .. } => match inputs.first() {
+                Some(src) => self.passes.resize(
+                    &self.gpu,
+                    &src.texture,
+                    target,
+                    FitMode::Stretch,
+                    logical_w,
+                    logical_h,
+                    src.width,
+                    src.height,
+                ),
+                None => self.passes.fill(&self.gpu, target, [0.0; 4]),
+            },
             // Real grade kernel: run the resolved stack through the WGSL twins of
             // `eval_cpu`'s `apply_grade_cpu`, then blit the result into the pooled
             // cache target (07 §3, GPU/CPU parity 03 §4.4). An empty stack falls
@@ -1367,8 +1418,7 @@ impl Evaluator {
                 }
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
             },
-            // Blit passthrough for Crop, Output, empty Grade, and the
-            // marker filter/color ops.
+            // Blit passthrough for empty Grade and marker filter/color ops.
             _ => match inputs.first() {
                 Some(src) => self.passes.blit(&self.gpu, &src.texture, target),
                 None => self.passes.fill(&self.gpu, target, [0.0; 4]),
@@ -1415,6 +1465,7 @@ struct Passes {
     blit_bgl: wgpu::BindGroupLayout,
     transform_pipeline: wgpu::RenderPipeline,
     transform_bgl: wgpu::BindGroupLayout,
+    crop_pipeline: wgpu::RenderPipeline,
     resize_pipeline: wgpu::RenderPipeline,
     /// D-12 stabilization warp (22 §6.4); WGSL twin of `ops::stabilize_warp`.
     stabilize_pipeline: wgpu::RenderPipeline,
@@ -1565,6 +1616,42 @@ impl Passes {
             "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\nstruct T {{ c0: vec4<f32>, c1: vec4<f32>, c2: vec4<f32>, info: vec4<f32> }}\n@group(0) @binding(1) var<uniform> u: T;\nfn at(p: vec2<i32>) -> vec4<f32> {{\n  let hi = vec2<i32>(u.info.zw) - vec2<i32>(1);\n  return textureLoad(t, clamp(p, vec2<i32>(0), hi), 0);\n}}\nfn nearest(p: vec2<f32>) -> vec4<f32> {{ return at(vec2<i32>(floor(p))); }}\nfn bilinear(p: vec2<f32>) -> vec4<f32> {{\n  let q = p - vec2<f32>(0.5);\n  let p0f = floor(q);\n  let p0 = vec2<i32>(p0f);\n  let f = q - p0f;\n  let p00 = at(p0);\n  let p10 = at(p0 + vec2<i32>(1, 0));\n  let p01 = at(p0 + vec2<i32>(0, 1));\n  let p11 = at(p0 + vec2<i32>(1, 1));\n  return mix(mix(p00, p10, f.x), mix(p01, p11, f.x), f.y);\n}}\n@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n  if (pos.x >= u.info.x || pos.y >= u.info.y) {{ return vec4<f32>(0.0); }}\n  let canvas_src = u.c0.xy * pos.x + u.c1.xy * pos.y + u.c2.xy;\n  let src = canvas_src * u.info.zw / u.info.xy;\n  if (u.c0.w > 0.5) {{ return nearest(src); }}\n  return bilinear(src);\n}}\n"
         );
         let transform_pipeline = make_pipeline(device, &transform_bgl, &transform_src, "fs");
+
+        // Crop: remove normalized margins while retaining the logical canvas.
+        // Keeping this as a textureLoad pass makes source dimensions explicit
+        // and prevents pooled padding from becoming visible at the crop edge.
+        let crop_src = format!(
+            "{QUAD_VS}\n@group(0) @binding(0) var t: texture_2d<f32>;\n\
+struct C {{ info: vec4<f32>, edges: vec4<f32> }}\n\
+@group(0) @binding(1) var<uniform> u: C;\n\
+fn at(p: vec2<i32>) -> vec4<f32> {{\n\
+  let hi = vec2<i32>(u.info.zw) - vec2<i32>(1);\n\
+  return textureLoad(t, clamp(p, vec2<i32>(0), hi), 0);\n\
+}}\n\
+fn bilinear(p: vec2<f32>) -> vec4<f32> {{\n\
+  let q = p - vec2<f32>(0.5);\n\
+  let p0f = floor(q);\n\
+  let p0 = vec2<i32>(p0f);\n\
+  let f = q - p0f;\n\
+  let p00 = at(p0);\n\
+  let p10 = at(p0 + vec2<i32>(1, 0));\n\
+  let p01 = at(p0 + vec2<i32>(0, 1));\n\
+  let p11 = at(p0 + vec2<i32>(1, 1));\n\
+  return mix(mix(p00, p10, f.x), mix(p01, p11, f.x), f.y);\n\
+}}\n\
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{\n\
+  let out_size = u.info.xy;\n\
+  if (pos.x >= out_size.x || pos.y >= out_size.y) {{ return vec4<f32>(0.0); }}\n\
+  let left = u.edges.x * out_size.x;\n\
+  let top = u.edges.y * out_size.y;\n\
+  let right = out_size.x - u.edges.z * out_size.x;\n\
+  let bottom = out_size.y - u.edges.w * out_size.y;\n\
+  if (right <= left || bottom <= top || pos.x < left || pos.x >= right ||\n\
+      pos.y < top || pos.y >= bottom) {{ return vec4<f32>(0.0); }}\n\
+  return bilinear(pos.xy * u.info.zw / out_size);\n\
+}}\n"
+        );
+        let crop_pipeline = make_pipeline(device, &transform_bgl, &crop_src, "fs");
 
         // Resize: preserve the source aspect ratio for Fit/Fill and leave Fit's
         // letterbox/pillarbox bars transparent. The pass uses logical dimensions
@@ -2104,6 +2191,7 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
             blit_bgl,
             transform_pipeline,
             transform_bgl,
+            crop_pipeline,
             resize_pipeline,
             stabilize_pipeline,
             stabilize_bgl,
@@ -2197,6 +2285,56 @@ fn alpha_at(x: i32, y: i32, hi: vec2<i32>) -> f32 {{
             ],
         });
         self.run(gpu, &self.blit_pipeline, &bind, target);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn crop(
+        &self,
+        gpu: &GpuContext,
+        src: &wgpu::Texture,
+        target: &wgpu::Texture,
+        logical_w: u32,
+        logical_h: u32,
+        source_w: u32,
+        source_h: u32,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    ) {
+        let uniform = [
+            logical_w as f32,
+            logical_h as f32,
+            source_w as f32,
+            source_h as f32,
+            left.clamp(0.0, 1.0),
+            top.clamp(0.0, 1.0),
+            right.clamp(0.0, 1.0),
+            bottom.clamp(0.0, 1.0),
+        ];
+        let buffer = gpu
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("crop_uniform"),
+                contents: bytemuck::cast_slice(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let view = src.create_view(&Default::default());
+        let bind = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("crop_bg"),
+            layout: &self.transform_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.run(gpu, &self.crop_pipeline, &bind, target);
     }
 
     fn transform(
@@ -4312,6 +4450,160 @@ mod tests {
             },
         );
         Arc::new(texture)
+    }
+
+    fn upload_padded_solid(
+        gpu: &GpuContext,
+        logical: (u32, u32),
+        physical: (u32, u32),
+        content: [u16; 4],
+        padding: [u16; 4],
+    ) -> Arc<wgpu::Texture> {
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("logical_padding_test"),
+            size: wgpu::Extent3d {
+                width: physical.0,
+                height: physical.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORKING_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut half = Vec::with_capacity((physical.0 * physical.1 * 4) as usize);
+        for y in 0..physical.1 {
+            for _x in 0..physical.0 {
+                let pixel = if y < logical.1 { content } else { padding };
+                half.extend_from_slice(&pixel);
+            }
+        }
+        gpu.queue().write_texture(
+            texture.as_image_copy(),
+            bytemuck::cast_slice(&half),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(physical.0 * 8),
+                rows_per_image: Some(physical.1),
+            },
+            wgpu::Extent3d {
+                width: physical.0,
+                height: physical.1,
+                depth_or_array_layers: 1,
+            },
+        );
+        Arc::new(texture)
+    }
+
+    #[test]
+    fn output_does_not_stretch_bucket_padding_into_logical_frame() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter; skipping logical-output padding policy");
+            return;
+        };
+        let source_logical = (960, 540);
+        let source_physical = (960, 576);
+        let graph = FrameGraph {
+            nodes: vec![
+                IrNode {
+                    op: IrOp::DecodeStill {
+                        asset: AssetId::new(),
+                    },
+                    inputs: vec![],
+                    content_hash: ContentHash(700),
+                },
+                IrNode {
+                    op: IrOp::Output { w: 1920, h: 1080 },
+                    inputs: vec![(IrNodeId(0), OutPort::default())],
+                    content_hash: ContentHash(701),
+                },
+            ],
+            output: Some(IrNodeId(1)),
+        };
+        let frame = GpuFrame::new(
+            upload_padded_solid(
+                &gpu,
+                source_logical,
+                source_physical,
+                [0x3c00, 0, 0, 0x3c00],
+                [0, 0, 0x3c00, 0x3c00],
+            ),
+            source_logical.0,
+            source_logical.1,
+        );
+        let mut source = PatternSource { frame };
+        let mut evaluator = Evaluator::new(gpu.clone());
+        let output = evaluator
+            .evaluate(&graph, source_logical, &mut source)
+            .expect("output frame");
+        let actual = read_texture_rgba16f(&gpu, &output, 1920, 1080);
+        for (index, pixel) in actual.iter().enumerate() {
+            assert!(
+                pixel[0] > 0.9,
+                "logical pixel {index} lost content: {pixel:?}"
+            );
+            assert!(
+                pixel[2] < 0.1,
+                "padding leaked at logical pixel {index}: {pixel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crop_gpu_matches_cpu_reference() {
+        let Some(gpu) = GpuContext::request_blocking() else {
+            eprintln!("no GPU adapter; skipping crop parity");
+            return;
+        };
+        let image = patterned_image(8, 6);
+        let crop = IrOp::Crop {
+            left: 0.125,
+            top: 0.25,
+            right: 0.25,
+            bottom: 0.125,
+        };
+        let graph = FrameGraph {
+            nodes: vec![
+                IrNode {
+                    op: IrOp::DecodeStill {
+                        asset: AssetId::new(),
+                    },
+                    inputs: vec![],
+                    content_hash: ContentHash(702),
+                },
+                IrNode {
+                    op: crop.clone(),
+                    inputs: vec![(IrNodeId(0), OutPort::default())],
+                    content_hash: ContentHash(703),
+                },
+            ],
+            output: Some(IrNodeId(1)),
+        };
+        let mut cpu_source = PatternCpuSource {
+            image: image.clone(),
+        };
+        let expected = crate::graph::eval_cpu::evaluate(&graph, (8, 6), &mut cpu_source);
+        let mut gpu_source = PatternSource {
+            frame: GpuFrame::new(upload_pattern(&gpu, &image), image.width, image.height),
+        };
+        let mut evaluator = Evaluator::new(gpu.clone());
+        let output = evaluator
+            .evaluate(&graph, (8, 6), &mut gpu_source)
+            .expect("crop output");
+        let actual = read_texture_rgba16f(&gpu, &output, 8, 6);
+        for (pixel_index, (gpu_pixel, cpu_pixel)) in actual.iter().zip(&expected.pixels).enumerate()
+        {
+            for channel in 0..4 {
+                assert!(
+                    (gpu_pixel[channel] - cpu_pixel[channel]).abs() < 2e-3,
+                    "pixel {pixel_index} channel {channel}: GPU {} vs CPU {}",
+                    gpu_pixel[channel],
+                    cpu_pixel[channel]
+                );
+            }
+        }
     }
 
     #[test]

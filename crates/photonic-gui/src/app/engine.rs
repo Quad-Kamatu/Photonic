@@ -16,9 +16,9 @@
 //!    `EngineFrame`→screen present pass (03 §5,
 //!    `photonic_render::video::VideoPresenter`) into an intermediate
 //!    `Rgba8UnormSrgb` texture registered with egui as a native texture; the
-//!    monitor paints it with a UV rect cropped to the sequence-format logical
-//!    size (the engine's frame textures are pool-bucket padded — see the
-//!    facade notes in `photonic_video::session`).
+//!    monitor paints it with a UV rect cropped to the frame's logical size
+//!    (the engine's frame textures are pool-bucket padded — see the facade
+//!    notes in `photonic_video::session`).
 //!
 //! 3. **Desired-state reconciliation.** Transport methods only mutate GUI
 //!    intent (`monitor_playing`, playhead, loop toggle, proxy mode);
@@ -99,6 +99,9 @@ pub struct EngineBridge {
     /// The frame the monitor texture currently shows (time + sequence), for
     /// the buffering heuristic.
     pub(crate) presented_frame: Option<(Tick, SequenceId)>,
+    /// Logical size of the frame currently in `monitor_tex`; unlike the active
+    /// sequence format this also remains correct for an asset source peek.
+    pub(crate) presented_logical_size: Option<(u32, u32)>,
     /// K-B17: colour vs alpha-as-luminance present channel.
     pub(crate) present_channel: PresentChannel,
     /// K-B5: dual clean/graded compare requested.
@@ -161,6 +164,7 @@ impl EngineBridge {
             monitor_tex: None,
             compare_tex: None,
             presented_frame: None,
+            presented_logical_size: None,
             present_channel: PresentChannel::Color,
             compare_effects: false,
             compare_split: 0.5,
@@ -386,7 +390,9 @@ impl EngineBridge {
             Arc::as_ptr(&frame.texture) as usize
                 ^ (self.present_channel as usize).wrapping_mul(0x9e37_79b9)
                 ^ clean_ptr.wrapping_mul(0x85eb_ca6b)
-                ^ (self.compare_effects as usize),
+                ^ (self.compare_effects as usize)
+                ^ (frame.logical_size.0 as usize).wrapping_mul(0x27d4_eb2d)
+                ^ (frame.logical_size.1 as usize).wrapping_mul(0x1656_67b1),
         );
         if self.presented == Some(key) {
             return;
@@ -436,6 +442,7 @@ impl EngineBridge {
 
         self.presented = Some(key);
         self.presented_frame = Some((frame.time, frame.sequence));
+        self.presented_logical_size = Some(frame.logical_size);
     }
 
     /// Toggle alpha-as-luminance present (K-B17). Forces the next
