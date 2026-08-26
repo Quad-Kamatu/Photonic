@@ -2945,29 +2945,6 @@ pub fn tool_list() -> Value {
             }
         },
         {
-            "name": "make_compound_path",
-            "description": "Combine two or more path nodes into a single compound path using the even-odd fill rule. Overlapping areas become holes. The bottommost node's fill/stroke style is preserved; all other nodes are removed. Single undoable step.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Two or more path node IDs to combine.", "minItems": 2 },
-                    "name": { "type": "string", "description": "Optional name for the resulting compound path node." }
-                },
-                "required": ["node_ids"]
-            }
-        },
-        {
-            "name": "release_compound_path",
-            "description": "Release a compound path back into individual path nodes. Each subpath becomes its own node with the compound path's fill/stroke. The compound path node is removed. Single undoable step.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "node_id": { "type": "string", "description": "ID of the compound path node to release." }
-                },
-                "required": ["node_id"]
-            }
-        },
-        {
             "name": "invert_colors",
             "description": "Invert all color values (fill and stroke) on selected path nodes. Each RGB channel becomes (1 − value); alpha is preserved. Works on solid fills, linear/radial gradient stops, fluid gradient points, and mesh gradient vertices. If node_ids is omitted, all path nodes in the document are inverted. Single undo step.",
             "inputSchema": {
@@ -4967,4 +4944,29 @@ pub fn tool_list() -> Value {
             }
         }
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_list;
+    use std::collections::HashSet;
+
+    #[test]
+    fn tool_names_are_non_empty_and_unique() {
+        let manifest = tool_list();
+        let tools = manifest.as_array().expect("tool_list must return an array");
+        let mut names = HashSet::new();
+
+        for (index, tool) in tools.iter().enumerate() {
+            let name = tool
+                .get("name")
+                .and_then(|name| name.as_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| panic!("tool at index {index} has an empty or missing name"));
+            assert!(
+                names.insert(name),
+                "duplicate MCP tool name {name:?} at index {index}"
+            );
+        }
+    }
 }
