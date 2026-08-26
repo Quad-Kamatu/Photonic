@@ -420,6 +420,7 @@ impl PhotonicWinitApp {
             && !self.mcp_running.load(Ordering::Relaxed)
         {
             info!("Restarting MCP server on user request");
+            write_mcp_config(self.mcp_config.port, self.mcp_config.secret.as_deref());
             self.mcp_state = spawn_mcp_server(
                 Arc::clone(&self.document),
                 Arc::clone(&self.history),
@@ -595,7 +596,7 @@ impl ApplicationHandler for PhotonicWinitApp {
                 renderer.surface_format(),
             ));
 
-        write_mcp_config(self.mcp_config.secret.as_deref());
+        write_mcp_config(self.mcp_config.port, self.mcp_config.secret.as_deref());
         info!("GPU renderer + egui initialized — window open");
         window.request_redraw();
 
@@ -1089,15 +1090,9 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
 /// is always available when `claude` runs.
 ///
 /// Uses the HTTP transport — Claude Code connects directly to the already-running
-/// Photonic MCP HTTP server on port 7842.  No proxy subprocess needed.
-fn write_mcp_config(secret: Option<&str>) {
-    let mut server_entry = serde_json::json!({
-        "type": "http",
-        "url": format!("http://127.0.0.1:{}/mcp", 7842)
-    });
-    if let Some(secret) = secret {
-        server_entry["headers"] = serde_json::json!({ MCP_SECRET_HEADER: secret });
-    }
+/// Photonic MCP HTTP server on the configured port. No proxy subprocess needed.
+fn write_mcp_config(port: u16, secret: Option<&str>) {
+    let server_entry = mcp_server_entry(port, secret);
 
     let claude_settings_path = claude_settings_path();
     if let Some(p) = &claude_settings_path {
@@ -1122,6 +1117,17 @@ fn write_mcp_config(secret: Option<&str>) {
             Err(e) => tracing::warn!("Could not update Claude settings: {e}"),
         }
     }
+}
+
+fn mcp_server_entry(port: u16, secret: Option<&str>) -> serde_json::Value {
+    let mut server_entry = serde_json::json!({
+        "type": "http",
+        "url": format!("http://127.0.0.1:{port}/mcp")
+    });
+    if let Some(secret) = secret {
+        server_entry["headers"] = serde_json::json!({ MCP_SECRET_HEADER: secret });
+    }
+    server_entry
 }
 
 fn write_private_claude_settings(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
@@ -1403,7 +1409,14 @@ fn run_claude_stream(user_msg: String, is_first: bool, tx: std::sync::mpsc::Send
 
 #[cfg(test)]
 mod mcp_config_tests {
-    use super::write_private_claude_settings;
+    use super::{mcp_server_entry, write_private_claude_settings};
+
+    #[test]
+    fn write_mcp_config_uses_the_configured_port() {
+        let entry = mcp_server_entry(9000, Some("top-secret"));
+        assert_eq!(entry["url"], "http://127.0.0.1:9000/mcp");
+        assert_eq!(entry["headers"]["x-mcp-secret"], "top-secret");
+    }
 
     #[cfg(unix)]
     #[test]

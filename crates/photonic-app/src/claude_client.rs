@@ -2,13 +2,12 @@
 //!
 //! Sends user messages to `api.anthropic.com/v1/messages` with Photonic's
 //! MCP tools attached.  When Claude uses a tool, we forward the call to the
-//! local MCP server at `http://127.0.0.1:7842/mcp` and loop until Claude
-//! produces a final text reply.
+//! configured local MCP server and loop until Claude produces a final text
+//! reply.
 
 use serde_json::{json, Value};
 
 const ANTHROPIC_API: &str = "https://api.anthropic.com/v1/messages";
-const MCP_URL: &str = "http://127.0.0.1:7842/mcp";
 const MODEL: &str = "claude-opus-4-6";
 const MAX_TOOL_ROUNDS: usize = 12;
 
@@ -27,11 +26,13 @@ After creating or modifying shapes, briefly describe what you did.";
 /// Send `user_message` to Claude, including the full prior `history`.
 ///
 /// `history` is a slice of `(is_user, text)` pairs in chronological order.
+/// `mcp_port` is the port used by Photonic's local MCP server.
 /// Returns the final assistant text, or an `Err` string to show in the chat.
 pub fn send_message(
     api_key: &str,
     history: &[(bool, String)],
     user_message: &str,
+    mcp_port: u16,
 ) -> Result<String, String> {
     if api_key.trim().is_empty() {
         return Err("No API key — enter your Anthropic API key in the Claude tab.".into());
@@ -49,7 +50,8 @@ pub fn send_message(
         .collect();
     messages.push(json!({ "role": "user", "content": user_message }));
 
-    let tools = fetch_mcp_tools()?;
+    let endpoint = mcp_url(mcp_port);
+    let tools = fetch_mcp_tools(&endpoint)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -98,14 +100,15 @@ pub fn send_message(
             .join("");
 
         if stop_reason != "tool_use" {
-            return Ok(if text.is_empty() { "(empty response)".into() } else { text });
+            return Ok(if text.is_empty() {
+                "(empty response)".into()
+            } else {
+                text
+            });
         }
 
         // Claude wants to use tools — collect them and execute.
-        let tool_uses: Vec<&Value> = content
-            .iter()
-            .filter(|c| c["type"] == "tool_use")
-            .collect();
+        let tool_uses: Vec<&Value> = content.iter().filter(|c| c["type"] == "tool_use").collect();
 
         // Append assistant turn to history before we send tool results.
         messages.push(json!({ "role": "assistant", "content": &content }));
@@ -116,7 +119,7 @@ pub fn send_message(
             let name = tool_use["name"].as_str().unwrap_or("");
             let input = &tool_use["input"];
 
-            let result = call_mcp_tool(name, input);
+            let result = call_mcp_tool(&endpoint, name, input);
             let (content_text, is_error) = match result {
                 Ok(t) => (t, false),
                 Err(e) => (format!("Tool error: {e}"), true),
@@ -138,7 +141,7 @@ pub fn send_message(
 
 // ─── MCP tool execution ───────────────────────────────────────────────────────
 
-fn call_mcp_tool(name: &str, input: &Value) -> Result<String, String> {
+fn call_mcp_tool(endpoint: &str, name: &str, input: &Value) -> Result<String, String> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -152,7 +155,7 @@ fn call_mcp_tool(name: &str, input: &Value) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     let resp = client
-        .post(MCP_URL)
+        .post(endpoint)
         .header("content-type", "application/json")
         .json(&body)
         .send()
@@ -161,7 +164,10 @@ fn call_mcp_tool(name: &str, input: &Value) -> Result<String, String> {
     let result: Value = resp.json().map_err(|e| format!("MCP parse error: {e}"))?;
 
     if let Some(err) = result.get("error") {
-        return Err(err["message"].as_str().unwrap_or("unknown MCP error").to_string());
+        return Err(err["message"]
+            .as_str()
+            .unwrap_or("unknown MCP error")
+            .to_string());
     }
 
     let content = &result["result"]["content"];
@@ -183,7 +189,7 @@ fn call_mcp_tool(name: &str, input: &Value) -> Result<String, String> {
 /// Fetch the tool list from the running MCP server and adapt it for the
 /// Anthropic API.  MCP uses camelCase `inputSchema`; Anthropic requires
 /// snake_case `input_schema` — we rename the key here.
-fn fetch_mcp_tools() -> Result<Value, String> {
+fn fetch_mcp_tools(endpoint: &str) -> Result<Value, String> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -197,11 +203,13 @@ fn fetch_mcp_tools() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
 
     let resp = client
-        .post(MCP_URL)
+        .post(endpoint)
         .header("content-type", "application/json")
         .json(&body)
         .send()
-        .map_err(|_| "MCP server not running — start Photonic before using the chat panel.".to_string())?;
+        .map_err(|_| {
+            "MCP server not running — start Photonic before using the chat panel.".to_string()
+        })?;
 
     let result: Value = resp.json().map_err(|e| format!("MCP parse error: {e}"))?;
 
@@ -226,4 +234,72 @@ fn fetch_mcp_tools() -> Result<Value, String> {
         .collect::<Vec<_>>();
 
     Ok(Value::Array(tools))
+}
+
+fn mcp_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/mcp")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{call_mcp_tool, fetch_mcp_tools, mcp_url};
+    use serde_json::json;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn mcp_url_uses_configured_port() {
+        assert_eq!(mcp_url(9000), "http://127.0.0.1:9000/mcp",);
+    }
+
+    #[test]
+    fn mcp_requests_reach_configured_endpoint() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let mut request_lines = Vec::new();
+            for response_body in [
+                r#"{"result":{"tools":[]}}"#,
+                r#"{"result":{"content":[{"type":"text","text":"ok"}]}}"#,
+            ] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                request_lines.push(request_line);
+
+                let mut header = String::new();
+                loop {
+                    header.clear();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                }
+
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body,
+                )
+                .unwrap();
+            }
+            request_lines
+        });
+
+        let endpoint = mcp_url(port);
+        let tools = fetch_mcp_tools(&endpoint);
+        let tool_result = call_mcp_tool(&endpoint, "noop", &json!({}));
+        let request_lines = server.join().unwrap();
+
+        assert_eq!(tools.unwrap(), json!([]));
+        assert_eq!(tool_result.unwrap(), "ok");
+        assert_eq!(
+            request_lines,
+            vec!["POST /mcp HTTP/1.1\r\n", "POST /mcp HTTP/1.1\r\n"]
+        );
+    }
 }
