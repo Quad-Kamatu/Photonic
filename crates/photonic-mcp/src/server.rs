@@ -4,7 +4,9 @@ use crate::handlers::clipboard::ClipboardRing;
 use crate::protocol::*;
 pub use crate::schema_gen::tool_list;
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -14,14 +16,21 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use subtle::ConstantTimeEq;
 use tokio::sync::{oneshot, Mutex};
-use tower_http::cors::CorsLayer;
 use tracing::info;
+
+/// Header used to authenticate requests when `McpServerConfig::secret` is set.
+pub const MCP_SECRET_HEADER: &str = "x-mcp-secret";
+
+/// Maximum encoded JSON-RPC request size accepted by the MCP endpoint.
+const MCP_REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Configuration for the MCP server.
 #[derive(Debug, Clone)]
 pub struct McpServerConfig {
     pub port: u16,
+    /// Shared secret expected in the [`MCP_SECRET_HEADER`] header, when set.
     pub secret: Option<String>,
 }
 
@@ -144,8 +153,36 @@ impl McpServer {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp))
-        .layer(CorsLayer::permissive())
+        // Authenticate the request metadata before any body extractor runs.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_authentication,
+        ))
+        .layer(DefaultBodyLimit::max(MCP_REQUEST_BODY_LIMIT))
         .with_state(state)
+}
+
+async fn require_authentication(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !is_authorized(request.headers(), state.config.secret.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    next.run(request).await
+}
+
+fn is_authorized(headers: &HeaderMap, secret: Option<&str>) -> bool {
+    let Some(secret) = secret else {
+        return true;
+    };
+
+    headers
+        .get(MCP_SECRET_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|provided| bool::from(secret.as_bytes().ct_eq(provided.as_bytes())))
 }
 
 /// Main MCP JSON-RPC handler.
@@ -160,6 +197,10 @@ async fn handle_mcp(State(state): State<AppState>, Json(req): Json<JsonRpcReques
     }
 
     let result = dispatch(state, &req.method, req.params).await;
+
+    if req.id.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
 
     match result {
         Ok(value) => Json(JsonRpcResponse::success(req.id, value)).into_response(),
@@ -210,3 +251,218 @@ async fn dispatch(state: AppState, method: &str, params: Option<Value>) -> Resul
 }
 
 pub(crate) use crate::dispatch::dispatch_tool_inner;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::clipboard::new_clipboard_ring;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, Method, Request},
+    };
+    use photonic_core::{history::CommandHistory, AuditLog, Document};
+    use serde_json::json;
+    use std::sync::{mpsc, Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+    use tower::util::ServiceExt;
+
+    fn test_state(secret: Option<&str>) -> AppState {
+        let (tx, _rx) = mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("auth test", 200.0, 100.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig {
+                port: 7842,
+                secret: secret.map(str::to_owned),
+            },
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(new_clipboard_ring()),
+        }
+    }
+
+    fn save_request(path: &std::path::Path, secret: Option<&str>) -> axum::http::Request<Body> {
+        let mut builder = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(secret) = secret {
+            builder = builder.header(MCP_SECRET_HEADER, secret);
+        }
+        builder
+            .body(Body::from(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "save_document",
+                        "arguments": { "path": path }
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configured_secret_rejects_missing_and_incorrect_headers_before_dispatch() {
+        let base = std::env::temp_dir().join(format!("photonic-mcp-auth-{}", uuid::Uuid::new_v4()));
+        let path = base.join("missing.photon");
+        let state = test_state(Some("correct-secret"));
+        let app = build_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(save_request(&path, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!path.exists(), "unauthenticated request must not dispatch");
+
+        let response = app
+            .clone()
+            .oneshot(save_request(&path, Some("wrong-secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!path.exists(), "incorrect secret must not dispatch");
+
+        let response = app
+            .oneshot(save_request(&path, Some("correct-secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(path.exists(), "authenticated request should dispatch");
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_oversized_body_is_rejected_before_body_extraction() {
+        let app = build_router(test_state(Some("correct-secret")));
+        let oversized_body = vec![b' '; MCP_REQUEST_BODY_LIMIT + 1];
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn authenticated_oversized_body_is_capped() {
+        let app = build_router(test_state(Some("correct-secret")));
+        let oversized_body = vec![b' '; MCP_REQUEST_BODY_LIMIT + 1];
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(MCP_SECRET_HEADER, "correct-secret")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn no_secret_preserves_local_development_behavior() {
+        let base =
+            std::env::temp_dir().join(format!("photonic-mcp-no-auth-{}", uuid::Uuid::new_v4()));
+        let path = base.join("allowed.photon");
+        let app = build_router(test_state(None));
+
+        let response = app.oneshot(save_request(&path, None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(path.exists());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    async fn post_json(request: Value) -> (StatusCode, Vec<u8>) {
+        let response = build_router(test_state(None))
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn initialized_notification_returns_no_content() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notification_errors_emit_no_response_bytes() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_returns_id_matched_json_rpc_response() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        assert!(response["result"].is_object());
+        assert!(response.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_endpoint_does_not_enable_cross_origin_requests() {
+        let app = build_router(test_state(None));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/mcp")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "content-type, x-mcp-secret",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert!(!response
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+}

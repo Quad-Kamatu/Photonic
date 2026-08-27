@@ -2667,6 +2667,25 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "list_checkpoints",
+            "description": "List all saved document checkpoints, including their IDs, names, and creation times. Use these IDs with diff_checkpoints or restore_checkpoint.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "restore_checkpoint",
+            "description": "Restore the document to a saved checkpoint by ID, clearing undo/redo history. This mutates the document.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "checkpoint_id": {
+                        "type": "string",
+                        "description": "UUID of the checkpoint to restore"
+                    }
+                },
+                "required": ["checkpoint_id"]
+            }
+        },
+        {
             "name": "diff_checkpoints",
             "description": "Compare two checkpoint snapshots and return a structured JSON diff of added, removed, and modified nodes and layers. Use list_checkpoints first to get checkpoint IDs.",
             "inputSchema": {
@@ -2942,29 +2961,6 @@ pub fn tool_list() -> Value {
                     "delta_a": { "type": "number", "description": "Alpha channel delta (−1.0 to 1.0). Default 0." }
                 },
                 "required": []
-            }
-        },
-        {
-            "name": "make_compound_path",
-            "description": "Combine two or more path nodes into a single compound path using the even-odd fill rule. Overlapping areas become holes. The bottommost node's fill/stroke style is preserved; all other nodes are removed. Single undoable step.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Two or more path node IDs to combine.", "minItems": 2 },
-                    "name": { "type": "string", "description": "Optional name for the resulting compound path node." }
-                },
-                "required": ["node_ids"]
-            }
-        },
-        {
-            "name": "release_compound_path",
-            "description": "Release a compound path back into individual path nodes. Each subpath becomes its own node with the compound path's fill/stroke. The compound path node is removed. Single undoable step.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "node_id": { "type": "string", "description": "ID of the compound path node to release." }
-                },
-                "required": ["node_id"]
             }
         },
         {
@@ -4967,4 +4963,29 @@ pub fn tool_list() -> Value {
             }
         }
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_list;
+    use std::collections::HashSet;
+
+    #[test]
+    fn tool_names_are_non_empty_and_unique() {
+        let manifest = tool_list();
+        let tools = manifest.as_array().expect("tool_list must return an array");
+        let mut names = HashSet::new();
+
+        for (index, tool) in tools.iter().enumerate() {
+            let name = tool
+                .get("name")
+                .and_then(|name| name.as_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| panic!("tool at index {index} has an empty or missing name"));
+            assert!(
+                names.insert(name),
+                "duplicate MCP tool name {name:?} at index {index}"
+            );
+        }
+    }
 }

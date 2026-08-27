@@ -40,6 +40,7 @@ fn needs_document_snapshot(name: &str) -> bool {
             | "add_export_profile"
             | "remove_export_profile"
             | "import_design_tokens"
+            | "apply_document_template"
             | "add_construction_line"
             | "set_document_bleed"
             | "set_document_color_mode"
@@ -54,6 +55,7 @@ fn needs_document_snapshot(name: &str) -> bool {
             | "define_symbol"
             | "delete_symbol"
             | "add_color_swatch"
+            | "update_color_swatch"
             | "delete_color_swatch"
             | "load_swatch_library"
             | "define_pattern"
@@ -967,15 +969,21 @@ pub(crate) async fn dispatch_tool_inner(
         }
         "undo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::undo(state, a).await,
-            ))
+            let (result, moved) = handlers::document::undo(state, a).await;
+            Ok(if moved {
+                ToolOutput::mutating(result)
+            } else {
+                ToolOutput::readonly(result)
+            })
         }
         "redo" => {
             let a: UndoRedoArgs = serde_json::from_value(args).unwrap_or_default();
-            Ok(ToolOutput::readonly(
-                handlers::document::redo(state, a).await,
-            ))
+            let (result, moved) = handlers::document::redo(state, a).await;
+            Ok(if moved {
+                ToolOutput::mutating(result)
+            } else {
+                ToolOutput::readonly(result)
+            })
         }
         "screenshot" => {
             let a: ScreenshotArgs = serde_json::from_value(args).unwrap_or_default();
@@ -1120,6 +1128,16 @@ pub(crate) async fn dispatch_tool_inner(
             let a: ExportAuditLogArgs = serde_json::from_value(args).unwrap_or_default();
             Ok(ToolOutput::readonly(
                 handlers::audit::export_audit_log(state, a).await,
+            ))
+        }
+        "list_checkpoints" => Ok(ToolOutput::readonly(
+            handlers::document::list_checkpoints(state).await,
+        )),
+        "restore_checkpoint" => {
+            let a: RestoreCheckpointArgs =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            Ok(ToolOutput::mutating(
+                handlers::document::restore_checkpoint(state, a).await,
             ))
         }
         "diff_checkpoints" => {
@@ -2166,8 +2184,12 @@ mod tests {
     use crate::handlers::clipboard::new_clipboard_ring;
     use crate::server::McpServerConfig;
     use photonic_core::{
+        color::Color,
+        document::{ExportProfile, Guide, GuideOrientation},
+        layer::Layer,
         node::{PathNode, TextNode},
-        AuditLog, Document, PathData, SceneNode, SceneNodeKind,
+        style::Fill,
+        AuditLog, ColorSwatch, Document, PathData, SceneNode, SceneNodeKind,
     };
     use serde_json::json;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -2265,6 +2287,289 @@ mod tests {
         assert_eq!(state.document.lock().await.bleed_mm, 0.0);
     }
 
+    #[test]
+    fn tool_list_exposes_checkpoint_lifecycle() {
+        let tools = crate::schema_gen::tool_list();
+        let tools = tools.as_array().expect("tool list array");
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+        };
+
+        let list = find("list_checkpoints");
+        assert_eq!(list["inputSchema"]["type"], "object");
+        assert_eq!(list["inputSchema"]["properties"], json!({}));
+        assert_eq!(list["inputSchema"]["required"], json!([]));
+
+        let restore = find("restore_checkpoint");
+        assert_eq!(restore["inputSchema"]["type"], "object");
+        assert_eq!(
+            restore["inputSchema"]["properties"]["checkpoint_id"]["type"],
+            "string"
+        );
+        assert_eq!(restore["inputSchema"]["required"], json!(["checkpoint_id"]));
+    }
+
+    fn structured_data(result: &ToolResult) -> Value {
+        let Some(ContentItem::Text { text }) = result.content.last() else {
+            panic!("expected structured JSON content");
+        };
+        serde_json::from_str(text).expect("valid structured JSON content")
+    }
+
+    #[tokio::test]
+    async fn checkpoint_lifecycle_is_reachable_through_dispatcher() {
+        let state = test_state();
+        let checkpoint_id = {
+            let doc = state.document.lock().await;
+            state
+                .history
+                .lock()
+                .await
+                .create_checkpoint("baseline".to_string(), &doc)
+        };
+
+        let listed = dispatch_tool(&state, "list_checkpoints", json!({}))
+            .await
+            .unwrap();
+        assert_ne!(listed.is_error, Some(true));
+        let listed_data = structured_data(&listed);
+        assert_eq!(
+            listed_data["checkpoints"][0]["id"],
+            checkpoint_id.to_string()
+        );
+        assert_eq!(listed_data["checkpoints"][0]["name"], "baseline");
+
+        let created = dispatch_tool(
+            &state,
+            "create_shape",
+            json!({
+                "shape_type": "rectangle",
+                "x": 0.0,
+                "y": 0.0,
+                "width": 10.0,
+                "height": 10.0,
+                "name": "checkpoint-node"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(created.is_error, Some(true));
+
+        let route = dispatch_tool_inner(
+            &state,
+            "restore_checkpoint",
+            json!({ "checkpoint_id": "not-a-uuid" }),
+        )
+        .await
+        .unwrap();
+        assert!(route.mutates, "restore_checkpoint must be marked mutating");
+        assert_eq!(route.result.is_error, Some(true));
+
+        let restored = dispatch_tool(
+            &state,
+            "restore_checkpoint",
+            json!({ "checkpoint_id": checkpoint_id.to_string() }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(restored.is_error, Some(true));
+        assert!(state.document.lock().await.nodes.is_empty());
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+        assert_eq!(state.history.lock().await.list_checkpoints().len(), 1);
+
+        let audit = state.audit_log.lock().unwrap();
+        let entry = audit.entries().back().expect("restore audit entry");
+        assert_eq!(entry.tool_name, "restore_checkpoint");
+        assert_eq!(entry.args["checkpoint_id"], checkpoint_id.to_string());
+        assert!(!entry.is_error);
+    }
+
+    async fn swatch_state(with_matching_node: bool) -> AppState {
+        let state = test_state();
+        let mut doc = state.document.lock().await;
+        doc.color_swatches
+            .push(ColorSwatch::new("Brand", "#112233"));
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let fill = if with_matching_node {
+            Fill::solid(Color::from_hex("#112233").unwrap())
+        } else {
+            Fill::solid(Color::from_hex("#AABBCC").unwrap())
+        };
+        doc.add_node(
+            SceneNode::new(
+                "swatch target",
+                layer_id,
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0)).with_fill(fill),
+                ),
+            ),
+            Some(layer_id),
+        );
+        drop(doc);
+        state
+    }
+
+    #[tokio::test]
+    async fn update_color_swatch_undo_redo_restores_palette_and_nodes() {
+        let cases = [
+            (
+                "recolor without propagation",
+                false,
+                json!({
+                    "name": "Brand",
+                    "new_color_hex": "#445566",
+                    "propagate": false
+                }),
+            ),
+            (
+                "recolor with matching nodes",
+                true,
+                json!({
+                    "name": "Brand",
+                    "new_color_hex": "#445566"
+                }),
+            ),
+        ];
+
+        for (label, with_matching_node, args) in cases {
+            let state = swatch_state(with_matching_node).await;
+            let before = serde_json::to_value(&*state.document.lock().await).unwrap();
+
+            let result = dispatch_tool(&state, "update_color_swatch", args)
+                .await
+                .unwrap();
+            assert_ne!(result.is_error, Some(true), "{label}: update failed");
+            let after = serde_json::to_value(&*state.document.lock().await).unwrap();
+            assert_ne!(after, before, "{label}: update was a no-op");
+            assert_eq!(
+                state.history.lock().await.undo_depth(),
+                1,
+                "{label}: update must be one undo step"
+            );
+
+            undo(&state).await;
+            assert_eq!(
+                serde_json::to_value(&*state.document.lock().await).unwrap(),
+                before,
+                "{label}: undo did not restore the document"
+            );
+
+            let result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{label}: redo failed");
+            assert_eq!(
+                serde_json::to_value(&*state.document.lock().await).unwrap(),
+                after,
+                "{label}: redo did not reapply the document"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_document_template_records_all_changes_in_one_step() {
+        let state = test_state();
+        let (template_json, before) = {
+            let mut doc = state.document.lock().await;
+            doc.guides
+                .push(Guide::new(GuideOrientation::Horizontal, 12.0));
+            doc.export_profiles
+                .push(ExportProfile::new_png("print", Some(400), Some(300)));
+            let before = serde_json::to_value(&*doc).unwrap();
+
+            let mut template = doc.clone();
+            template.width = 640.0;
+            template.height = 480.0;
+            template
+                .guides
+                .push(Guide::new(GuideOrientation::Vertical, 37.0));
+            template.export_profiles = vec![ExportProfile {
+                name: "print".to_string(),
+                format: "png".to_string(),
+                width: Some(1600),
+                height: Some(1200),
+                semantic_ids: Some(true),
+                precision: Some(4),
+            }];
+            let template_layer = Layer::new("Template overlay");
+            template.layer_order.push(template_layer.id);
+            template.layers.insert(template_layer.id, template_layer);
+            (template.to_json().unwrap(), before)
+        };
+
+        let result = dispatch_tool(
+            &state,
+            "apply_document_template",
+            json!({ "template_json": template_json }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+
+        let after = serde_json::to_value(&*state.document.lock().await).unwrap();
+        {
+            let doc = state.document.lock().await;
+            assert_eq!((doc.width, doc.height), (640.0, 480.0));
+            assert_eq!(doc.guides.len(), 2);
+            assert!(doc.layers.values().any(|l| l.name == "Template overlay"));
+            let profile = doc
+                .export_profiles
+                .iter()
+                .find(|p| p.name == "print")
+                .unwrap();
+            assert_eq!((profile.width, profile.height), (Some(1600), Some(1200)));
+        }
+
+        undo(&state).await;
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            before
+        );
+        let redo_result = dispatch_tool(&state, "redo", json!({})).await.unwrap();
+        assert_ne!(redo_result.is_error, Some(true));
+        assert_eq!(
+            serde_json::to_value(&*state.document.lock().await).unwrap(),
+            after
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_and_redo_report_mutation_only_when_history_moves() {
+        let state = test_state();
+
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(!output.mutates, "undo with no history must be read-only");
+
+        dispatch_tool(&state, "set_document_bleed", json!({ "bleed_mm": 3.0 }))
+            .await
+            .unwrap();
+
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(output.mutates, "successful undo must be mutating");
+        let output = dispatch_tool_inner(&state, "undo", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            !output.mutates,
+            "undo at the history root must be read-only"
+        );
+
+        let output = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(output.mutates, "successful redo must be mutating");
+        let output = dispatch_tool_inner(&state, "redo", json!({}))
+            .await
+            .unwrap();
+        assert!(!output.mutates, "redo at the history tip must be read-only");
+    }
+
     #[tokio::test]
     async fn save_document_writes_native_file_round_trips_and_remembers_path() {
         let state = test_state();
@@ -2318,6 +2623,47 @@ mod tests {
             Some(true),
             "pathless save should use the remembered path"
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_document_write_failure_preserves_existing_destination_and_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = test_state();
+        let base =
+            std::env::temp_dir().join(format!("photonic-save-failure-{}", uuid::Uuid::new_v4()));
+        let parent = base.join("readonly");
+        let path = parent.join("existing.photon");
+        let original = b"last known good project bytes";
+
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = dispatch_tool(&state, "save_document", json!({ "path": path }))
+            .await
+            .unwrap();
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(
+            state.document_path.lock().unwrap().is_none(),
+            "a failed save must not establish a current path"
+        );
+        assert!(
+            std::fs::read_dir(&parent).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".photonic-tmp-")
+            }),
+            "a failed save must not leave a staging file"
+        );
+
         std::fs::remove_dir_all(base).unwrap();
     }
 }

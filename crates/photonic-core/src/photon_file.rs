@@ -99,7 +99,6 @@ fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
 
-    const ERROR_FILE_NOT_FOUND: i32 = 2;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
 
@@ -126,10 +125,10 @@ fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
         }
 
         let replace_error = io::Error::last_os_error();
-        if replace_error.raw_os_error() != Some(ERROR_FILE_NOT_FOUND) {
-            return Err(replace_error);
-        }
-
+        // `ReplaceFileW` is preferred because it preserves replacement
+        // metadata, but it can reject valid writable files on hosted Windows
+        // runners. `MoveFileExW` is the supported replacement fallback for
+        // both existing and newly-created destinations.
         if MoveFileExW(
             staging.as_ptr(),
             destination.as_ptr(),
@@ -138,7 +137,13 @@ fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
         {
             Ok(())
         } else {
-            Err(io::Error::last_os_error())
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "could not replace destination ({replace_error}); fallback failed: {}",
+                    io::Error::last_os_error()
+                ),
+            ))
         }
     }
 }
@@ -302,6 +307,48 @@ mod tests {
             hist.is_none(),
             "malformed history must not block the document"
         );
+    }
+
+    #[test]
+    fn malformed_raster_image_is_rejected_before_open() {
+        let mut doc = sample_doc();
+        let layer_id = doc.layer_order[0];
+        let node = crate::node::SceneNode::new(
+            "image",
+            layer_id,
+            crate::node::SceneNodeKind::Raster(crate::node::RasterNode::new(
+                crate::raster::RasterImage::filled(1, 1, [1, 2, 3, 255]),
+            )),
+        );
+        doc.add_node(node, Some(layer_id));
+
+        let mut value = serde_json::to_value(&doc).unwrap();
+        let node = value["nodes"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        node["kind"]["image"]["width"] = serde_json::json!(2);
+
+        let err = load_photon(&serde_json::to_string(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("do not match decoded dimensions"));
+
+        let mut value = serde_json::to_value(&doc).unwrap();
+        let node = value["nodes"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        node["kind"]["mask"] = serde_json::json!({
+            "width": 0,
+            "height": 1,
+            "data": []
+        });
+
+        let err = load_photon(&serde_json::to_string(&value).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("mask dimensions must be non-zero"));
     }
 
     fn test_dir(label: &str) -> PathBuf {
