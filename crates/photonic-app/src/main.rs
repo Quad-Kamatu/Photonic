@@ -1094,28 +1094,16 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
 fn write_mcp_config(port: u16, secret: Option<&str>) {
     let server_entry = mcp_server_entry(port, secret);
 
-    let claude_settings_path = claude_settings_path();
-    if let Some(p) = &claude_settings_path {
-        let mut settings: serde_json::Value = p
-            .exists()
-            .then(|| std::fs::read_to_string(p).ok())
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
+    let Some(path) = claude_settings_path() else {
+        return;
+    };
 
-        if !settings["mcpServers"].is_object() {
-            settings["mcpServers"] = serde_json::json!({});
-        }
-        settings["mcpServers"]["photonic"] = server_entry;
-
-        let serialized = serde_json::to_string_pretty(&settings).unwrap_or_default();
-        match write_private_claude_settings(p, serialized.as_bytes()) {
-            Ok(_) => info!(
-                "Registered Photonic MCP server in Claude settings at {:?}",
-                p
-            ),
-            Err(e) => tracing::warn!("Could not update Claude settings: {e}"),
-        }
+    match write_mcp_config_at(&path, server_entry) {
+        Ok(()) => info!(
+            "Registered Photonic MCP server in Claude settings at {:?}",
+            path
+        ),
+        Err(error) => tracing::warn!("Could not update Claude settings at {:?}: {error}", path),
     }
 }
 
@@ -1128,6 +1116,54 @@ fn mcp_server_entry(port: u16, secret: Option<&str>) -> serde_json::Value {
         server_entry["headers"] = serde_json::json!({ MCP_SECRET_HEADER: secret });
     }
     server_entry
+}
+
+/// Add Photonic's MCP entry to one Claude configuration file.
+///
+/// A missing file is initialized, but an existing file must be readable,
+/// valid JSON, and an object before it can be changed. This prevents a
+/// malformed configuration from being overwritten with a file containing only
+/// Photonic's server.
+fn write_mcp_config_at(
+    path: &std::path::Path,
+    server_entry: serde_json::Value,
+) -> std::io::Result<()> {
+    let mut settings = match std::fs::read(path) {
+        Ok(contents) => serde_json::from_slice(&contents).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid JSON: {error}"),
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error),
+    };
+
+    let Some(settings_object) = settings.as_object_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Claude settings must be a JSON object",
+        ));
+    };
+
+    let mcp_servers = settings_object
+        .entry("mcpServers".to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(mcp_servers) = mcp_servers.as_object_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Claude settings mcpServers must be a JSON object",
+        ));
+    };
+    mcp_servers.insert("photonic".to_owned(), server_entry);
+
+    let contents = serde_json::to_vec_pretty(&settings).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("could not serialize Claude settings: {error}"),
+        )
+    })?;
+    write_private_claude_settings(path, &contents)
 }
 
 fn write_private_claude_settings(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
@@ -1409,13 +1445,73 @@ fn run_claude_stream(user_msg: String, is_first: bool, tx: std::sync::mpsc::Send
 
 #[cfg(test)]
 mod mcp_config_tests {
-    use super::{mcp_server_entry, write_private_claude_settings};
+    use super::{mcp_server_entry, write_mcp_config_at, write_private_claude_settings};
+    use serde_json::json;
+    use std::{fs, io};
+
+    fn test_directory() -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("photonic-claude-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).expect("create temporary test directory");
+        path
+    }
 
     #[test]
     fn write_mcp_config_uses_the_configured_port() {
         let entry = mcp_server_entry(9000, Some("top-secret"));
         assert_eq!(entry["url"], "http://127.0.0.1:9000/mcp");
         assert_eq!(entry["headers"]["x-mcp-secret"], "top-secret");
+    }
+
+    #[test]
+    fn malformed_config_is_preserved() {
+        let directory = test_directory();
+        let path = directory.join("claude.json");
+        let original = b"{ not valid JSON\n";
+        fs::write(&path, original).expect("write malformed config");
+
+        let error = write_mcp_config_at(&path, mcp_server_entry(7842, None))
+            .expect_err("malformed config");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).expect("read config"), original);
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
+    }
+
+    #[test]
+    fn valid_config_preserves_unrelated_settings_and_servers() {
+        let directory = test_directory();
+        let path = directory.join("claude.json");
+        let original = json!({
+            "theme": "dark",
+            "mcpServers": {"other": {"type": "stdio", "command": "other-server"}}
+        });
+        fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+
+        let entry = mcp_server_entry(9123, Some("test-secret"));
+        write_mcp_config_at(&path, entry.clone()).expect("update valid config");
+
+        let updated: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read updated config")).unwrap();
+        assert_eq!(updated["theme"], original["theme"]);
+        assert_eq!(updated["mcpServers"]["other"], original["mcpServers"]["other"]);
+        assert_eq!(updated["mcpServers"]["photonic"], entry);
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
+    }
+
+    #[test]
+    fn malformed_mcp_servers_structure_is_preserved() {
+        let directory = test_directory();
+        let path = directory.join("claude.json");
+        let original = br#"{"mcpServers":[]}"#;
+        fs::write(&path, original).expect("write malformed config");
+
+        let error = write_mcp_config_at(&path, mcp_server_entry(7842, None))
+            .expect_err("malformed structure");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).expect("read preserved config"), original);
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
     }
 
     #[cfg(unix)]
