@@ -90,7 +90,7 @@ pub async fn save_document(state: &AppState, args: SaveDocumentArgs) -> ToolResu
             }
         }
     };
-    if let Err(error) = std::fs::write(&path, json) {
+    if let Err(error) = photonic_core::write_atomic_file(&path, json.as_bytes()) {
         return ToolResult::error(format!("Could not save document: {error}"));
     }
     if let Ok(mut current_path) = state.document_path.lock() {
