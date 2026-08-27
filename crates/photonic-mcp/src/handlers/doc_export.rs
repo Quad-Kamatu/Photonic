@@ -135,11 +135,15 @@ pub async fn reorder_layers(state: &AppState, args: ReorderLayersArgs) -> ToolRe
     let mut doc = state.document.lock().await;
     let mut history = state.history.lock().await;
 
-    let new_order: Vec<uuid::Uuid> = args
+    let new_order: Vec<uuid::Uuid> = match args
         .layer_order
         .iter()
-        .filter_map(|s| uuid::Uuid::parse_str(s).ok())
-        .collect();
+        .map(|s| uuid::Uuid::parse_str(s))
+        .collect::<Result<_, _>>()
+    {
+        Ok(order) => order,
+        Err(error) => return ToolResult::error(format!("Invalid layer UUID: {error}")),
+    };
 
     if new_order.len() != doc.layer_order.len() {
         return ToolResult::error(format!(
@@ -154,6 +158,12 @@ pub async fn reorder_layers(state: &AppState, args: ReorderLayersArgs) -> ToolRe
         if !doc.layers.contains_key(lid) {
             return ToolResult::error(format!("Layer not found: {lid}"));
         }
+    }
+
+    let requested_ids: BTreeSet<_> = new_order.iter().copied().collect();
+    let document_ids: BTreeSet<_> = doc.layers.keys().copied().collect();
+    if requested_ids.len() != new_order.len() || requested_ids != document_ids {
+        return ToolResult::error("Layer order must contain every document layer exactly once.");
     }
 
     let old_order = doc.layer_order.clone();
@@ -1915,6 +1925,132 @@ pub async fn import_design_tokens(state: &AppState, args: ImportDesignTokensArgs
         "updated": updated,
         "swatches": names,
     }))
+}
+
+#[cfg(test)]
+mod reorder_layers_tests {
+    use super::reorder_layers;
+    use crate::protocol::ReorderLayersArgs;
+    use crate::server::{AppState, McpServerConfig};
+    use photonic_core::node::{PathNode, SceneNode, SceneNodeKind};
+    use photonic_core::path::PathData;
+    use photonic_core::{AuditLog, Document, Layer};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+    use uuid::Uuid;
+
+    fn state_with(doc: Document) -> AppState {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(doc)),
+            history: Arc::new(Mutex::new(photonic_core::history::CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(crate::handlers::clipboard::new_clipboard_ring()),
+        }
+    }
+
+    fn two_layer_doc() -> (Document, Uuid, Uuid) {
+        let mut doc = Document::new("reorder test", 200.0, 100.0);
+        let first_id = doc.layer_order[0];
+        let second_id = doc.add_layer(Layer::new("Layer 2"));
+
+        doc.add_node(
+            SceneNode::new(
+                "first",
+                first_id,
+                SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+            ),
+            Some(first_id),
+        );
+        doc.add_node(
+            SceneNode::new(
+                "second",
+                second_id,
+                SceneNodeKind::Path(PathNode::new(PathData::rect(20.0, 0.0, 10.0, 10.0))),
+            ),
+            Some(second_id),
+        );
+
+        (doc, first_id, second_id)
+    }
+
+    fn draw_order_names(doc: &Document) -> Vec<String> {
+        doc.nodes_in_draw_order()
+            .into_iter()
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn duplicate_layer_ids_are_rejected_without_mutation() {
+        let (doc, first_id, _) = two_layer_doc();
+        let original_order = doc.layer_order.clone();
+        let state = state_with(doc);
+
+        let result = reorder_layers(
+            &state,
+            ReorderLayersArgs {
+                layer_order: vec![first_id.to_string(), first_id.to_string()],
+            },
+        )
+        .await;
+
+        assert_eq!(result.is_error, Some(true));
+        let doc = state.document.lock().await;
+        assert_eq!(doc.layer_order, original_order);
+        assert_eq!(draw_order_names(&doc), ["first", "second"]);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+    }
+
+    #[tokio::test]
+    async fn valid_reversed_order_updates_draw_order_once() {
+        let (doc, first_id, second_id) = two_layer_doc();
+        let state = state_with(doc);
+
+        let result = reorder_layers(
+            &state,
+            ReorderLayersArgs {
+                layer_order: vec![second_id.to_string(), first_id.to_string()],
+            },
+        )
+        .await;
+
+        assert_ne!(result.is_error, Some(true));
+        let doc = state.document.lock().await;
+        assert_eq!(doc.layer_order, [second_id, first_id]);
+        assert_eq!(draw_order_names(&doc), ["second", "first"]);
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_unknown_and_invalid_layer_ids_are_rejected() {
+        let (doc, first_id, second_id) = two_layer_doc();
+        let original_order = doc.layer_order.clone();
+        let unknown_id = Uuid::new_v4();
+
+        for layer_order in [
+            vec![first_id.to_string()],
+            vec![first_id.to_string(), unknown_id.to_string()],
+            vec![first_id.to_string(), "not-a-uuid".to_string()],
+            vec![
+                first_id.to_string(),
+                second_id.to_string(),
+                "not-a-uuid".to_string(),
+            ],
+        ] {
+            let state = state_with(doc.clone());
+            let result = reorder_layers(&state, ReorderLayersArgs { layer_order }).await;
+
+            assert_eq!(result.is_error, Some(true));
+            let doc = state.document.lock().await;
+            assert_eq!(doc.layer_order, original_order);
+            assert_eq!(draw_order_names(&doc), ["first", "second"]);
+            assert_eq!(state.history.lock().await.undo_depth(), 0);
+        }
+    }
 }
 
 // ─── Graphic Styles ───────────────────────────────────────────────────────────
