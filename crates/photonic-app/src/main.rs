@@ -1470,8 +1470,8 @@ mod mcp_config_tests {
         let original = b"{ not valid JSON\n";
         fs::write(&path, original).expect("write malformed config");
 
-        let error = write_mcp_config_at(&path, mcp_server_entry(7842, None))
-            .expect_err("malformed config");
+        let error =
+            write_mcp_config_at(&path, mcp_server_entry(7842, None)).expect_err("malformed config");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read(&path).expect("read config"), original);
@@ -1494,7 +1494,10 @@ mod mcp_config_tests {
         let updated: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).expect("read updated config")).unwrap();
         assert_eq!(updated["theme"], original["theme"]);
-        assert_eq!(updated["mcpServers"]["other"], original["mcpServers"]["other"]);
+        assert_eq!(
+            updated["mcpServers"]["other"],
+            original["mcpServers"]["other"]
+        );
         assert_eq!(updated["mcpServers"]["photonic"], entry);
         fs::remove_dir_all(directory).expect("remove temporary test directory");
     }
