@@ -211,7 +211,7 @@ pub async fn get_document_info(state: &AppState) -> ToolResult {
     }))
 }
 
-pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
+pub async fn undo(state: &AppState, args: UndoRedoArgs) -> (ToolResult, bool) {
     tracing::debug!("tool: undo");
     let steps = args.steps.unwrap_or(1);
     // Acquire both locks once so the render thread is only blocked for one
@@ -226,14 +226,16 @@ pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
             break;
         }
     }
-    if count > 0 {
+    let moved = count > 0;
+    let result = if moved {
         ToolResult::text(format!("Undid {} step(s)", count))
     } else {
         ToolResult::text("Nothing to undo")
-    }
+    };
+    (result, moved)
 }
 
-pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
+pub async fn redo(state: &AppState, args: UndoRedoArgs) -> (ToolResult, bool) {
     tracing::debug!("tool: redo");
     let steps = args.steps.unwrap_or(1);
     let mut doc = state.document.lock().await;
@@ -246,11 +248,13 @@ pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
             break;
         }
     }
-    if count > 0 {
+    let moved = count > 0;
+    let result = if moved {
         ToolResult::text(format!("Redid {} step(s)", count))
     } else {
         ToolResult::text("Nothing to redo")
-    }
+    };
+    (result, moved)
 }
 
 pub async fn resize_canvas(state: &AppState, args: ResizeCanvasArgs) -> ToolResult {
