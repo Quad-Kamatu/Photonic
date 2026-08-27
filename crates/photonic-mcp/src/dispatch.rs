@@ -2625,4 +2625,45 @@ mod tests {
         );
         std::fs::remove_dir_all(base).unwrap();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_document_write_failure_preserves_existing_destination_and_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = test_state();
+        let base =
+            std::env::temp_dir().join(format!("photonic-save-failure-{}", uuid::Uuid::new_v4()));
+        let parent = base.join("readonly");
+        let path = parent.join("existing.photon");
+        let original = b"last known good project bytes";
+
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = dispatch_tool(&state, "save_document", json!({ "path": path }))
+            .await
+            .unwrap();
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(
+            state.document_path.lock().unwrap().is_none(),
+            "a failed save must not establish a current path"
+        );
+        assert!(
+            std::fs::read_dir(&parent).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".photonic-tmp-")
+            }),
+            "a failed save must not leave a staging file"
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }
