@@ -11,7 +11,7 @@ use egui_wgpu::ScreenDescriptor;
 use photonic_core::{document::Document, history::CommandHistory, AuditLog};
 use photonic_gui::PhotonicApp;
 use photonic_mcp::server::AppState;
-use photonic_mcp::{McpServer, McpServerConfig};
+use photonic_mcp::{McpServer, McpServerConfig, MCP_SECRET_HEADER};
 use photonic_render::PhotonicRenderer;
 use repl::LuaRepl;
 use serde::{Deserialize, Serialize};
@@ -595,7 +595,7 @@ impl ApplicationHandler for PhotonicWinitApp {
                 renderer.surface_format(),
             ));
 
-        write_mcp_config();
+        write_mcp_config(&self.mcp_config);
         info!("GPU renderer + egui initialized — window open");
         window.request_redraw();
 
@@ -1089,12 +1089,20 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
 /// is always available when `claude` runs.
 ///
 /// Uses the HTTP transport — Claude Code connects directly to the already-running
-/// Photonic MCP HTTP server on port 7842.  No proxy subprocess needed.
-fn write_mcp_config() {
-    let server_entry = serde_json::json!({
+/// Photonic MCP HTTP server. No proxy subprocess needed.
+fn mcp_server_entry(config: &McpServerConfig) -> serde_json::Value {
+    let mut server_entry = serde_json::json!({
         "type": "http",
-        "url": format!("http://127.0.0.1:{}/mcp", 7842)
+        "url": format!("http://127.0.0.1:{}/mcp", config.port)
     });
+    if let Some(secret) = config.secret.as_deref() {
+        server_entry["headers"] = serde_json::json!({ MCP_SECRET_HEADER: secret });
+    }
+    server_entry
+}
+
+fn write_mcp_config(config: &McpServerConfig) {
+    let server_entry = mcp_server_entry(config);
 
     let claude_settings_path = claude_settings_path();
     if let Some(p) = &claude_settings_path {
@@ -1138,6 +1146,22 @@ fn claude_settings_path() -> Option<std::path::PathBuf> {
         .or_else(|_| std::env::var("HOME"))
         .ok()?;
     Some(std::path::PathBuf::from(home).join(".claude.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_client_config_propagates_secret_and_port() {
+        let entry = mcp_server_entry(&McpServerConfig {
+            port: 9123,
+            secret: Some("test-secret".to_string()),
+        });
+
+        assert_eq!(entry["url"], "http://127.0.0.1:9123/mcp");
+        assert_eq!(entry["headers"][MCP_SECRET_HEADER], "test-secret");
+    }
 }
 
 /// Build a PATH string that includes Node.js and npm directories so that
