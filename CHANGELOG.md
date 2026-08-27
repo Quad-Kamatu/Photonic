@@ -11,6 +11,27 @@ embeds this file to show a "What's New" popup after an update.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-08-27
+
+### Added
+
+- **MCP checkpoint lifecycle tools.** Agents can now list, create, restore, and
+  compare named document checkpoints, including the changes made by undo and
+  redo operations.
+
+### Fixed
+
+- **MCP operations are safer and more reliable.** Project saves are atomic,
+  malformed Claude configuration files are preserved, configured ports carry
+  through registration, notifications return no JSON-RPC body, and shared-secret
+  authentication is enforced before accepting a request body.
+- **MCP input and history validation is stricter.** CSS/vector lowering and
+  persisted raster dimensions are bounded, unsupported border-width lists and
+  invalid layer reorder permutations are rejected, tool names are unique, and
+  composite edits retain a single correct undo/redo history entry.
+- **Cross-platform document saving is robust.** Windows now falls back to its
+  supported atomic-replacement path when replacing an existing native file.
+
 ## [0.2.5] - 2026-07-12
 
 ### Added
