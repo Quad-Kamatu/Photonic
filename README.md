@@ -45,8 +45,8 @@ every request. Authentication is checked before request-body parsing, and MCP
 request bodies are limited to 2 MiB. The generated Claude configuration is
 created and updated with owner-only permissions on Unix; Windows uses the user
 profile's inherited ACL. Without a secret, local development behavior remains
-unchanged. Browser clients receive CORS access only from loopback origins;
-native MCP clients do not need CORS.
+unchanged. The endpoint does not enable browser CORS; native MCP clients do
+not need it.
 
 ### Lua REPL
 

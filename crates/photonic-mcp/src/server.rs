@@ -5,11 +5,7 @@ use crate::protocol::*;
 pub use crate::schema_gen::tool_list;
 use axum::{
     extract::{DefaultBodyLimit, Request, State},
-    http::{
-        header::{self, HeaderName, HeaderValue},
-        request::Parts as RequestParts,
-        HeaderMap, Method, StatusCode, Uri,
-    },
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
@@ -22,7 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use subtle::ConstantTimeEq;
 use tokio::sync::{oneshot, Mutex};
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
 
 /// Header used to authenticate requests when `McpServerConfig::secret` is set.
@@ -164,15 +159,6 @@ fn build_router(state: AppState) -> Router {
             require_authentication,
         ))
         .layer(DefaultBodyLimit::max(MCP_REQUEST_BODY_LIMIT))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::predicate(is_loopback_origin))
-                .allow_methods([Method::POST])
-                .allow_headers([
-                    header::CONTENT_TYPE,
-                    HeaderName::from_static(MCP_SECRET_HEADER),
-                ]),
-        )
         .with_state(state)
 }
 
@@ -186,25 +172,6 @@ async fn require_authentication(
     }
 
     next.run(request).await
-}
-
-fn is_loopback_origin(origin: &HeaderValue, _parts: &RequestParts) -> bool {
-    let Ok(origin) = origin.to_str() else {
-        return false;
-    };
-    let Ok(uri) = origin.parse::<Uri>() else {
-        return false;
-    };
-
-    matches!(uri.scheme_str(), Some("http" | "https"))
-        && (uri.path().is_empty() || uri.path() == "/")
-        && uri.query().is_none()
-        && uri.host().is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host == "127.0.0.1"
-                || host == "[::1]"
-                || host == "::1"
-        })
 }
 
 fn is_authorized(headers: &HeaderMap, secret: Option<&str>) -> bool {
@@ -291,7 +258,7 @@ mod tests {
     use crate::handlers::clipboard::new_clipboard_ring;
     use axum::{
         body::{to_bytes, Body},
-        http::Request,
+        http::{header, Method, Request},
     };
     use photonic_core::{history::CommandHistory, AuditLog, Document};
     use serde_json::json;
@@ -474,42 +441,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cors_preflight_is_limited_to_loopback_origins_and_mcp_headers() {
+    async fn mcp_endpoint_does_not_enable_cross_origin_requests() {
         let app = build_router(test_state(None));
-        let request = |origin: &'static str| {
-            axum::http::Request::builder()
-                .method(Method::OPTIONS)
-                .uri("/mcp")
-                .header(header::ORIGIN, origin)
-                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                .header(
-                    header::ACCESS_CONTROL_REQUEST_HEADERS,
-                    "content-type, x-mcp-secret",
-                )
-                .body(Body::empty())
-                .unwrap()
-        };
-
         let response = app
-            .clone()
-            .oneshot(request("http://127.0.0.1:3000"))
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/mcp")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "content-type, x-mcp-secret",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        assert!(response.status().is_success());
-        assert_eq!(
-            response
-                .headers()
-                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-                .and_then(|value| value.to_str().ok()),
-            Some("http://127.0.0.1:3000")
-        );
-        assert!(response
-            .headers()
-            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains("x-mcp-secret")));
 
-        let response = app.oneshot(request("https://evil.example")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert!(!response
             .headers()
             .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
