@@ -99,7 +99,6 @@ fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
 
-    const ERROR_FILE_NOT_FOUND: i32 = 2;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
 
@@ -126,10 +125,10 @@ fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
         }
 
         let replace_error = io::Error::last_os_error();
-        if replace_error.raw_os_error() != Some(ERROR_FILE_NOT_FOUND) {
-            return Err(replace_error);
-        }
-
+        // `ReplaceFileW` is preferred because it preserves replacement
+        // metadata, but it can reject valid writable files on hosted Windows
+        // runners. `MoveFileExW` is the supported replacement fallback for
+        // both existing and newly-created destinations.
         if MoveFileExW(
             staging.as_ptr(),
             destination.as_ptr(),
@@ -138,7 +137,13 @@ fn replace_destination(staging: &Path, destination: &Path) -> io::Result<()> {
         {
             Ok(())
         } else {
-            Err(io::Error::last_os_error())
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "could not replace destination ({replace_error}); fallback failed: {}",
+                    io::Error::last_os_error()
+                ),
+            ))
         }
     }
 }
