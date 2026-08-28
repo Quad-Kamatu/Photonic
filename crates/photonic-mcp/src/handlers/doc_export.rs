@@ -7,6 +7,7 @@ use crate::protocol::{
 };
 use crate::server::AppState;
 use photonic_core::node::SceneNodeKind;
+use photonic_core::raster::validate_raster_dimensions;
 use photonic_core::style::{Fill, FillKind};
 use std::collections::BTreeSet;
 
@@ -489,6 +490,15 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
+fn validate_export_dimensions(width: Option<u32>, height: Option<u32>) -> Result<(), String> {
+    match (width, height) {
+        (Some(width), Some(height)) => validate_raster_dimensions(width, height),
+        (Some(width), None) => validate_raster_dimensions(width, 1),
+        (None, Some(height)) => validate_raster_dimensions(1, height),
+        (None, None) => Ok(()),
+    }
+}
+
 pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResult {
     tracing::debug!("tool: export_raster");
 
@@ -504,6 +514,10 @@ pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResu
         return ToolResult::error(format!(
             "Unsupported format: '{format}'. Use 'png', 'jpeg', 'webp', 'gif', or 'tiff'."
         ));
+    }
+
+    if let Err(error) = validate_export_dimensions(args.width, args.height) {
+        return ToolResult::error(format!("Invalid output dimensions: {error}"));
     }
 
     // Capture a screenshot from the render thread (PNG bytes).
@@ -525,7 +539,10 @@ pub async fn export_raster(state: &AppState, args: ExportRasterArgs) -> ToolResu
 
     // Optionally resize.
     let png_bytes = match (args.width, args.height) {
-        (Some(w), Some(h)) => resize_png(&png_bytes, w, h).unwrap_or(png_bytes),
+        (Some(w), Some(h)) => match resize_png(&png_bytes, w, h) {
+            Ok(resized) => resized,
+            Err(error) => return ToolResult::error(format!("Failed to resize export: {error}")),
+        },
         _ => png_bytes,
     };
 
@@ -1203,15 +1220,17 @@ pub async fn preview_selection(state: &AppState, args: PreviewSelectionArgs) -> 
     }))
 }
 
-fn resize_png(png_bytes: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+fn resize_png(png_bytes: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     use image::{imageops::FilterType, ImageFormat};
-    let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png).ok()?;
-    let resized = img.resize_exact(w.max(1), h.max(1), FilterType::Triangle);
+    validate_raster_dimensions(w, h)?;
+    let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png)
+        .map_err(|error| format!("could not decode PNG: {error}"))?;
+    let resized = img.resize_exact(w, h, FilterType::Triangle);
     let mut out = Vec::new();
     resized
         .write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Png)
-        .ok()?;
-    Some(out)
+        .map_err(|error| format!("could not encode PNG: {error}"))?;
+    Ok(out)
 }
 
 fn png_to_jpeg(png_bytes: &[u8], quality: u8) -> Option<Vec<u8>> {
@@ -2435,5 +2454,69 @@ mod export_blocking_tests {
         } else {
             eprintln!("no GPU adapter — export returned an error, but did not panic (ok)");
         }
+    }
+}
+
+#[cfg(test)]
+mod raster_export_tests {
+    use super::{export_raster, validate_export_dimensions};
+    use crate::handlers::clipboard::new_clipboard_ring;
+    use crate::protocol::{ExportRasterArgs, ToolResult};
+    use crate::server::{AppState, McpServerConfig};
+    use photonic_core::{history::CommandHistory, AuditLog, Document};
+    use std::sync::{mpsc, Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn state_with_capture_receiver() -> (
+        AppState,
+        mpsc::Receiver<tokio::sync::oneshot::Sender<Vec<u8>>>,
+    ) {
+        let (capture_tx, capture_rx) = mpsc::channel();
+        let state = AppState {
+            document: Arc::new(Mutex::new(Document::new("raster export test", 64.0, 48.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(capture_tx)),
+            config: McpServerConfig::default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(new_clipboard_ring()),
+        };
+        (state, capture_rx)
+    }
+
+    fn first_text(result: &ToolResult) -> &str {
+        match result.content.first() {
+            Some(crate::protocol::ContentItem::Text { text }) => text,
+            _ => panic!("expected a text tool result"),
+        }
+    }
+
+    #[test]
+    fn export_dimension_validator_rejects_invalid_optional_dimensions() {
+        assert!(validate_export_dimensions(Some(0), Some(1)).is_err());
+        assert!(validate_export_dimensions(Some(100_000), None).is_err());
+        assert!(validate_export_dimensions(Some(8193), Some(8192)).is_err());
+        assert!(validate_export_dimensions(None, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn export_raster_rejects_oversized_resize_before_capture() {
+        let (state, capture_rx) = state_with_capture_receiver();
+        let result = export_raster(
+            &state,
+            ExportRasterArgs {
+                width: Some(100_000),
+                height: Some(100_000),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert!(first_text(&result).contains("Invalid output dimensions"));
+        assert!(
+            capture_rx.try_recv().is_err(),
+            "rejected resize must not capture"
+        );
     }
 }
