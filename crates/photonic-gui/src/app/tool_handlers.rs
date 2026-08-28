@@ -101,6 +101,12 @@ impl PhotonicApp {
     ) -> bool {
         let mut doc_modified = false;
 
+        // The native host queues image/SVG clipboard data because egui's
+        // clipboard event can only carry text. Consume it even when a text
+        // widget has focus so a paste intended for that widget cannot leak
+        // into the canvas on a later frame.
+        let pending_native_paste = self.pending_native_clipboard_paste.take();
+
         // Skip entirely when a text widget has focus so typing is unaffected.
         if !viewport_kb(ctx) {
             return doc_modified;
@@ -214,19 +220,19 @@ impl PhotonicApp {
             self.guides_visible = !self.guides_visible;
         }
 
-        // Copy / paste are driven by egui's clipboard **events**, not raw key
-        // presses. egui-winit intercepts Ctrl+C / Ctrl+V (and Ctrl+Shift+V) and
-        // emits `Event::Copy` / `Event::Paste`, swallowing the underlying key
-        // event — so `key_pressed(Key::C / Key::V)` never fires for them. It
-        // also only emits `Event::Paste` when the OS clipboard is non-empty, so
-        // on copy we push a marker onto the OS clipboard to guarantee that a
-        // later Ctrl+V produces a paste event. `Event::Paste` does not carry the
-        // modifier state, so we read `shift` from the same frame to distinguish
-        // paste-in-place (Ctrl+Shift+V) from offset paste (Ctrl+V).
-        let (want_copy, want_paste, paste_in_place) = ctx.input(|i| {
+        // Copy / paste are driven by egui's clipboard **events** plus the
+        // native host queue for non-text formats. egui-winit intercepts
+        // Ctrl+C / Ctrl+V (and Ctrl+Shift+V) and emits `Event::Copy` /
+        // `Event::Paste`, swallowing the underlying key event — so
+        // `key_pressed(Key::C / Key::V)` never fires for them. `Event::Paste`
+        // does not carry modifier state, so read `shift` from the same frame.
+        let (want_copy, paste_text, paste_in_place) = ctx.input(|i| {
             (
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                }),
                 i.modifiers.shift,
             )
         });
@@ -240,29 +246,27 @@ impl PhotonicApp {
                 self.gui_clipboard.capture(doc, ids.iter());
                 // Keep the OS clipboard non-empty so future Ctrl+V emits a paste
                 // event (see note above). The text is an internal marker only.
-                ctx.copy_text("photonic:objects".to_string());
+                ctx.copy_text(INTERNAL_OBJECT_CLIPBOARD_MARKER.to_string());
             }
         }
 
-        // Ctrl+V: paste with +10px offset. Ctrl+Shift+V: paste in place.
-        if want_paste && !self.gui_clipboard.is_empty() {
-            let offset = if paste_in_place { 0.0_f64 } else { 10.0 };
-            if let Some(target_layer) = doc
-                .active_layer_id
-                .or_else(|| doc.layer_order.first().copied())
-            {
-                if let Some((cmd, new_ids)) =
-                    self.gui_clipboard
-                        .paste_command(target_layer, offset, offset)
-                {
-                    history.execute(cmd, doc);
-                    doc.selection = Selection::from_ids(new_ids.iter().copied());
-                    if let Some(first) = new_ids.first() {
-                        self.selected_id = Some(*first);
-                    }
-                    doc_modified = true;
-                }
-            }
+        // Ctrl+V: paste with +10px offset. Ctrl+Shift+V: paste in place. A
+        // native payload takes precedence over egui's text fallback so an SVG
+        // remains editable and a clipboard image is not reduced to text.
+        let pasted = if let Some((payload, queued_in_place)) = pending_native_paste {
+            self.paste_native_clipboard(doc, history, payload, queued_in_place)
+        } else if let Some(text) = paste_text {
+            self.paste_native_clipboard(
+                doc,
+                history,
+                NativeClipboardPaste::Text(text),
+                paste_in_place,
+            )
+        } else {
+            false
+        };
+        if pasted {
+            doc_modified = true;
         }
 
         // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)

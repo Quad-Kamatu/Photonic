@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 base64 = "0.22"
 ico = "0.3"
 image = { workspace = true }
+arboard = { version = "3.6", features = ["wayland-data-control"] }
 # Cross-platform deps. These power modules compiled on every OS — mlua/uuid
 # (repl.rs, script.rs, cli.rs) and reqwest (mcp_proxy.rs, claude_client.rs) —
 # so they must NOT live under [target.'cfg(windows)'.dependencies].

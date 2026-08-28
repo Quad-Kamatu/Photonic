@@ -10,6 +10,7 @@ use demos::*;
 mod hit_test;
 use hit_test::*;
 pub(crate) mod autosave;
+mod clipboard;
 mod close_guard;
 mod command_center;
 mod direct_select;
@@ -48,6 +49,13 @@ use crate::{
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
 };
+
+pub use clipboard::NativeClipboardPaste;
+
+/// Marker kept in the native clipboard after Photonic copies scene objects.
+/// It makes egui emit a paste event even though the actual object snapshot is
+/// held in-process by [`GuiClipboard`].
+pub(crate) const INTERNAL_OBJECT_CLIPBOARD_MARKER: &str = "photonic:objects";
 
 /// In-process copy/paste buffer for scene objects (Ctrl+C / Ctrl+V).
 ///
@@ -1145,6 +1153,10 @@ pub struct PhotonicApp {
     /// too), so a group of paths or images pastes intact — within the document
     /// and across open documents (the snapshot is detached from the source doc).
     pub gui_clipboard: GuiClipboard,
+    /// Clipboard content captured by the native window host for the next GUI
+    /// frame. This is separate from `gui_clipboard` because egui only exposes
+    /// text clipboard events and cannot carry image pixels.
+    pending_native_clipboard_paste: Option<(NativeClipboardPaste, bool)>,
 
     // ── Composition Analysis ──────────────────────────────────────────────────
     /// Latest findings from the composition analyzer (shown in the GUI panel).
@@ -1558,6 +1570,7 @@ impl Default for PhotonicApp {
             magic_wand_attribute: SelectSameAttr::FillColor,
             magic_wand_tolerance: 0.05,
             gui_clipboard: GuiClipboard::default(),
+            pending_native_clipboard_paste: None,
         }
     }
 }
@@ -1947,6 +1960,17 @@ fn write_photon_file(
 }
 
 impl PhotonicApp {
+    /// Queue clipboard content read by the native window host. `paste_in_place`
+    /// mirrors Ctrl+Shift+V; the queue is consumed by the global shortcut
+    /// handler on the next egui frame.
+    pub fn queue_native_clipboard_paste(
+        &mut self,
+        payload: NativeClipboardPaste,
+        paste_in_place: bool,
+    ) {
+        self.pending_native_clipboard_paste = Some((payload, paste_in_place));
+    }
+
     /// Take a palette MCP request for execution by the application host.
     pub fn take_mcp_operation_request(&mut self) -> Option<String> {
         self.mcp_operation_request.take()

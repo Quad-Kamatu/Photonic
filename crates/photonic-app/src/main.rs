@@ -9,7 +9,7 @@ use args::Args;
 use clap::Parser;
 use egui_wgpu::ScreenDescriptor;
 use photonic_core::{document::Document, history::CommandHistory, AuditLog};
-use photonic_gui::PhotonicApp;
+use photonic_gui::{NativeClipboardPaste, PhotonicApp};
 use photonic_mcp::server::AppState;
 use photonic_mcp::{McpServer, McpServerConfig, MCP_SECRET_HEADER};
 use photonic_render::PhotonicRenderer;
@@ -25,8 +25,9 @@ use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -37,6 +38,91 @@ fn native_project_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
         .then(|| path.to_path_buf())
+}
+
+/// Detect a paste shortcut before egui consumes the keyboard event. egui-winit
+/// intentionally swallows Ctrl/Cmd+V, including the image-only case where it
+/// cannot emit an `Event::Paste` text event.
+fn native_clipboard_paste_request(event: &WindowEvent, modifiers: egui::Modifiers) -> Option<bool> {
+    let WindowEvent::KeyboardInput {
+        event: key_event,
+        is_synthetic,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if *is_synthetic || key_event.state != ElementState::Pressed {
+        return None;
+    }
+
+    let logical_paste = matches!(&key_event.logical_key, Key::Named(NamedKey::Paste));
+    let logical_v = matches!(
+        &key_event.logical_key,
+        Key::Character(text) if text.as_str().eq_ignore_ascii_case("v")
+    );
+    let physical_v = matches!(key_event.physical_key, PhysicalKey::Code(KeyCode::KeyV));
+    let command_v = modifiers.command || modifiers.ctrl || modifiers.mac_cmd;
+    let windows_insert = cfg!(target_os = "windows")
+        && modifiers.shift
+        && (matches!(&key_event.logical_key, Key::Named(NamedKey::Insert))
+            || matches!(key_event.physical_key, PhysicalKey::Code(KeyCode::Insert)));
+
+    (logical_paste || (command_v && (logical_v || physical_v)) || windows_insert)
+        .then_some(modifiers.shift)
+}
+
+const MAX_NATIVE_CLIPBOARD_PIXELS: u64 = 64_000_000;
+
+/// Read the richest useful clipboard representation. HTML/SVG is considered
+/// before raster pixels so vector artwork copied from a design tool remains
+/// editable when the clipboard offers both formats.
+fn read_native_clipboard() -> Option<NativeClipboardPaste> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let html = clipboard
+        .get()
+        .html()
+        .ok()
+        .filter(|html| !html.trim().is_empty());
+    let image = clipboard.get_image().ok().and_then(|image| {
+        let width = u32::try_from(image.width).ok()?;
+        let height = u32::try_from(image.height).ok()?;
+        let pixels = u64::from(width).checked_mul(u64::from(height))?;
+        if pixels == 0 || pixels > MAX_NATIVE_CLIPBOARD_PIXELS {
+            return None;
+        }
+        let rgba = image.bytes.into_owned();
+        let expected = pixels
+            .checked_mul(4)
+            .and_then(|len| usize::try_from(len).ok())?;
+        (rgba.len() == expected).then_some(NativeClipboardPaste::Image {
+            width,
+            height,
+            rgba,
+        })
+    });
+    let text = clipboard
+        .get_text()
+        .ok()
+        .filter(|text| !text.trim().is_empty());
+
+    if html.as_deref().is_some_and(looks_like_svg_clipboard_text) {
+        return html.map(NativeClipboardPaste::Text);
+    }
+    if text.as_deref().is_some_and(|text| {
+        text.trim() == "photonic:objects" || looks_like_svg_clipboard_text(text)
+    }) {
+        return text.map(NativeClipboardPaste::Text);
+    }
+    if image.is_some() {
+        return image;
+    }
+    html.or(text).map(NativeClipboardPaste::Text)
+}
+
+fn looks_like_svg_clipboard_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<svg") && lower.contains("</svg")
 }
 
 fn main() -> Result<()> {
@@ -636,6 +722,15 @@ impl ApplicationHandler for PhotonicWinitApp {
         let Some(state) = &mut self.state else { return };
 
         let response = state.egui_state.on_window_event(&state.window, &event);
+        if let Some(paste_in_place) =
+            native_clipboard_paste_request(&event, state.egui_state.egui_input().modifiers)
+        {
+            if let Some(payload) = read_native_clipboard() {
+                state
+                    .gui
+                    .queue_native_clipboard_paste(payload, paste_in_place);
+            }
+        }
 
         match event {
             WindowEvent::CloseRequested => {
