@@ -3934,7 +3934,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "photonic-app"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "photonic-core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "photonic-embed"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "fastembed",
@@ -4003,7 +4003,7 @@ dependencies = [
 
 [[package]]
 name = "photonic-gui"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -4032,7 +4032,7 @@ dependencies = [
 
 [[package]]
 name = "photonic-matte"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "image",
@@ -4046,7 +4046,7 @@ dependencies = [
 
 [[package]]
 name = "photonic-mcp"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4075,7 +4075,7 @@ dependencies = [
 
 [[package]]
 name = "photonic-render"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "bytemuck",
