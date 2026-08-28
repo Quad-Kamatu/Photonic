@@ -78,12 +78,14 @@ pub struct ImportDesignTokensArgs {
 /// Arguments for `list_audit_log` tool
 #[derive(Debug, Deserialize, Default)]
 pub struct ListAuditLogArgs {
-    /// Maximum number of entries to return (default 50, capped at 1000).
+    /// Maximum number of entries to return (default 50, capped at 1000 and the
+    /// audit response byte budget).
     #[serde(default)]
     pub limit: Option<usize>,
 }
 
-/// Arguments for `export_audit_log` tool (no parameters needed).
+/// Arguments for `export_audit_log` tool (no parameters needed; the response
+/// is bounded by the audit export byte budget).
 #[derive(Debug, Deserialize, Default)]
 pub struct ExportAuditLogArgs {}
 
