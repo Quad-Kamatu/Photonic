@@ -4043,6 +4043,7 @@ dependencies = [
  "egui-phosphor",
  "egui-wgpu",
  "egui-winit",
+ "glyphon",
  "kurbo",
  "photonic-core",
  "photonic-embed",

@@ -717,9 +717,9 @@ pub struct DiffOverlayState {
     pub overlay_active: bool,
 }
 
-/// A cached egui texture for a raster node, with the content hash it was built
-/// from so it can be invalidated when the pixels or mask change.
-struct RasterTexCache {
+/// Cached live-canvas composite for documents containing both raster and vector
+/// objects. Rendering those objects into one ordered image preserves z-order.
+struct MixedSceneTexCache {
     handle: egui::TextureHandle,
     hash: u64,
 }
@@ -817,6 +817,9 @@ pub struct PhotonicApp {
 
     /// Accumulated anchors and direction handles for the in-progress Pen path.
     pen_anchors: Vec<PenAnchor>,
+    /// Anchors removed by Pen-local Undo, available to Redo until the next new
+    /// placement or the in-progress path is finished/cancelled.
+    pen_redo_anchors: Vec<PenAnchor>,
     /// Anchor currently receiving symmetric handles from a primary drag.
     pen_drag_anchor: Option<usize>,
 
@@ -1104,9 +1107,10 @@ pub struct PhotonicApp {
     /// reuses one GPU device instead of spinning one up every frame.
     preview_renderer: Option<photonic_render::HeadlessRenderer>,
 
-    /// Cache of uploaded egui textures for raster nodes, keyed by node id.
-    /// Re-uploaded only when the pixel/mask content hash changes.
-    raster_tex_cache: std::collections::HashMap<photonic_core::node::NodeId, RasterTexCache>,
+    /// Ordered live composite used whenever the document contains raster data.
+    mixed_scene_tex_cache: Option<MixedSceneTexCache>,
+    /// Font database used to outline text into the ordered CPU composite.
+    mixed_scene_font_system: Option<glyphon::FontSystem>,
 
     /// Lazily-loaded Photonic logo texture for the top toolbar (embedded PNG).
     logo_texture: Option<egui::TextureHandle>,
@@ -1413,6 +1417,7 @@ impl Default for PhotonicApp {
             selected_id: None,
             drag_start_canvas: None,
             pen_anchors: Vec::new(),
+            pen_redo_anchors: Vec::new(),
             pen_drag_anchor: None,
             moving: false,
             move_drag_origins: Vec::new(),
@@ -1573,7 +1578,8 @@ impl Default for PhotonicApp {
 
             eyedropper: EyedropperState::default(),
             logo_texture: None,
-            raster_tex_cache: std::collections::HashMap::new(),
+            mixed_scene_tex_cache: None,
+            mixed_scene_font_system: None,
             raster_brush_radius: 16.0,
             raster_brush_hardness: 0.8,
             raster_stroke_orig: None,
@@ -3376,6 +3382,14 @@ impl PhotonicApp {
                 let rect = ui.available_rect_before_wrap();
                 self.last_canvas_rect = Some(rect);
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                // A previously focused search/property field otherwise keeps
+                // `wants_keyboard_input()` true indefinitely. Clicking back on
+                // the canvas returns keyboard shortcuts to the viewport.
+                if response.clicked() || response.drag_started() || response.secondary_clicked() {
+                    if let Some(focused) = ctx.memory(|m| m.focused()) {
+                        ctx.memory_mut(|m| m.surrender_focus(focused));
+                    }
+                }
 
                 // ── Deferred fit-to-viewport on new/open ─────────────────────
                 // Runs now that the real viewport `rect` is known, so artwork
@@ -3420,14 +3434,13 @@ impl PhotonicApp {
                     }
                 }
 
-                // ── Raster (pixel) layers ──────────────────────────────────────
-                // Painted over the GPU-rendered vector layer as textured quads,
-                // matching the headless export compositor. Skipped in outline mode
-                // and in Pixel/Overprint Preview (those re-composite via the
-                // headless render, so the live overlay would double up).
+                // ── Mixed raster/vector scene ──────────────────────────────────
+                // A single ordered CPU composite is placed over the GPU scene
+                // whenever raster objects exist. Separate raster quads would
+                // always sit above every vector, regardless of layer order.
                 if !self.outline_mode && !self.preview_active() {
                     let raster_painter = ui.painter_at(rect);
-                    self.paint_raster_nodes(ctx, &raster_painter, doc, view);
+                    self.paint_mixed_document(ctx, &raster_painter, doc, view, rect);
                 }
 
                 // ── Isolation Mode: dim everything outside the isolated group ──

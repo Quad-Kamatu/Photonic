@@ -351,8 +351,8 @@ impl PhotonicApp {
         ui.ctx().set_cursor_icon(hover_cursor);
 
         // ── Delete selected anchor points ─────────────────────────────────────
-        let delete =
-            ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        let delete = self.binding_pressed(ui.ctx(), "edit.delete")
+            || ui.input(|i| i.key_pressed(egui::Key::Backspace));
         if delete && !self.point_selected.is_empty() && viewport_kb(ui.ctx()) {
             if let Some(nid) = self.point_edit_node {
                 if let Some(node) = doc.nodes.get(&nid) {

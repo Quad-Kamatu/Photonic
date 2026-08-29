@@ -37,8 +37,8 @@ impl PhotonicApp {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
 
         let alt = ui.input(|i| i.modifiers.alt);
-        let delete_pressed =
-            ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        let delete_pressed = self.binding_pressed(ctx, "edit.delete")
+            || ui.input(|i| i.key_pressed(egui::Key::Backspace));
         let pointer = ui.input(|i| i.pointer.hover_pos());
 
         // ── Begin a handle drag ───────────────────────────────────────────────
@@ -105,7 +105,7 @@ impl PhotonicApp {
         }
 
         // ── Delete the selected sample ────────────────────────────────────────
-        if delete_pressed {
+        if delete_pressed && viewport_kb(ctx) {
             self.delete_selected_width_point(doc, history, doc_modified);
         }
 

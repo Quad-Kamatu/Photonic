@@ -45,6 +45,13 @@ impl PhotonicApp {
         }
     }
 
+    /// Clipboard commands use native egui events for their defaults because
+    /// the window backend consumes Ctrl+C/V. A remapped binding still arrives
+    /// as a normal key event and must be handled explicitly.
+    pub(crate) fn binding_is_remapped(&self, id: CommandId) -> bool {
+        self.prefs.resolve_binding(id) != commands::default_binding(id)
+    }
+
     /// Run a registered command. Returns `true` if the document changed.
     pub(crate) fn dispatch_command(
         &mut self,
@@ -59,14 +66,19 @@ impl PhotonicApp {
         }
         match id {
             "edit.undo" => {
-                if history.undo(doc) {
+                if self.undo_pen_anchor() {
+                    // Anchor placements are transient until the path commits,
+                    // so they do not dirty the document or touch its history.
+                } else if history.undo(doc) {
                     self.selected_id = doc.selection.ids().next().copied();
                     self.invalidate_point_edit(doc);
                     modified = true;
                 }
             }
             "edit.redo" => {
-                if history.redo(doc) {
+                if self.redo_pen_anchor() {
+                    // See the Pen-local Undo branch above.
+                } else if history.redo(doc) {
                     self.selected_id = doc.selection.ids().next().copied();
                     self.invalidate_point_edit(doc);
                     modified = true;

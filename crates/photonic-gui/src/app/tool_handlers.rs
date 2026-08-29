@@ -3,6 +3,29 @@
 #![allow(clippy::too_many_arguments)]
 use super::*;
 
+/// Registry-backed commands handled in every viewport tool. Keeping this list
+/// explicit allows the audit test to catch shortcut entries that have a label
+/// and default binding but no runtime dispatch path.
+const GLOBAL_SHORTCUT_COMMANDS: &[&str] = &[
+    "edit.undo",
+    "edit.redo",
+    "edit.duplicate",
+    "selection.select_all",
+    "selection.deselect",
+    "object.group",
+    "object.ungroup",
+    "object.bring_forward",
+    "object.send_backward",
+    "object.bring_to_front",
+    "object.send_to_back",
+    "object.flip_horizontal",
+    "object.flip_vertical",
+    "view.outline_mode",
+    "view.pixel_preview",
+    "view.overprint_preview",
+    "view.toggle_guides",
+];
+
 /// Build the in-progress Pen geometry. `curvature_mode` chooses between
 /// explicit anchor handles and a Catmull-Rom interpolation through positions.
 fn build_pen_bez(anchors: &[PenAnchor], curvature_mode: bool, close: bool) -> Option<BezPath> {
@@ -248,121 +271,19 @@ impl PhotonicApp {
             return doc_modified;
         }
 
-        // ── Selection-anchored shortcuts (z-order, ungroup) ───────────────────
-        // These need a single anchor node from `self.selected_id`. They operate
-        // on `doc.selection` / the anchored node, so they are safe under any
-        // tool.
-        if let Some(sel_id) = self.selected_id {
-            let (ctrl, shift, bracket_right, bracket_left, key_g) = ctx.input(|i| {
-                (
-                    i.modifiers.ctrl,
-                    i.modifiers.shift,
-                    i.key_pressed(egui::Key::CloseBracket),
-                    i.key_pressed(egui::Key::OpenBracket),
-                    i.key_pressed(egui::Key::G),
-                )
-            });
-
-            // Z-order shortcuts: Ctrl+] / Ctrl+[ (with Shift for extremes)
-            if ctrl && (bracket_right || bracket_left) {
-                if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) {
-                    let layer_len = doc
-                        .layers
-                        .get(&layer_id)
-                        .map(|l| l.node_ids.len())
-                        .unwrap_or(0);
-                    if layer_len > 0 {
-                        let new_index = if bracket_right && shift {
-                            layer_len - 1 // Bring to Front
-                        } else if bracket_left && shift {
-                            0 // Send to Back
-                        } else if bracket_right {
-                            (cur_idx + 1).min(layer_len - 1) // Bring Forward
-                        } else {
-                            cur_idx.saturating_sub(1) // Send Backward
-                        };
-                        if new_index != cur_idx {
-                            let cmd = Command::ReorderNode {
-                                layer_id,
-                                node_id: sel_id,
-                                old_index: cur_idx,
-                                new_index,
-                            };
-                            history.execute(cmd, doc);
-                            doc_modified = true;
-                        }
-                    }
-                }
-            }
-
-            // Ctrl+Shift+G: ungroup (only if selected node is a group)
-            if ctrl && shift && key_g {
-                if let Some(node) = doc.get_node(&sel_id) {
-                    if let SceneNodeKind::Group(g) = &node.kind {
-                        let children = g.children.clone();
-                        let node_clone = node.clone();
-                        if let Some((layer_id, group_index)) = doc.node_layer_and_index(&sel_id) {
-                            let first_child = children.first().copied();
-                            let cmd = Command::UngroupNodes {
-                                group: node_clone,
-                                layer_id,
-                                group_index,
-                                children,
-                            };
-                            history.execute(cmd, doc);
-                            self.selected_id = first_child;
-                            if let Some(fc) = first_child {
-                                doc.selection = Selection::single(fc);
-                            } else {
-                                doc.selection.clear();
-                            }
-                            doc_modified = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Ctrl+G: group selected nodes (requires 2+ in selection)
-        let (ctrl_g, shift_g) = ctx.input(|i| {
-            (
-                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::G),
-                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::G),
-            )
-        });
-        if ctrl_g && !shift_g && doc.selection.count() >= 2 {
-            self.do_group_selected(doc, history, &mut doc_modified);
-        }
-
-        // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
-        // a user remap takes effect (#140). The three view-preview modes are
-        // mutually exclusive (#22).
-        if self.binding_pressed(ctx, "view.outline_mode") {
-            self.toggle_outline_mode();
-        }
-
-        // Toggle Pixel Preview (default Ctrl+Alt+Y) — keymap-resolved (#22).
-        if self.binding_pressed(ctx, "view.pixel_preview") {
-            self.toggle_pixel_preview();
-        }
-
-        // Toggle Overprint Preview (default Ctrl+Shift+Y) — keymap-resolved (#22).
-        if self.binding_pressed(ctx, "view.overprint_preview") {
-            self.toggle_overprint_preview();
-        }
-
-        // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
-        if self.binding_pressed(ctx, "view.toggle_guides") {
-            self.guides_visible = !self.guides_visible;
-        }
-
         // Copy / paste are driven by egui's clipboard **events** plus the
         // native host queue for non-text formats. egui-winit intercepts
         // Ctrl+C / Ctrl+V (and Ctrl+Shift+V) and emits `Event::Copy` /
         // `Event::Paste`, swallowing the underlying key event — so
         // `key_pressed(Key::C / Key::V)` never fires for them. `Event::Paste`
         // does not carry modifier state, so read `shift` from the same frame.
-        let (want_copy, paste_text, paste_in_place) = ctx.input(|i| {
+        let remapped_copy =
+            self.binding_is_remapped("edit.copy") && self.binding_pressed(ctx, "edit.copy");
+        let remapped_paste =
+            self.binding_is_remapped("edit.paste") && self.binding_pressed(ctx, "edit.paste");
+        let remapped_paste_in_place = self.binding_is_remapped("edit.paste_in_place")
+            && self.binding_pressed(ctx, "edit.paste_in_place");
+        let (native_copy, paste_text, paste_in_place) = ctx.input(|i| {
             (
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 i.events.iter().find_map(|e| match e {
@@ -372,6 +293,7 @@ impl PhotonicApp {
                 i.modifiers.shift,
             )
         });
+        let want_copy = native_copy || remapped_copy;
 
         // Ctrl+C: copy the selected objects (each as a full subtree) to the
         // in-process clipboard, so a group of paths/images pastes intact and
@@ -398,6 +320,10 @@ impl PhotonicApp {
                 NativeClipboardPaste::Text(text),
                 paste_in_place,
             )
+        } else if remapped_paste_in_place {
+            self.dispatch_command("edit.paste_in_place", doc, history)
+        } else if remapped_paste {
+            self.dispatch_command("edit.paste", doc, history)
         } else {
             false
         };
@@ -405,46 +331,19 @@ impl PhotonicApp {
             doc_modified = true;
         }
 
-        // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)
-        // — keymap-resolved and routed through the shared flip helper (#140).
-        if self.binding_pressed(ctx, "object.flip_horizontal")
-            && self.flip_selection(doc, history, true)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "object.flip_vertical")
-            && self.flip_selection(doc, history, false)
-        {
-            doc_modified = true;
+        // Every non-clipboard global action is resolved through the keymap and
+        // the same dispatcher used by the command palette.
+        for &id in GLOBAL_SHORTCUT_COMMANDS {
+            if self.binding_pressed(ctx, id) && self.dispatch_command(id, doc, history) {
+                doc_modified = true;
+            }
         }
 
-        // Undo / Redo (defaults Ctrl+Z / Ctrl+R) — keymap-resolved.
-        if self.binding_pressed(ctx, "edit.undo")
-            && self.dispatch_command("edit.undo", doc, history)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "edit.redo")
-            && self.dispatch_command("edit.redo", doc, history)
-        {
-            doc_modified = true;
-        }
-
-        // Select All / Deselect / Duplicate (defaults Ctrl+A / Ctrl+Shift+A
-        // / Ctrl+D) — keymap-resolved so the displayed shortcut and any user
-        // remap actually fire on the canvas (#140).
-        if self.binding_pressed(ctx, "selection.select_all")
-            && self.dispatch_command("selection.select_all", doc, history)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "selection.deselect")
-            && self.dispatch_command("selection.deselect", doc, history)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "edit.duplicate")
-            && self.dispatch_command("edit.duplicate", doc, history)
+        // Delete is global except in tools where it removes a sub-object (an
+        // anchor or width sample) rather than the selected scene node.
+        if !matches!(self.active_tool, Tool::DirectSelect | Tool::Width)
+            && self.binding_pressed(ctx, "edit.delete")
+            && self.dispatch_command("edit.delete", doc, history)
         {
             doc_modified = true;
         }
@@ -1454,7 +1353,7 @@ impl PhotonicApp {
                 .or_else(|| response.interact_pointer_pos());
             if let Some(pos) = press.filter(|&pos| !self.pen_over_first_anchor(view, pos)) {
                 let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                self.pen_anchors.push(PenAnchor::corner(cx, cy));
+                self.push_pen_anchor(PenAnchor::corner(cx, cy));
                 self.pen_drag_anchor = Some(self.pen_anchors.len() - 1);
             }
         }
@@ -1491,7 +1390,7 @@ impl PhotonicApp {
                         return;
                     }
                     let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                    self.pen_anchors.push(PenAnchor::corner(cx, cy));
+                    self.push_pen_anchor(PenAnchor::corner(cx, cy));
                 }
             }
         }
@@ -1561,7 +1460,41 @@ impl PhotonicApp {
     /// switching surfaces so an unfinished path can never leak between modes.
     pub(crate) fn clear_pen_path(&mut self) {
         self.pen_anchors.clear();
+        self.pen_redo_anchors.clear();
         self.pen_drag_anchor = None;
+    }
+
+    /// Add a fresh anchor and invalidate the transient redo chain, exactly like
+    /// a new document edit after Undo.
+    fn push_pen_anchor(&mut self, anchor: PenAnchor) {
+        self.pen_anchors.push(anchor);
+        self.pen_redo_anchors.clear();
+    }
+
+    /// Undo one uncommitted Pen placement before falling back to document
+    /// history. Returns whether a transient anchor was consumed.
+    pub(crate) fn undo_pen_anchor(&mut self) -> bool {
+        if !matches!(self.active_tool, Tool::Pen | Tool::CurvaturePen) {
+            return false;
+        }
+        let Some(anchor) = self.pen_anchors.pop() else {
+            return false;
+        };
+        self.pen_redo_anchors.push(anchor);
+        self.pen_drag_anchor = None;
+        true
+    }
+
+    /// Redo one placement removed by [`Self::undo_pen_anchor`].
+    pub(crate) fn redo_pen_anchor(&mut self) -> bool {
+        if !matches!(self.active_tool, Tool::Pen | Tool::CurvaturePen) {
+            return false;
+        }
+        let Some(anchor) = self.pen_redo_anchors.pop() else {
+            return false;
+        };
+        self.pen_anchors.push(anchor);
+        true
     }
 
     /// Build `PathData` from the accumulated anchors. Normal Pen uses explicit
@@ -2235,6 +2168,58 @@ mod pen_path_tests {
             PathEl::CurveTo(_, _, endpoint) if endpoint == anchors[0].position
         ));
     }
+
+    #[test]
+    fn pen_anchor_undo_and_redo_are_individual() {
+        let mut app = PhotonicApp::default();
+        app.active_tool = Tool::Pen;
+        app.push_pen_anchor(corner(1.0, 2.0));
+        app.push_pen_anchor(corner(3.0, 4.0));
+
+        assert!(app.undo_pen_anchor());
+        assert_eq!(app.pen_anchors, vec![corner(1.0, 2.0)]);
+        assert!(app.redo_pen_anchor());
+        assert_eq!(app.pen_anchors, vec![corner(1.0, 2.0), corner(3.0, 4.0)]);
+    }
+
+    #[test]
+    fn fresh_pen_anchor_clears_transient_redo() {
+        let mut app = PhotonicApp::default();
+        app.active_tool = Tool::CurvaturePen;
+        app.push_pen_anchor(corner(1.0, 2.0));
+        app.push_pen_anchor(corner(3.0, 4.0));
+        assert!(app.undo_pen_anchor());
+
+        app.push_pen_anchor(corner(5.0, 6.0));
+        assert!(!app.redo_pen_anchor());
+        assert_eq!(app.pen_anchors, vec![corner(1.0, 2.0), corner(5.0, 6.0)]);
+    }
+}
+
+#[cfg(test)]
+mod shortcut_audit_tests {
+    use super::*;
+
+    #[test]
+    fn every_default_binding_has_a_runtime_handler() {
+        const SPECIAL: &[&str] = &[
+            "edit.copy",
+            "edit.paste",
+            "edit.paste_in_place",
+            "edit.delete",
+            "palette.open",
+        ];
+        for def in crate::commands::REGISTRY
+            .iter()
+            .filter(|def| def.default.is_some())
+        {
+            assert!(
+                GLOBAL_SHORTCUT_COMMANDS.contains(&def.id) || SPECIAL.contains(&def.id),
+                "default shortcut {} has no keyboard dispatch path",
+                def.id
+            );
+        }
+    }
 }
 
 /// Release-decision predicate for the #183 fallback move recorder.
@@ -2336,7 +2321,7 @@ mod clipboard_shortcut_tests {
         input.events.push(egui::Event::Copy);
         input.events.push(egui::Event::Paste("ignored".to_string()));
         let mut seen = (false, false);
-        ctx.run(input, |ctx| {
+        let _ = ctx.run(input, |ctx| {
             seen = ctx.input(|i| {
                 (
                     i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
