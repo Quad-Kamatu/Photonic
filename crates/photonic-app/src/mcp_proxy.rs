@@ -5,10 +5,12 @@
 //! This lets the `claude` CLI connect to the already-running MCP server via
 //! the stdio transport used in `--mcp-config`.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use photonic_mcp::MCP_SECRET_HEADER;
 use std::io::{BufRead, BufReader, Write};
 
-pub fn run(host_port: &str) -> Result<()> {
+pub fn run(host_port: &str, secret: Option<&str>) -> Result<()> {
+    let secret = require_secret(secret)?;
     let url = format!("http://{host_port}/mcp");
 
     let client = reqwest::blocking::Client::builder()
@@ -36,6 +38,7 @@ pub fn run(host_port: &str) -> Result<()> {
         let body = match client
             .post(&url)
             .header("content-type", "application/json")
+            .header(MCP_SECRET_HEADER, secret)
             .body(line)
             .send()
         {
@@ -60,4 +63,14 @@ pub fn run(host_port: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn require_secret(secret: Option<&str>) -> Result<&str> {
+    let Some(secret) = secret.filter(|secret| !secret.trim().is_empty()) else {
+        bail!("MCP authentication requires --mcp-secret or PHOTONIC_MCP_SECRET");
+    };
+    if secret.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
+        bail!("MCP secret cannot contain CR or LF characters");
+    }
+    Ok(secret)
 }

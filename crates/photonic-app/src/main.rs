@@ -1,8 +1,14 @@
 mod args;
+#[cfg(test)]
+#[allow(dead_code)]
+mod claude_client;
 mod cli;
 mod mcp_proxy;
 mod repl;
 mod script;
+
+const MCP_SECRET_ENV: &str = "PHOTONIC_MCP_SECRET";
+const MCP_SECRET_ENV_PLACEHOLDER: &str = "${PHOTONIC_MCP_SECRET}";
 
 use anyhow::Result;
 use args::Args;
@@ -127,6 +133,7 @@ fn looks_like_svg_clipboard_text(text: &str) -> bool {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let mcp_secret = configured_mcp_secret(args.mcp_secret.clone());
 
     // ── CLI client mode: a subcommand was given ───────────────────────────────
     if let Some(command) = args.command {
@@ -134,7 +141,7 @@ fn main() -> Result<()> {
             .with(fmt::layer())
             .with(EnvFilter::new("warn"))
             .init();
-        return cli::run(&args.server, command);
+        return cli::run(&args.server, mcp_secret.as_deref(), command);
     }
 
     // ── Server / GUI mode: full logging ──────────────────────────────────────
@@ -250,7 +257,7 @@ fn main() -> Result<()> {
 
     let mcp_config = McpServerConfig {
         port: args.mcp_port,
-        secret: args.mcp_secret,
+        secret: mcp_secret,
     };
 
     // ── Headless mode ─────────────────────────────────────────────────────────
@@ -1181,12 +1188,28 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
         .to_string()
 }
 
+fn configured_mcp_secret(explicit: Option<String>) -> Option<String> {
+    let secret = match explicit {
+        Some(secret) if secret == MCP_SECRET_ENV_PLACEHOLDER => std::env::var(MCP_SECRET_ENV).ok(),
+        Some(secret) => Some(secret),
+        None => std::env::var(MCP_SECRET_ENV).ok(),
+    }?;
+
+    (secret != MCP_SECRET_ENV_PLACEHOLDER).then_some(secret)
+}
+
 /// Register the Photonic MCP server in the user's Claude `~/.claude.json` so it
 /// is always available when `claude` runs.
 ///
 /// Uses the HTTP transport — Claude Code connects directly to the already-running
 /// Photonic MCP HTTP server on the configured port. No proxy subprocess needed.
 fn write_mcp_config(port: u16, secret: Option<&str>) {
+    let Some(secret) = secret.filter(|secret| !secret.trim().is_empty()) else {
+        tracing::warn!(
+            "Skipping Claude MCP registration because no non-empty MCP secret is configured"
+        );
+        return;
+    };
     let server_entry = mcp_server_entry(port, secret);
 
     let Some(path) = claude_settings_path() else {
@@ -1202,15 +1225,12 @@ fn write_mcp_config(port: u16, secret: Option<&str>) {
     }
 }
 
-fn mcp_server_entry(port: u16, secret: Option<&str>) -> serde_json::Value {
-    let mut server_entry = serde_json::json!({
+fn mcp_server_entry(port: u16, secret: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "http",
-        "url": format!("http://127.0.0.1:{port}/mcp")
-    });
-    if let Some(secret) = secret {
-        server_entry["headers"] = serde_json::json!({ MCP_SECRET_HEADER: secret });
-    }
-    server_entry
+        "url": format!("http://127.0.0.1:{port}/mcp"),
+        "headers": { MCP_SECRET_HEADER: secret }
+    })
 }
 
 /// Add Photonic's MCP entry to one Claude configuration file.
@@ -1553,7 +1573,7 @@ mod mcp_config_tests {
 
     #[test]
     fn write_mcp_config_uses_the_configured_port() {
-        let entry = mcp_server_entry(9000, Some("top-secret"));
+        let entry = mcp_server_entry(9000, "top-secret");
         assert_eq!(entry["url"], "http://127.0.0.1:9000/mcp");
         assert_eq!(entry["headers"]["x-mcp-secret"], "top-secret");
     }
@@ -1565,8 +1585,8 @@ mod mcp_config_tests {
         let original = b"{ not valid JSON\n";
         fs::write(&path, original).expect("write malformed config");
 
-        let error =
-            write_mcp_config_at(&path, mcp_server_entry(7842, None)).expect_err("malformed config");
+        let error = write_mcp_config_at(&path, mcp_server_entry(7842, "test-secret"))
+            .expect_err("malformed config");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read(&path).expect("read config"), original);
@@ -1583,7 +1603,7 @@ mod mcp_config_tests {
         });
         fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
 
-        let entry = mcp_server_entry(9123, Some("test-secret"));
+        let entry = mcp_server_entry(9123, "test-secret");
         write_mcp_config_at(&path, entry.clone()).expect("update valid config");
 
         let updated: serde_json::Value =
@@ -1604,7 +1624,7 @@ mod mcp_config_tests {
         let original = br#"{"mcpServers":[]}"#;
         fs::write(&path, original).expect("write malformed config");
 
-        let error = write_mcp_config_at(&path, mcp_server_entry(7842, None))
+        let error = write_mcp_config_at(&path, mcp_server_entry(7842, "test-secret"))
             .expect_err("malformed structure");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

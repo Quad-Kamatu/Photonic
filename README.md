@@ -36,16 +36,17 @@ cargo run --release -- path/to/file.photonic
 ### Running the MCP server (headless)
 
 ```sh
-cargo run --release -- --headless --mcp-port 7842
+cargo run --release -- --headless --mcp-port 7842 --mcp-secret '<unique secret>'
 ```
 
 The MCP server listens on `http://localhost:7842` and accepts JSON-RPC 2.0 requests.
-Pass `--mcp-secret <SECRET>` to require the `X-MCP-Secret: <SECRET>` header on
-every request. Authentication is checked before request-body parsing, and MCP
-request bodies are limited to 2 MiB. The generated Claude configuration is
-created and updated with owner-only permissions on Unix; Windows uses the user
-profile's inherited ACL. Without a secret, local development behavior remains
-unchanged. The endpoint does not enable browser CORS; native MCP clients do
+Pass `--mcp-secret <SECRET>` (or set `PHOTONIC_MCP_SECRET`) to configure the
+required `X-MCP-Secret: <SECRET>` header on every request. The server refuses to
+start without a non-empty secret, and authentication is checked before
+request-body parsing. MCP request bodies are limited to 2 MiB. The generated
+Claude configuration includes the authentication header and is created or
+updated with owner-only permissions on Unix; Windows uses the user profile's
+inherited ACL. The endpoint does not enable browser CORS; native MCP clients do
 not need it.
 
 ### Lua REPL
