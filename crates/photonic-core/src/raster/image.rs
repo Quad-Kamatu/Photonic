@@ -8,6 +8,12 @@
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Maximum width or height accepted by [`RasterImage::from_encoded`].
+pub const MAX_RASTER_DIMENSION: u32 = 16_384;
+
+/// Maximum decoder allocation budget for one encoded raster import.
+pub const MAX_RASTER_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+
 /// An 8-bit RGBA raster image with straight alpha.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterImage {
@@ -62,8 +68,15 @@ impl RasterImage {
 
     /// Decode a PNG/JPEG/WebP/etc. encoded image into an RGBA8 buffer.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, String> {
-        let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
-        let rgba = img.to_rgba8();
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_RASTER_DIMENSION);
+        limits.max_image_height = Some(MAX_RASTER_DIMENSION);
+        limits.max_alloc = Some(MAX_RASTER_DECODED_BYTES);
+        reader.limits(limits);
+        let rgba = reader.decode().map_err(|e| e.to_string())?.into_rgba8();
         let (width, height) = rgba.dimensions();
         Self::from_rgba(width, height, rgba.into_raw())
     }
@@ -288,6 +301,27 @@ mod tests {
         assert_eq!(back.height, 6);
         assert_eq!(back.pixel(0, 0), [1, 2, 3, 255]);
         assert_eq!(back.pixel(7, 5), [200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn encoded_image_rejects_dimensions_over_limit() {
+        let encoded = RasterImage::new(MAX_RASTER_DIMENSION + 1, 1).to_png();
+        let err = RasterImage::from_encoded(&encoded).unwrap_err();
+
+        assert!(err.to_ascii_lowercase().contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn encoded_image_rejects_decoded_bytes_over_limit() {
+        // A header-only PPM is enough to exercise ImageReader's allocation
+        // check: it rejects the advertised decoded size before reading pixels.
+        let width = MAX_RASTER_DIMENSION;
+        let height = (MAX_RASTER_DECODED_BYTES / 3 / u64::from(width) + 1) as u32;
+        assert!(height <= MAX_RASTER_DIMENSION);
+        let header = format!("P6\n{width} {height}\n255\n");
+
+        let err = RasterImage::from_encoded(header.as_bytes()).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("limit"), "{err}");
     }
 
     #[test]

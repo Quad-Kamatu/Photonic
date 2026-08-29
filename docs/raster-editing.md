@@ -163,6 +163,15 @@ Serialized as `{ "width", "height", "png": "<base64>" }` — PNG-compressed via
 the `image` crate, base64 for JSON transport. Keeps `.photonic` files text and
 diffable while staying compact.
 
+### Encoded raster import limits
+
+All encoded raster inputs — including persisted PNG data and the GUI/MCP image
+and pattern tools — pass through `RasterImage::from_encoded`. To keep a
+compressed image from expanding into an unbounded pixel buffer, Photonic
+rejects imports wider or taller than **16,384 px** or whose decoder allocation
+budget exceeds **256 MiB**. The policy applies before Photonic materializes the
+RGBA8 raster buffer.
+
 ### `Mask` (`raster/mask.rs`)
 ```rust
 pub struct Mask { pub width: u32, pub height: u32, pub data: Vec<u8> } // 8-bit coverage
