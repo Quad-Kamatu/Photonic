@@ -10,13 +10,19 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         mut doc_modified: bool,
     ) -> bool {
+        self.prune_locked_selection(doc);
+
         // ── Drain panel actions (z-order, boolean ops) ───────────────────────
         // Use take() so `self` is not borrowed during the loop, allowing calls
         // to &self/&mut self methods (build_shape_with_tool, do_group_selected).
         'actions: for action in std::mem::take(&mut self.pending_panel_actions) {
             match action {
                 PanelAction::SelectNode { node_id } => {
-                    if doc.nodes.contains_key(&node_id) {
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
                         self.selected_id = Some(node_id);
                         doc.selection = Selection::single(node_id);
                         doc_modified = true;
@@ -35,28 +41,34 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::ReorderNode { node_id, op } => {
-                    if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
-                        let layer_len = doc
-                            .layers
-                            .get(&layer_id)
-                            .map(|l| l.node_ids.len())
-                            .unwrap_or(0);
-                        if layer_len > 0 {
-                            let new_index = match op {
-                                ZOrderOp::SendToBack => 0,
-                                ZOrderOp::BringToFront => layer_len - 1,
-                                ZOrderOp::SendBackward => cur_idx.saturating_sub(1),
-                                ZOrderOp::BringForward => (cur_idx + 1).min(layer_len - 1),
-                            };
-                            if new_index != cur_idx {
-                                let cmd = Command::ReorderNode {
-                                    layer_id,
-                                    node_id,
-                                    old_index: cur_idx,
-                                    new_index,
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
+                        if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
+                            let layer_len = doc
+                                .layers
+                                .get(&layer_id)
+                                .map(|l| l.node_ids.len())
+                                .unwrap_or(0);
+                            if layer_len > 0 {
+                                let new_index = match op {
+                                    ZOrderOp::SendToBack => 0,
+                                    ZOrderOp::BringToFront => layer_len - 1,
+                                    ZOrderOp::SendBackward => cur_idx.saturating_sub(1),
+                                    ZOrderOp::BringForward => (cur_idx + 1).min(layer_len - 1),
                                 };
-                                history.execute(cmd, doc);
-                                doc_modified = true;
+                                if new_index != cur_idx {
+                                    let cmd = Command::ReorderNode {
+                                        layer_id,
+                                        node_id,
+                                        old_index: cur_idx,
+                                        new_index,
+                                    };
+                                    history.execute(cmd, doc);
+                                    doc_modified = true;
+                                }
                             }
                         }
                     }
@@ -333,6 +345,7 @@ impl PhotonicApp {
                             new: new_node,
                         };
                         history.execute(cmd, doc);
+                        self.prune_locked_selection(doc);
                         doc_modified = true;
                     }
                 }
@@ -524,7 +537,12 @@ impl PhotonicApp {
                 }
 
                 PanelAction::DuplicateNode { node_id } => {
-                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
+                    if let Some(node) = doc
+                        .nodes
+                        .get(&node_id)
+                        .filter(|node| !doc.is_node_locked(node))
+                        .cloned()
+                    {
                         let mut copy = node.clone();
                         copy.id = uuid::Uuid::new_v4();
                         copy.name = format!("{} copy", copy.name);
@@ -544,12 +562,18 @@ impl PhotonicApp {
                 }
 
                 PanelAction::DeleteNode { node_id } => {
-                    history.execute(Command::RemoveNode { node_id }, doc);
-                    if self.selected_id == Some(node_id) {
-                        self.selected_id = None;
-                        doc.selection.clear();
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
+                        history.execute(Command::RemoveNode { node_id }, doc);
+                        if self.selected_id == Some(node_id) {
+                            self.selected_id = None;
+                            doc.selection.clear();
+                        }
+                        doc_modified = true;
                     }
-                    doc_modified = true;
                 }
 
                 PanelAction::OutlineStroke { node_ids } => {
@@ -2562,7 +2586,18 @@ impl PhotonicApp {
                     // Guard: never drop a node into itself or one of its own
                     // descendants (would create a cycle).
                     let cycle = matches!(new, NodeContainer::Group(gid) if doc.is_ancestor_or_self(node_id, gid));
-                    if !cycle {
+                    let source_unlocked = doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node));
+                    let destination_unlocked = match new {
+                        NodeContainer::Layer(lid) => !doc.is_layer_locked(&lid),
+                        NodeContainer::Group(gid) => doc
+                            .nodes
+                            .get(&gid)
+                            .is_some_and(|node| !doc.is_node_locked(node)),
+                    };
+                    if !cycle && source_unlocked && destination_unlocked {
                         if let Some((old, old_index)) = doc.node_container_and_index(&node_id) {
                             if !(old == new && old_index == new_index) {
                                 history.execute(
@@ -2782,6 +2817,7 @@ impl PhotonicApp {
                         history,
                         &mut doc_modified,
                     );
+                    self.prune_locked_selection(doc);
                 }
 
                 PanelAction::SetLayerOpacity { layer_id, opacity } => {
@@ -2821,7 +2857,11 @@ impl PhotonicApp {
                 }
 
                 PanelAction::OpenObjectOptions { node_id } => {
-                    if let Some(node) = doc.nodes.get(&node_id) {
+                    if let Some(node) = doc
+                        .nodes
+                        .get(&node_id)
+                        .filter(|node| !doc.is_node_locked(node))
+                    {
                         self.object_options_dialog =
                             Some(ObjectOptionsDialog::from_node(node_id, node));
                     }
@@ -2844,14 +2884,20 @@ impl PhotonicApp {
                 }
 
                 PanelAction::OpenColorPopup { node_id, stroke } => {
-                    // Anchor the picker at the current pointer (the radial-menu
-                    // click site); fall back to a sensible default off-screen.
-                    let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(240.0, 240.0));
-                    self.color_popup = Some(ColorPopupState {
-                        node_id,
-                        stroke,
-                        pos,
-                    });
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
+                        // Anchor the picker at the current pointer (the radial-menu
+                        // click site); fall back to a sensible default off-screen.
+                        let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(240.0, 240.0));
+                        self.color_popup = Some(ColorPopupState {
+                            node_id,
+                            stroke,
+                            pos,
+                        });
+                    }
                 }
 
                 PanelAction::AlignNodes {

@@ -101,6 +101,11 @@ impl PhotonicApp {
     ) -> bool {
         let mut doc_modified = false;
 
+        // A layer can have been locked from the sidebar since the last canvas
+        // frame. Prune its contents before shortcuts such as Delete, Duplicate,
+        // Group, and Z-order inspect the current selection.
+        self.prune_locked_selection(doc);
+
         // The native host queues image/SVG clipboard data because egui's
         // clipboard event can only carry text. Consume it even when a text
         // widget has focus so a paste intended for that widget cannot leak
@@ -332,7 +337,15 @@ impl PhotonicApp {
         }
         match doc.outermost_group_of(&hit_id) {
             Some(gid) => {
-                let members = doc.group_member_ids(&gid);
+                let members: Vec<NodeId> = doc
+                    .group_member_ids(&gid)
+                    .into_iter()
+                    .filter(|id| {
+                        doc.nodes
+                            .get(id)
+                            .is_some_and(|node| !doc.is_node_locked(node))
+                    })
+                    .collect();
                 if members.is_empty() {
                     vec![hit_id]
                 } else {
@@ -353,6 +366,8 @@ impl PhotonicApp {
         doc_modified: &mut bool,
         history: &mut CommandHistory,
     ) {
+        self.prune_locked_selection(doc);
+
         // ── Keyboard shortcuts (skipped when a text widget has focus) ─────────
         // Tool-independent shortcuts (undo/redo, copy/paste, duplicate,
         // select-all/deselect, flip, group/ungroup, z-order, view toggles) live
@@ -1010,6 +1025,9 @@ impl PhotonicApp {
                     let nodes = doc.nodes_in_draw_order();
                     let mut ids = Vec::new();
                     for node in nodes {
+                        if doc.is_node_locked(node) {
+                            continue;
+                        }
                         if let Some((nx0, ny0, nx1, ny1)) = text_aware_canvas_bounds(node, renderer)
                         {
                             if nx1 >= mx0 && nx0 <= mx1 && ny1 >= my0 && ny0 <= my1 {
@@ -1400,6 +1418,12 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         doc_modified: &mut bool,
     ) {
+        let target_layer = doc
+            .active_layer_id
+            .or_else(|| doc.layer_order.last().copied());
+        if target_layer.is_none_or(|id| doc.is_layer_locked(&id)) {
+            return;
+        }
         history.execute(
             Command::AddNode {
                 node,

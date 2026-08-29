@@ -5127,7 +5127,7 @@ impl PhotonicApp {
                             let mut best_cut = (cx, cy);
 
                             for node in doc.nodes.values() {
-                                if !node.visible {
+                                if !node.visible || doc.is_node_locked(node) {
                                     continue;
                                 }
                                 let pn = match &node.kind {
@@ -5283,6 +5283,9 @@ impl PhotonicApp {
                                     let attr = self.magic_wand_attribute;
                                     let mut matched: Vec<NodeId> = Vec::new();
                                     for (nid, node) in &doc.nodes {
+                                        if doc.is_node_locked(node) {
+                                            continue;
+                                        }
                                         let ok = match attr {
                                             SelectSameAttr::FillColor => {
                                                 let ref_c = magic_wand_solid_fill(&ref_node);
@@ -5412,7 +5415,7 @@ impl PhotonicApp {
                             let to_select: Vec<NodeId> = doc
                                 .nodes_in_draw_order()
                                 .into_iter()
-                                .filter(|n| !n.locked)
+                                .filter(|n| !doc.is_node_locked(n))
                                 .filter_map(|node| {
                                     node_world_aabb_opt(node).and_then(|aabb| {
                                         let cx = (aabb.0 + aabb.2) / 2.0;

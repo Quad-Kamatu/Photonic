@@ -142,7 +142,7 @@ fn world_aabb(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
 pub fn collect_snap_candidates(doc: &Document, exclude: &[NodeId]) -> Vec<SnapCandidate> {
     let mut out = Vec::new();
     for node in doc.nodes_in_draw_order() {
-        if node.locked || exclude.contains(&node.id) {
+        if doc.is_node_locked(node) || exclude.contains(&node.id) {
             continue;
         }
         let Some((x0, y0, x1, y1)) = world_aabb(node) else {
@@ -234,7 +234,7 @@ pub fn collect_artboard_candidates(doc: &Document) -> Vec<SnapCandidate> {
 pub fn collect_anchor_candidates(doc: &Document, exclude: &[NodeId]) -> Vec<SnapCandidate> {
     let mut out = Vec::new();
     for node in doc.nodes_in_draw_order() {
-        if node.locked || exclude.contains(&node.id) {
+        if doc.is_node_locked(node) || exclude.contains(&node.id) {
             continue;
         }
         let SceneNodeKind::Path(pn) = &node.kind else {
@@ -358,7 +358,7 @@ pub fn resolve_snap(
 pub fn collect_node_aabbs(doc: &Document, exclude: &[NodeId]) -> Vec<(f64, f64, f64, f64)> {
     let mut out = Vec::new();
     for node in doc.nodes_in_draw_order() {
-        if node.locked || exclude.contains(&node.id) {
+        if doc.is_node_locked(node) || exclude.contains(&node.id) {
             continue;
         }
         if let Some(aabb) = world_aabb(node) {

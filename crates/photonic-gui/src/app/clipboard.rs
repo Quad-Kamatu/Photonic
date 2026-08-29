@@ -83,6 +83,10 @@ impl PhotonicApp {
         height: u32,
         rgba: Vec<u8>,
     ) -> bool {
+        if target_layer(doc).is_none() {
+            self.file_status = Some("Paste blocked: the active layer is locked".into());
+            return false;
+        }
         let pixels = u64::from(width).checked_mul(u64::from(height));
         let Some(pixels) = pixels.filter(|pixels| *pixels > 0 && *pixels <= MAX_CLIPBOARD_PIXELS)
         else {
@@ -207,8 +211,10 @@ impl PhotonicApp {
 }
 
 fn target_layer(doc: &Document) -> Option<LayerId> {
-    doc.active_layer_id
-        .or_else(|| doc.layer_order.first().copied())
+    let layer_id = doc
+        .active_layer_id
+        .or_else(|| doc.layer_order.first().copied())?;
+    (!doc.is_layer_locked(&layer_id)).then_some(layer_id)
 }
 
 fn select_roots(app: &mut PhotonicApp, doc: &mut Document, roots: &[NodeId]) {

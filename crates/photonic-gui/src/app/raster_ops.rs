@@ -469,6 +469,13 @@ impl PhotonicApp {
         bytes: &[u8],
         source: Option<&std::path::Path>,
     ) {
+        let target_layer = doc
+            .active_layer_id
+            .or_else(|| doc.layer_order.last().copied());
+        if target_layer.is_none_or(|id| doc.is_layer_locked(&id)) {
+            self.file_status = Some("Place image blocked: the active layer is locked".into());
+            return;
+        }
         let image = match photonic_core::raster::image::RasterImage::from_encoded(bytes) {
             Ok(i) => i,
             Err(e) => {

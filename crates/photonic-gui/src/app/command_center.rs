@@ -101,7 +101,13 @@ impl PhotonicApp {
                     .layer_order
                     .iter()
                     .filter_map(|lid| doc.layers.get(lid))
+                    .filter(|layer| !doc.is_layer_locked(&layer.id))
                     .flat_map(|l| l.node_ids.iter().copied())
+                    .filter(|id| {
+                        doc.nodes
+                            .get(id)
+                            .is_some_and(|node| !doc.is_node_locked(node))
+                    })
                     .collect();
                 if !all.is_empty() {
                     self.selected_id = all.first().copied();
@@ -307,6 +313,9 @@ impl PhotonicApp {
         else {
             return false;
         };
+        if doc.is_layer_locked(&target_layer) {
+            return false;
+        }
         let Some((cmd, new_ids)) = self
             .gui_clipboard
             .paste_command(target_layer, offset, offset)

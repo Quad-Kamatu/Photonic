@@ -230,6 +230,8 @@ impl PhotonicApp {
         doc_modified: &mut bool,
         history: &mut CommandHistory,
     ) {
+        self.prune_locked_selection(doc);
+
         // Generous hit radii — make anchors, handles and corner widgets easy to grab.
         const ANCHOR_RADIUS_PX: f64 = 12.0;
         const HANDLE_RADIUS_PX: f64 = 10.0;

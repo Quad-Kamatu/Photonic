@@ -129,7 +129,7 @@ impl PhotonicApp {
                 Some(n) => n,
                 None => continue,
             };
-            if !node.visible || node.locked {
+            if !node.visible || doc.is_node_locked(node) {
                 continue;
             }
             let pn = match &node.kind {
@@ -280,7 +280,7 @@ impl PhotonicApp {
                 Some(n) => n,
                 None => continue,
             };
-            if !node.visible || node.locked {
+            if !node.visible || doc.is_node_locked(node) {
                 continue;
             }
             let pn = match &node.kind {

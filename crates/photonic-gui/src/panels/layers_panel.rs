@@ -20,6 +20,7 @@ fn draw_layer_node_row(
         return;
     };
     let is_selected = selected_id == Some(node_id);
+    let is_locked = doc.is_node_locked(node);
 
     // Reserve a paint slot for the hover highlight (filled behind the row).
     let hover_bg = ui.painter().add(egui::Shape::Noop);
@@ -52,13 +53,15 @@ fn draw_layer_node_row(
                         } else {
                             format!("{} {}", ph::FOLDER_SIMPLE, node.name)
                         };
-                        let label = RichText::new(name).color(if is_selected {
-                            Color32::from_rgb(184, 164, 255)
+                        let label = if is_locked {
+                            RichText::new(name).weak()
+                        } else if is_selected {
+                            RichText::new(name).color(Color32::from_rgb(184, 164, 255))
                         } else {
-                            Color32::from_rgb(144, 119, 224)
-                        });
+                            RichText::new(name).color(Color32::from_rgb(144, 119, 224))
+                        };
                         let r = ui.selectable_label(is_selected, label);
-                        if r.clicked() {
+                        if r.clicked() && !is_locked {
                             *action = Some(PanelAction::SelectNode { node_id });
                         }
                         r
@@ -126,10 +129,17 @@ fn draw_layer_node_row(
                         } else {
                             format!("• {}", node.name)
                         };
+                        let name = if is_locked {
+                            format!("{} {}", ph::LOCK_SIMPLE, name)
+                        } else {
+                            name
+                        };
                         ui.selectable_label(is_selected, name)
                     });
                 if src.inner.clicked() {
-                    *action = Some(PanelAction::SelectNode { node_id });
+                    if !is_locked {
+                        *action = Some(PanelAction::SelectNode { node_id });
+                    }
                 }
                 // Right-aligned, frameless ⋯ object options.
                 node_options_button(ui, node_id, action);
@@ -375,6 +385,7 @@ fn draw_layers_tree(
         let lid = *layer_id;
 
         let is_layer_selected = selected_layer_ids.contains(&lid);
+        let is_layer_locked = doc.is_layer_locked(&lid);
         // Persisted disclosure state for this layer's object list.
         let open_id = egui::Id::new(("layer_open", lid));
         let mut open = ui.data_mut(|d| d.get_temp::<bool>(open_id).unwrap_or(true));
@@ -473,14 +484,19 @@ fn draw_layers_tree(
                         }
                         None
                     } else {
+                        let layer_name = if is_layer_locked {
+                            format!("{} {}", ph::LOCK_SIMPLE, layer.name)
+                        } else {
+                            layer.name.to_string()
+                        };
                         let layer_label = if layer.is_template {
-                            RichText::new(format!("{} [T]", layer.name))
+                            RichText::new(format!("{} [T]", layer_name))
                                 .italics()
                                 .weak()
                         } else if layer.visible {
-                            RichText::new(layer.name.to_string())
+                            RichText::new(layer_name)
                         } else {
-                            RichText::new(format!("{} (hidden)", layer.name)).weak()
+                            RichText::new(format!("{} (hidden)", layer_name)).weak()
                         };
                         let r = ui.selectable_label(is_layer_selected, layer_label);
                         if r.clicked() {

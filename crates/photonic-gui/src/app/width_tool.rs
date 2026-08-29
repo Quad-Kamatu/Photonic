@@ -31,6 +31,8 @@ impl PhotonicApp {
         doc_modified: &mut bool,
         history: &mut CommandHistory,
     ) {
+        self.prune_locked_selection(doc);
+
         let ctx = ui.ctx();
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
 
@@ -127,7 +129,7 @@ impl PhotonicApp {
         let mut best: Option<(NodeId, f64)> = None;
 
         for node in doc.nodes.values() {
-            if !node.visible {
+            if !node.visible || doc.is_node_locked(node) {
                 continue;
             }
             let pn = match &node.kind {
@@ -228,7 +230,7 @@ impl PhotonicApp {
     ) -> Option<(NodeId, usize, bool)> {
         let mut best: Option<(f32, NodeId, usize, bool)> = None;
         for node in doc.nodes.values() {
-            if !node.visible || width_profile_for(doc, node).is_none() {
+            if !node.visible || doc.is_node_locked(node) || width_profile_for(doc, node).is_none() {
                 continue;
             }
             for (idx, top, bottom) in self.width_handle_positions(doc, view, node) {

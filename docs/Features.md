@@ -305,7 +305,7 @@ Complete inventory of features implemented as of 2026-03-23.
 | `release_to_layers` | Move each node into its own newly created layer (inverse of `collect_in_new_layer`); group children resolved to top-level ancestors; optional `name_prefix`; single undo step |
 | `merge_layers` | Merge two or more layers into one; all nodes from source layers are moved into the target layer (bottom-most in stack order); empty source layers are removed; optional `target_name`; single undo step |
 | `flatten_artwork` | Merge all layers in the document into one; the bottom-most layer survives; all other layers are dissolved into it and removed; optional `target_name`; single undo step |
-| `update_layer` | Rename a layer, toggle visibility/lock, set a color tag, or mark as a template layer (locked, dimmed reference). Only supplied fields are changed. Setting `is_template: true` also locks the layer. GUI: "T" button per layer in Layers panel. Single undo step. |
+| `update_layer` | Rename a layer, toggle visibility/lock, set a color tag, or mark as a template layer (locked, dimmed reference). Only supplied fields are changed. Setting `is_template: true` also locks the layer. GUI: right-click a layer row (or use its ⋯ options) in the Layers panel. Single undo step. |
 | `export_svg` | Export full document as SVG string with semantic `id` attributes on all nodes/layers (slugified names, deduplicated); versioned output (`<!-- photonic-svg-v1 -->`); `inner_only`, `semantic_ids`, and `precision` options |
 | `export_selection_as_svg` | Export specific nodes (or current selection) as clean minimal SVG with tight viewBox, semantic `id` attributes, no artboard background; optional React component wrapper |
 | `export_raster` | Export the current canvas as PNG, JPEG, WebP, GIF, or TIFF with optional width/height resize and JPEG/WebP quality. Returns base64-encoded image data. TIFF is lossless with full RGBA support. |
@@ -460,7 +460,7 @@ Shape tools (Rectangle, Ellipse, Polygon, Star) are grouped under a single toolb
 | Toolbar | Document name, zoom level display |
 | Tools Panel | Vertical tool selector with grouped shape sub-menu |
 | Properties / Styles | Fill, stroke, opacity, blend mode editing for selection; path nodes show "Add Anchor Points", "Reverse Direction", "Outline Stroke" (when stroke is enabled), "Average Anchors", and "Convert to Grayscale" buttons; text nodes show a "Find / Replace…" button; all node types show a "Lock" / "Unlock" toggle button that prevents canvas selection |
-| Layers Panel | Layer management, visibility toggle, lock toggle |
+| Layers Panel | Layer management, visibility toggle, and layer locking from the row's right-click context menu (or ⋯ options); locked contents are excluded from canvas selection/editing and marked with a lock glyph |
 | History Panel | Undo/redo stack with named checkpoint snapshots; each checkpoint has a "Diff" button to highlight canvas changes (green=added, yellow=modified, red=removed); active diff shows a "✕ Clear Diff" button in the toolbar |
 | Console Panel | Dual tabs: Lua REPL and Claude chat interface |
 | Welcome Screen | New document form and recent files list |
@@ -491,7 +491,7 @@ Context-sensitive actions with scroll-wheel pagination (8 items per page):
 | Semantic tags | Arbitrary string tags on any node for querying |
 | Selection tracking | Active selection state maintained by document controller |
 | Visibility | Per-node show/hide |
-| Lock | Per-node lock state |
+| Lock | Per-node lock state plus an owning-layer lock that protects all of its contents |
 
 ---
 

@@ -5,6 +5,44 @@ use super::*;
 use photonic_core::layer::LayerId;
 
 impl PhotonicApp {
+    /// Remove nodes from the current selection when their own lock or owning
+    /// layer lock makes them unavailable for editing. This keeps keyboard
+    /// shortcuts, tool gestures, and inspector actions from operating on a
+    /// selection that became locked after it was made.
+    pub(crate) fn prune_locked_selection(&mut self, doc: &mut Document) {
+        let locked_ids: Vec<NodeId> = doc
+            .selection
+            .ids()
+            .filter(|id| {
+                doc.nodes
+                    .get(*id)
+                    .is_none_or(|node| doc.is_node_locked(node))
+            })
+            .copied()
+            .collect();
+        for id in &locked_ids {
+            doc.selection.remove(id);
+        }
+
+        let selected_is_locked = self.selected_id.is_some_and(|id| {
+            doc.nodes
+                .get(&id)
+                .is_none_or(|node| doc.is_node_locked(node))
+        });
+        if selected_is_locked {
+            self.selected_id = doc.selection.ids().next().copied();
+        }
+
+        let point_edit_is_locked = self.point_edit_node.is_some_and(|id| {
+            doc.nodes
+                .get(&id)
+                .is_none_or(|node| doc.is_node_locked(node))
+        });
+        if point_edit_is_locked {
+            self.clear_point_edit();
+        }
+    }
+
     /// Group the currently selected nodes. Requires 2+ nodes in selection.
     pub(crate) fn do_group_selected(
         &mut self,
@@ -89,7 +127,14 @@ impl PhotonicApp {
             doc.selection.ids().copied().collect()
         } else {
             node_ids
-        };
+        }
+        .into_iter()
+        .filter(|id| {
+            doc.nodes
+                .get(id)
+                .is_some_and(|node| !doc.is_node_locked(node))
+        })
+        .collect();
         if raw_ids.is_empty() {
             return;
         }
@@ -137,7 +182,14 @@ impl PhotonicApp {
             doc.selection.ids().copied().collect()
         } else {
             node_ids
-        };
+        }
+        .into_iter()
+        .filter(|id| {
+            doc.nodes
+                .get(id)
+                .is_some_and(|node| !doc.is_node_locked(node))
+        })
+        .collect();
         if raw_ids.is_empty() {
             return;
         }
@@ -244,8 +296,10 @@ impl PhotonicApp {
     /// The layer new content should target: the active layer, else the topmost
     /// layer in the stack.
     fn target_layer_id(doc: &Document) -> Option<LayerId> {
-        doc.active_layer_id
-            .or_else(|| doc.layer_order.last().copied())
+        let layer_id = doc
+            .active_layer_id
+            .or_else(|| doc.layer_order.last().copied())?;
+        (!doc.is_layer_locked(&layer_id)).then_some(layer_id)
     }
 
     /// Delete a layer and everything it contains. Refuses to remove the last
