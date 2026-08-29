@@ -2017,6 +2017,228 @@ pub(crate) fn bez_remove_elements(bez: &BezPath, indices: &[usize]) -> BezPath {
     result
 }
 
+/// Remove selected logical anchors while reconnecting their surviving
+/// neighbours. Unlike [`bez_remove_elements`], this never turns a closed
+/// contour into an open path: closed subpaths remain closed, and a dissolve
+/// that would leave fewer than three anchors is ignored for that subpath.
+///
+/// For curved geometry, the outgoing handle of the previous survivor and the
+/// incoming handle of the next survivor become the controls of the replacement
+/// cubic. This retains the boundary tangents while skipping the dissolved
+/// anchor run, which is the vector-path analogue of Blender's vertex dissolve.
+pub(crate) fn bez_dissolve_anchors(bez: &BezPath, indices: &[usize]) -> BezPath {
+    #[derive(Clone, Copy)]
+    enum Incoming {
+        Move,
+        Line,
+        Quad(Point),
+        Cubic,
+    }
+
+    #[derive(Clone, Copy)]
+    struct Anchor {
+        element_index: usize,
+        point: Point,
+        incoming_handle: Option<Point>,
+        outgoing_handle: Option<Point>,
+        incoming: Incoming,
+    }
+
+    struct Subpath {
+        anchors: Vec<Anchor>,
+        original: Vec<PathEl>,
+        closed: bool,
+    }
+
+    let selected: std::collections::HashSet<usize> = indices.iter().copied().collect();
+    if selected.is_empty() {
+        return bez.clone();
+    }
+
+    let mut subpaths = Vec::<Subpath>::new();
+    let mut current: Option<Subpath> = None;
+    for (element_index, element) in bez.elements().iter().copied().enumerate() {
+        match element {
+            PathEl::MoveTo(point) => {
+                if let Some(subpath) = current.take() {
+                    subpaths.push(subpath);
+                }
+                current = Some(Subpath {
+                    anchors: vec![Anchor {
+                        element_index,
+                        point,
+                        incoming_handle: None,
+                        outgoing_handle: None,
+                        incoming: Incoming::Move,
+                    }],
+                    original: vec![element],
+                    closed: false,
+                });
+            }
+            PathEl::LineTo(point) => {
+                if let Some(subpath) = current.as_mut() {
+                    subpath.original.push(element);
+                    subpath.anchors.push(Anchor {
+                        element_index,
+                        point,
+                        incoming_handle: None,
+                        outgoing_handle: None,
+                        incoming: Incoming::Line,
+                    });
+                }
+            }
+            PathEl::CurveTo(control1, control2, point) => {
+                if let Some(subpath) = current.as_mut() {
+                    subpath.original.push(element);
+                    if let Some(previous) = subpath.anchors.last_mut() {
+                        previous.outgoing_handle = Some(control1);
+                    }
+                    subpath.anchors.push(Anchor {
+                        element_index,
+                        point,
+                        incoming_handle: Some(control2),
+                        outgoing_handle: None,
+                        incoming: Incoming::Cubic,
+                    });
+                }
+            }
+            PathEl::QuadTo(control, point) => {
+                if let Some(subpath) = current.as_mut() {
+                    subpath.original.push(element);
+                    let incoming_handle = subpath.anchors.last_mut().map(|previous| {
+                        previous.outgoing_handle = Some(Point::new(
+                            previous.point.x + (control.x - previous.point.x) * (2.0 / 3.0),
+                            previous.point.y + (control.y - previous.point.y) * (2.0 / 3.0),
+                        ));
+                        Point::new(
+                            point.x + (control.x - point.x) * (2.0 / 3.0),
+                            point.y + (control.y - point.y) * (2.0 / 3.0),
+                        )
+                    });
+                    subpath.anchors.push(Anchor {
+                        element_index,
+                        point,
+                        incoming_handle,
+                        outgoing_handle: None,
+                        incoming: Incoming::Quad(control),
+                    });
+                }
+            }
+            PathEl::ClosePath => {
+                if let Some(subpath) = current.as_mut() {
+                    subpath.original.push(element);
+                    subpath.closed = true;
+                }
+            }
+        }
+    }
+    if let Some(subpath) = current.take() {
+        subpaths.push(subpath);
+    }
+
+    let points_coincide =
+        |a: Point, b: Point| (a.x - b.x).abs() <= 1e-9 && (a.y - b.y).abs() <= 1e-9;
+    let mut result = BezPath::new();
+    for mut subpath in subpaths {
+        if subpath.anchors.is_empty() {
+            continue;
+        }
+
+        // Closed paths may materialize their seam as a final geometric anchor
+        // coincident with MoveTo. Fold that duplicate into the first logical
+        // anchor so selecting either visible seam index dissolves it once.
+        let mut seam_selected = selected.contains(&subpath.anchors[0].element_index);
+        if subpath.closed
+            && subpath.anchors.len() > 1
+            && points_coincide(
+                subpath.anchors[0].point,
+                subpath.anchors.last().unwrap().point,
+            )
+        {
+            let duplicate = subpath.anchors.pop().unwrap();
+            seam_selected |= selected.contains(&duplicate.element_index);
+            subpath.anchors[0].incoming_handle = duplicate.incoming_handle;
+            subpath.anchors[0].incoming = duplicate.incoming;
+        }
+
+        let is_selected = |position: usize| {
+            (position == 0 && seam_selected)
+                || selected.contains(&subpath.anchors[position].element_index)
+        };
+        let any_selected = (0..subpath.anchors.len()).any(&is_selected);
+        let survivors: Vec<usize> = (0..subpath.anchors.len())
+            .filter(|position| !is_selected(*position))
+            .collect();
+        let minimum = if subpath.closed { 3 } else { 2 };
+        if !any_selected || survivors.len() < minimum {
+            for element in subpath.original {
+                result.push(element);
+            }
+            continue;
+        }
+
+        let append_edge =
+            |out: &mut BezPath, previous_position: usize, next_position: usize, closing: bool| {
+                let previous = subpath.anchors[previous_position];
+                let next = subpath.anchors[next_position];
+                let direct = if subpath.closed {
+                    (previous_position + 1) % subpath.anchors.len() == next_position
+                } else {
+                    previous_position + 1 == next_position
+                };
+
+                let line_to = |out: &mut BezPath| {
+                    if !closing {
+                        out.line_to(next.point);
+                    }
+                };
+                if direct {
+                    match next.incoming {
+                        Incoming::Move | Incoming::Line => line_to(out),
+                        Incoming::Quad(control) => out.quad_to(control, next.point),
+                        Incoming::Cubic => out.curve_to(
+                            previous.outgoing_handle.unwrap_or(previous.point),
+                            next.incoming_handle.unwrap_or(next.point),
+                            next.point,
+                        ),
+                    }
+                    return;
+                }
+
+                // The edge spans one or more dissolved anchors. Straight runs stay
+                // straight; if either surviving boundary contributes a tangent,
+                // bridge the gap with a cubic using chord controls as fallbacks.
+                if previous.outgoing_handle.is_none() && next.incoming_handle.is_none() {
+                    line_to(out);
+                } else {
+                    let control1 = previous.outgoing_handle.unwrap_or_else(|| {
+                        Point::new(
+                            previous.point.x + (next.point.x - previous.point.x) / 3.0,
+                            previous.point.y + (next.point.y - previous.point.y) / 3.0,
+                        )
+                    });
+                    let control2 = next.incoming_handle.unwrap_or_else(|| {
+                        Point::new(
+                            next.point.x - (next.point.x - previous.point.x) / 3.0,
+                            next.point.y - (next.point.y - previous.point.y) / 3.0,
+                        )
+                    });
+                    out.curve_to(control1, control2, next.point);
+                }
+            };
+
+        result.move_to(subpath.anchors[survivors[0]].point);
+        for pair in survivors.windows(2) {
+            append_edge(&mut result, pair[0], pair[1], false);
+        }
+        if subpath.closed {
+            append_edge(&mut result, *survivors.last().unwrap(), survivors[0], true);
+            result.close_path();
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod convert_anchor_tests {
     use super::*;
@@ -2329,5 +2551,126 @@ mod convert_anchor_tests {
             "seam materialization must grow the element count so the caller can \
              detect the index shift and clear the stale selection: {out:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod dissolve_anchor_tests {
+    use super::*;
+
+    fn closed_polygon(points: &[(f64, f64)]) -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to(points[0]);
+        for point in &points[1..] {
+            path.line_to(*point);
+        }
+        path.close_path();
+        path
+    }
+
+    #[test]
+    fn dissolving_one_corner_keeps_a_closed_shape() {
+        let rectangle = closed_polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let dissolved = bez_dissolve_anchors(&rectangle, &[1]);
+
+        assert_eq!(path_anchor_points(&dissolved).len(), 3);
+        assert!(matches!(
+            dissolved.elements().last(),
+            Some(PathEl::ClosePath)
+        ));
+        assert_eq!(
+            dissolved.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(100.0, 100.0)),
+                PathEl::LineTo(Point::new(0.0, 100.0)),
+                PathEl::ClosePath,
+            ]
+        );
+    }
+
+    #[test]
+    fn dissolving_a_contiguous_anchor_group_reconnects_survivors() {
+        let hexagon = closed_polygon(&[
+            (0.0, 50.0),
+            (25.0, 0.0),
+            (75.0, 0.0),
+            (100.0, 50.0),
+            (75.0, 100.0),
+            (25.0, 100.0),
+        ]);
+        let dissolved = bez_dissolve_anchors(&hexagon, &[1, 2]);
+
+        assert_eq!(path_anchor_points(&dissolved).len(), 4);
+        assert!(matches!(
+            dissolved.elements().last(),
+            Some(PathEl::ClosePath)
+        ));
+        assert!(path_anchor_points(&dissolved)
+            .iter()
+            .all(|(_, point)| *point != Point::new(25.0, 0.0) && *point != Point::new(75.0, 0.0)));
+    }
+
+    #[test]
+    fn dissolve_refuses_to_make_an_invalid_closed_loop() {
+        let rectangle = closed_polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let dissolved = bez_dissolve_anchors(&rectangle, &[1, 2]);
+        assert_eq!(dissolved.elements(), rectangle.elements());
+    }
+
+    #[test]
+    fn curved_dissolve_preserves_surviving_boundary_tangents() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.curve_to((20.0, 0.0), (30.0, 20.0), (40.0, 20.0));
+        path.curve_to((50.0, 20.0), (80.0, 0.0), (100.0, 0.0));
+        path.line_to((100.0, 100.0));
+        path.line_to((0.0, 100.0));
+        path.close_path();
+
+        let dissolved = bez_dissolve_anchors(&path, &[1]);
+        assert_eq!(path_anchor_points(&dissolved).len(), 4);
+        assert!(matches!(
+            dissolved.elements()[1],
+            PathEl::CurveTo(c1, c2, end)
+                if c1 == Point::new(20.0, 0.0)
+                    && c2 == Point::new(80.0, 0.0)
+                    && end == Point::new(100.0, 0.0)
+        ));
+        assert!(matches!(
+            dissolved.elements().last(),
+            Some(PathEl::ClosePath)
+        ));
+    }
+
+    #[test]
+    fn dissolving_a_seam_anchor_rotates_but_keeps_the_loop_closed() {
+        let rectangle = closed_polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let dissolved = bez_dissolve_anchors(&rectangle, &[0]);
+
+        assert_eq!(path_anchor_points(&dissolved).len(), 3);
+        assert!(matches!(
+            dissolved.elements()[0],
+            PathEl::MoveTo(point) if point == Point::new(100.0, 0.0)
+        ));
+        assert!(matches!(
+            dissolved.elements().last(),
+            Some(PathEl::ClosePath)
+        ));
+    }
+
+    #[test]
+    fn compound_path_only_rebuilds_the_affected_contour() {
+        let mut compound =
+            closed_polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let second = closed_polygon(&[(200.0, 0.0), (300.0, 0.0), (300.0, 100.0), (200.0, 100.0)]);
+        compound.extend(second.elements().iter().copied());
+        let untouched_second = compound.elements()[5..].to_vec();
+
+        let dissolved = bez_dissolve_anchors(&compound, &[1]);
+        assert_eq!(&dissolved.elements()[4..], untouched_second.as_slice());
+        let contours = sample_path_subpaths(&dissolved);
+        assert_eq!(contours.len(), 2);
+        assert!(contours.iter().all(|contour| contour.closed));
     }
 }

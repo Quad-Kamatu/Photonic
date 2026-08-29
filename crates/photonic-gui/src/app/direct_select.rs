@@ -194,6 +194,49 @@ impl PhotonicApp {
         *doc_modified = true;
     }
 
+    /// Dissolve the full directly-selected anchor set as one undoable edit.
+    /// Closed contours stay closed; selections that would leave an invalid
+    /// one- or two-anchor loop are left unchanged.
+    fn ds_dissolve_selected_anchors(
+        &mut self,
+        doc: &mut Document,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) {
+        let Some(nid) = self.point_edit_node else {
+            return;
+        };
+        let Some(old_node) = doc.nodes.get(&nid).cloned() else {
+            return;
+        };
+        let SceneNodeKind::Path(path_node) = &old_node.kind else {
+            return;
+        };
+        let old_path = path_node.path_data.to_bez_path();
+        let new_path = bez_dissolve_anchors(&old_path, &self.point_selected);
+        if new_path.elements() == old_path.elements() {
+            self.file_status =
+                Some("Dissolve needs at least three surviving anchors in a closed shape".into());
+            return;
+        }
+
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(path_node) = &mut new_node.kind {
+            path_node.path_data = PathData::from_bez_path(&new_path);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        self.point_selected.clear();
+        self.point_context_anchor = None;
+        self.file_status = Some("Dissolved selected anchors and kept the path connected".into());
+        *doc_modified = true;
+    }
+
     /// Hit-test the current point-edit node's anchors at canvas position
     /// `(cx, cy)`, returning the nearest anchor's element index within the
     /// grab radius. Shared by the tool handler and by the radial-wheel
@@ -448,6 +491,18 @@ impl PhotonicApp {
                     }
                 }
             });
+            ui.separator();
+            if ui
+                .button("Dissolve")
+                .on_hover_text(
+                    "Remove the selected anchor(s), reconnect their neighbours, and keep closed shapes closed",
+                )
+                .clicked()
+            {
+                self.ds_dissolve_selected_anchors(doc, doc_modified, history);
+                self.point_context_anchor = None;
+                ui.close_menu();
+            }
         });
 
         // ── Drag start: hit-test the original pointer-down position ───────────
@@ -1134,5 +1189,53 @@ mod tests {
             anchors_in_screen_rect(&bez, &transform, &view, rect),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn context_dissolve_is_one_undoable_closed_path_edit() {
+        let mut bez = BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((100.0, 0.0));
+        bez.line_to((100.0, 100.0));
+        bez.line_to((0.0, 100.0));
+        bez.close_path();
+
+        let mut doc = Document::new("test", 200.0, 200.0);
+        let layer = doc.layer_order[0];
+        let node = SceneNode::new(
+            "shape",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::from_bez_path(&bez))),
+        );
+        let node_id = node.id;
+        doc.add_node(node, Some(layer));
+        let mut app = PhotonicApp::default();
+        app.point_edit_node = Some(node_id);
+        app.point_selected = vec![1];
+        app.point_context_anchor = Some(1);
+        let mut history = CommandHistory::new(20);
+        let mut modified = false;
+
+        app.ds_dissolve_selected_anchors(&mut doc, &mut modified, &mut history);
+
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected");
+        };
+        let dissolved = path.path_data.to_bez_path();
+        assert!(modified);
+        assert_eq!(history.undo_depth(), 1);
+        assert_eq!(path_anchor_points(&dissolved).len(), 3);
+        assert!(matches!(
+            dissolved.elements().last(),
+            Some(PathEl::ClosePath)
+        ));
+        assert!(app.point_selected.is_empty());
+        assert!(app.point_context_anchor.is_none());
+
+        assert!(history.undo(&mut doc));
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected after undo");
+        };
+        assert_eq!(path.path_data.to_bez_path().elements(), bez.elements());
     }
 }
