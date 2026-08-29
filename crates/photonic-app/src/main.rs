@@ -15,6 +15,7 @@ use photonic_mcp::{McpServer, McpServerConfig, MCP_SECRET_HEADER};
 use photonic_render::PhotonicRenderer;
 use repl::LuaRepl;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -38,6 +39,28 @@ fn native_project_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
         .then(|| path.to_path_buf())
+}
+
+fn read_svg_file(path: &std::path::Path) -> Result<String> {
+    let max_bytes = photonic_core::MAX_SVG_INPUT_BYTES as u64;
+    if std::fs::metadata(path)?.len() > max_bytes {
+        anyhow::bail!(
+            "SVG file exceeds the {}-byte import limit",
+            photonic_core::MAX_SVG_INPUT_BYTES
+        );
+    }
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > photonic_core::MAX_SVG_INPUT_BYTES {
+        anyhow::bail!(
+            "SVG file exceeds the {}-byte import limit",
+            photonic_core::MAX_SVG_INPUT_BYTES
+        );
+    }
+    String::from_utf8(bytes).map_err(Into::into)
 }
 
 /// Detect a paste shortcut before egui consumes the keyboard event. egui-winit
@@ -203,7 +226,6 @@ fn main() -> Result<()> {
     // Loaded document plus any persistent history embedded in a `.photon` file
     // (so a double-clicked or CLI-opened project restores its undo history too).
     let (document, loaded_history) = if let Some(path) = &args.file {
-        let content = std::fs::read_to_string(path)?;
         // Detect format by extension: `.svg` is imported, everything else is
         // treated as a Photonic file (`.photon`). Previously every file argument
         // was parsed as JSON, so opening an SVG via the CLI/file argument failed.
@@ -211,6 +233,11 @@ fn main() -> Result<()> {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        let content = if is_svg {
+            read_svg_file(path)?
+        } else {
+            std::fs::read_to_string(path)?
+        };
         if is_svg && !content.trim_start().starts_with('{') {
             let doc = photonic_core::import_svg(&content)
                 .map_err(|e| anyhow::anyhow!("failed to import SVG '{}': {e}", path.display()))?;

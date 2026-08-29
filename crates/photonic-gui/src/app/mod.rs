@@ -1764,7 +1764,11 @@ fn load_document(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let content = if ext == "svg" {
+        crate::read_svg_file(path)?
+    } else {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())?
+    };
     if ext == "svg" && !content.trim_start().starts_with('{') {
         photonic_core::import_svg(&content)
             .map(|doc| (doc, None))

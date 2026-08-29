@@ -34,7 +34,10 @@ pub use document::{
     SpotColor, Symbol, WidthProfile, Workspace,
 };
 pub use history::{CheckpointInfo, Command, CommandHistory, HistorySnapshot};
-pub use import::{import_svg, ImportError};
+pub use import::{
+    import_svg, ImportError, ImportLimit, MAX_SVG_CSS_BYTES, MAX_SVG_DEPTH, MAX_SVG_ELEMENTS,
+    MAX_SVG_INPUT_BYTES, MAX_SVG_PATH_POINTS, MAX_SVG_TEXT_BYTES,
+};
 pub use layer::{BlendMode, Layer, LayerId};
 pub use node::{
     AssetExportSpec, DropShadow, Feather, FontStyle, GaussianGlow, GlowEffect, NodeId, ObjectBlur,
