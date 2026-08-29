@@ -156,6 +156,7 @@ impl PhotonicApp {
                     // Clear stale point-edit state so entering Direct Select via the
                     // command palette re-seeds from the current selection (#164 finding 1).
                     self.clear_point_edit();
+                    self.clear_pen_path();
                     self.active_tool = t;
                 }
             }

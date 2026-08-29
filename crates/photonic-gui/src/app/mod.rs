@@ -155,6 +155,39 @@ struct HotbarCacheState {
     items: Vec<HotbarItem>,
 }
 
+/// One in-progress Pen anchor in canvas space. A click leaves both handles
+/// retracted (a corner); click-drag stores a symmetric direction line so the
+/// incoming and outgoing cubic segments meet smoothly at the anchor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PenAnchor {
+    position: Point,
+    in_handle: Option<Point>,
+    out_handle: Option<Point>,
+}
+
+impl PenAnchor {
+    fn corner(x: f64, y: f64) -> Self {
+        Self {
+            position: Point::new(x, y),
+            in_handle: None,
+            out_handle: None,
+        }
+    }
+
+    /// Pull the outgoing handle to `point` and mirror the incoming handle by
+    /// the same distance. Returning to the anchor retracts both sides again.
+    fn pull_handle_to(&mut self, point: Point) {
+        let delta = point - self.position;
+        if delta.hypot() <= 1e-6 {
+            self.in_handle = None;
+            self.out_handle = None;
+        } else {
+            self.out_handle = Some(point);
+            self.in_handle = Some(self.position - delta);
+        }
+    }
+}
+
 // ─── Eyedropper ───────────────────────────────────────────────────────────────
 
 /// State for the in-canvas eyedropper tool.
@@ -782,8 +815,10 @@ pub struct PhotonicApp {
     /// Canvas-space position where the current drag began (shape creation).
     drag_start_canvas: Option<(f64, f64)>,
 
-    /// Accumulated anchor points for the in-progress pen path (canvas space).
-    pen_points: Vec<(f64, f64)>,
+    /// Accumulated anchors and direction handles for the in-progress Pen path.
+    pen_anchors: Vec<PenAnchor>,
+    /// Anchor currently receiving symmetric handles from a primary drag.
+    pen_drag_anchor: Option<usize>,
 
     /// Whether we are currently dragging a selected node to move it.
     moving: bool,
@@ -1377,7 +1412,8 @@ impl Default for PhotonicApp {
             selected_layer_ids: Vec::new(),
             selected_id: None,
             drag_start_canvas: None,
-            pen_points: Vec::new(),
+            pen_anchors: Vec::new(),
+            pen_drag_anchor: None,
             moving: false,
             move_drag_origins: Vec::new(),
             move_snap_origins: Vec::new(),
@@ -2239,6 +2275,9 @@ impl PhotonicApp {
         // candidate to migrate into `DirectSelectTool::on_activate`).
         if self.active_tool != self.last_tool {
             let (prev, cur) = (self.last_tool, self.active_tool);
+            if matches!(prev, Tool::Pen | Tool::CurvaturePen) {
+                self.clear_pen_path();
+            }
             crate::tools::tool_for(prev).on_deactivate(self);
             crate::tools::tool_for(cur).on_activate(self);
         }
@@ -3127,7 +3166,7 @@ impl PhotonicApp {
                         if let Some(tool) =
                             panels::draw_tools_panel(ui, self.active_tool, &self.prefs.pinned_tools)
                         {
-                            self.pen_points.clear();
+                            self.clear_pen_path();
                             self.pencil_points.clear();
                             self.lasso_points.clear();
                             self.isolated_group = None;
@@ -5093,7 +5132,7 @@ impl PhotonicApp {
                 }
 
                 // ── Pen tool ─────────────────────────────────────────────────
-                if self.active_tool == Tool::Pen {
+                if matches!(self.active_tool, Tool::Pen | Tool::CurvaturePen) {
                     self.handle_pen_tool(ui, &response, doc, view, history, &mut doc_modified);
                     return;
                 }

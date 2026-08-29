@@ -746,7 +746,15 @@ impl PhotonicApp {
                             const TOOL_CATEGORIES: &[(&str, &[Tool])] = &[
                                 ("Selection & Navigation", &[Tool::Select, Tool::DirectSelect, Tool::Pan]),
                                 ("Shapes", &[Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Arc, Tool::Polygon, Tool::Star, Tool::Line, Tool::Grid, Tool::PolarGrid]),
-                                ("Drawing & Text", &[Tool::Pen, Tool::ShapeBuilder, Tool::Text]),
+                                (
+                                    "Drawing & Text",
+                                    &[
+                                        Tool::Pen,
+                                        Tool::CurvaturePen,
+                                        Tool::ShapeBuilder,
+                                        Tool::Text,
+                                    ],
+                                ),
                                 ("Path Editing", &[Tool::Scissors, Tool::Knife, Tool::Eraser, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth, Tool::Width]),
                                 ("Raster", &[Tool::RasterBrush, Tool::RasterEraser]),
                             ];
@@ -834,7 +842,7 @@ impl PhotonicApp {
                                 self.prefs.save();
                             }
                             if let Some(tool) = tool_to_activate {
-                                self.pen_points.clear();
+                                self.clear_pen_path();
                                 self.pencil_points.clear();
                                 self.lasso_points.clear();
                                 self.isolated_group = None;

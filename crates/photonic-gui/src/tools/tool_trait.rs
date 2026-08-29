@@ -85,6 +85,7 @@ tool_registry! {
     Grid => GridTool,
     PolarGrid => PolarGridTool,
     Pen => PenTool,
+    CurvaturePen => CurvaturePenTool,
     ShapeBuilder => ShapeBuilderTool,
     Text => TextTool,
     Scissors => ScissorsTool,

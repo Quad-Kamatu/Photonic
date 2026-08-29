@@ -374,6 +374,7 @@ pub static TOOL_COMMANDS: &[(CommandId, Tool)] = &[
     ("tool.grid", Tool::Grid),
     ("tool.polar_grid", Tool::PolarGrid),
     ("tool.pen", Tool::Pen),
+    ("tool.curvature_pen", Tool::CurvaturePen),
     ("tool.shape_builder", Tool::ShapeBuilder),
     ("tool.text", Tool::Text),
     ("tool.scissors", Tool::Scissors),

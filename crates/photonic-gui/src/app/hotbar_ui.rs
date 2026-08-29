@@ -126,7 +126,7 @@ impl PhotonicApp {
         match item.effect {
             HotbarEffect::Tool(tool) => {
                 // Same tool-apply logic the Tools drawer/rail uses.
-                self.pen_points.clear();
+                self.clear_pen_path();
                 self.pencil_points.clear();
                 self.lasso_points.clear();
                 self.isolated_group = None;

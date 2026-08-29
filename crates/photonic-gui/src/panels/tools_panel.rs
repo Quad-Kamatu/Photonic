@@ -62,7 +62,15 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
 
     // ── Draw ──────────────────────────────────────────────────────────────
     section_header(ui, "DRAW");
-    for tool in [Tool::Pen, Tool::Pencil, Tool::ShapeBuilder, Tool::Text] {
+    tool_group(
+        ui,
+        active,
+        "pen_popover",
+        "Pen",
+        &[Tool::Pen, Tool::CurvaturePen],
+        &mut chosen,
+    );
+    for tool in [Tool::Pencil, Tool::ShapeBuilder, Tool::Text] {
         tool_row(ui, active, tool, &mut chosen);
     }
 

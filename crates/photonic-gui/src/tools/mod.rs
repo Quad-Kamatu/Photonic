@@ -24,6 +24,8 @@ pub enum Tool {
     Grid,
     PolarGrid,
     Pen,
+    /// Place on-curve anchors and interpolate a smooth path through them.
+    CurvaturePen,
     ShapeBuilder,
     Text,
     Scissors,
@@ -61,6 +63,7 @@ impl Tool {
             Tool::Grid => "Grid",
             Tool::PolarGrid => "Polar Grid",
             Tool::Pen => "Pen",
+            Tool::CurvaturePen => "Curvature Pen",
             Tool::ShapeBuilder => "Shape Builder",
             Tool::Text => "Text",
             Tool::Scissors => "Scissors",
@@ -93,6 +96,7 @@ impl Tool {
             Tool::Grid => ph::GRID_FOUR,
             Tool::PolarGrid => ph::CIRCLES_THREE,
             Tool::Pen => ph::PEN_NIB,
+            Tool::CurvaturePen => ph::WAVE_SINE,
             Tool::ShapeBuilder => ph::UNITE,
             Tool::Text => ph::TEXT_T,
             Tool::Scissors => ph::SCISSORS,
@@ -128,7 +132,8 @@ impl Tool {
             Tool::PolarGrid => {
                 "Draw a polar (radial) grid with concentric rings and radial sectors"
             }
-            Tool::Pen => "Draw freeform paths with bezier curves",
+            Tool::Pen => "Click for corners or drag anchors to create bezier curves",
+            Tool::CurvaturePen => "Place anchors and automatically draw a smooth path through them",
             Tool::ShapeBuilder => "Combine or subtract overlapping shapes",
             Tool::Text => "Add text to the canvas",
             Tool::Scissors => "Cut a path at any point, splitting it into two open paths",
@@ -162,6 +167,7 @@ impl Tool {
                 | Tool::ProportionalMove
                 | Tool::Pan
                 | Tool::Pen
+                | Tool::CurvaturePen
                 | Tool::ShapeBuilder
                 | Tool::Text
                 | Tool::Scissors
