@@ -756,7 +756,7 @@ impl PhotonicApp {
                                     ],
                                 ),
                                 ("Path Editing", &[Tool::Scissors, Tool::Knife, Tool::Eraser, Tool::MagicWand, Tool::Lasso, Tool::Pencil, Tool::Smooth, Tool::Width]),
-                                ("Raster", &[Tool::RasterBrush, Tool::RasterEraser]),
+                                ("Raster", &[Tool::AreaTrace, Tool::RasterBrush, Tool::RasterEraser]),
                             ];
 
                             let mut tool_to_activate: Option<Tool> = None;

@@ -43,6 +43,8 @@ pub enum Tool {
     RasterBrush,
     /// Erase pixels from the active raster layer.
     RasterEraser,
+    /// Drag a region over raster artwork and convert it to editable vectors.
+    AreaTrace,
 }
 
 impl Tool {
@@ -76,6 +78,7 @@ impl Tool {
             Tool::Width => "Width",
             Tool::RasterBrush => "Brush",
             Tool::RasterEraser => "Eraser",
+            Tool::AreaTrace => "Area Trace",
         }
     }
 
@@ -109,6 +112,7 @@ impl Tool {
             Tool::Width => ph::ARROWS_VERTICAL,
             Tool::RasterBrush => ph::PAINT_BRUSH,
             Tool::RasterEraser => ph::ERASER,
+            Tool::AreaTrace => ph::VECTOR_THREE,
         }
     }
 
@@ -156,6 +160,9 @@ impl Tool {
             }
             Tool::RasterBrush => "Paint pixels onto the selected raster layer by dragging",
             Tool::RasterEraser => "Erase pixels from the selected raster layer by dragging",
+            Tool::AreaTrace => {
+                "Drag over raster artwork to create a simplified editable vector group"
+            }
         }
     }
 
@@ -180,6 +187,7 @@ impl Tool {
                 | Tool::Width
                 | Tool::RasterBrush
                 | Tool::RasterEraser
+                | Tool::AreaTrace
         )
     }
 
