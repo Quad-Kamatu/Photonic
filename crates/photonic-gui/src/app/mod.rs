@@ -6343,6 +6343,24 @@ mod direct_select_geometry_tests {
     }
 
     #[test]
+    fn retracted_corner_handles_cannot_capture_an_anchor_drag() {
+        let selected: std::collections::HashSet<usize> = [1usize].into_iter().collect();
+        let smoothed = bez_convert_anchors(&rect(), &selected, true);
+        let cornered = bez_convert_anchors(&smoothed, &selected, false);
+        let node = SceneNode::new(
+            "corner",
+            Default::default(),
+            SceneNodeKind::Path(PathNode::new(PathData::from_bez_path(&cornered))),
+        );
+
+        assert_eq!(
+            ds_find_handle(&node, &CanvasView::default(), &[1], 100.0, 0.0, 10.0),
+            None,
+            "a control retracted onto its anchor is not an interactive handle"
+        );
+    }
+
+    #[test]
     fn set_handle_moves_only_target_when_not_mirrored() {
         let mut b = BezPath::new();
         b.move_to((0.0, 0.0));

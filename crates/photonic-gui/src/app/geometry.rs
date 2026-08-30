@@ -650,19 +650,26 @@ pub(crate) fn logical_handles(bez: &BezPath, i: usize) -> (Option<HandleLoc>, Op
     (in_loc, out_loc)
 }
 
-/// The In/Out handle points of the logical anchor at `i`, seam-aware.
+/// The visible, interactive In/Out handles of the logical anchor at `i`,
+/// seam-aware. Controls retracted onto the anchor are storage details needed by
+/// adjacent cubic segments, not handles the user can see or drag.
 pub(crate) fn anchor_handle_pair(
     bez: &BezPath,
     i: usize,
 ) -> (Option<(HandleKind, Point)>, Option<(HandleKind, Point)>) {
     let els = bez.elements();
+    let Some(anchor) = els.get(i).and_then(path_element_endpoint) else {
+        return (None, None);
+    };
     let (in_l, out_l) = logical_handles(bez, i);
+    let exposed = |location: Option<HandleLoc>| {
+        location
+            .and_then(|loc| handle_loc_point(els, loc))
+            .filter(|point| (point.x - anchor.x).abs() > 1e-6 || (point.y - anchor.y).abs() > 1e-6)
+    };
     (
-        in_l.and_then(|l| handle_loc_point(els, l))
-            .map(|p| (HandleKind::In, p)),
-        out_l
-            .and_then(|l| handle_loc_point(els, l))
-            .map(|p| (HandleKind::Out, p)),
+        exposed(in_l).map(|point| (HandleKind::In, point)),
+        exposed(out_l).map(|point| (HandleKind::Out, point)),
     )
 }
 
@@ -2629,16 +2636,13 @@ mod convert_anchor_tests {
 
     #[test]
     fn smooth_then_corner_roundtrips() {
-        // Smooth a corner, then Corner it: the handles adjacent to that anchor
-        // must retract back to the anchor point (geometrically straight again).
+        // Smooth a corner, then Corner it: its retracted controls are storage
+        // details and must no longer be exposed as interactive handles.
         let smoothed = bez_convert_anchors(&rect(), &sel(&[1]), true);
         let cornered = bez_convert_anchors(&smoothed, &sel(&[1]), false);
-        let anchor = Point::new(100.0, 0.0);
         let (in_h, out_h) = anchor_handle_pair(&cornered, 1);
-        let (_, ip) = in_h.expect("in control present (retracted CurveTo)");
-        let (_, op) = out_h.expect("out control present (retracted CurveTo)");
-        assert!((ip.x - anchor.x).abs() < 1e-6 && (ip.y - anchor.y).abs() < 1e-6);
-        assert!((op.x - anchor.x).abs() < 1e-6 && (op.y - anchor.y).abs() < 1e-6);
+        assert!(in_h.is_none());
+        assert!(out_h.is_none());
         assert!(!is_smooth_anchor(&cornered, 1));
     }
 
