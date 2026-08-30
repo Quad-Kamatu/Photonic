@@ -24,9 +24,49 @@ env:
   PHOTONIC_PUBLIC_KEY_SHA256: 34642dd944fd2940db6f08843aa8a2c31e66e5df16901b6d9be52c8509b1243d
 
 jobs:
+  # Tags are accepted only when they resolve to a commit already reachable
+  # from protected main. This is the approved release-branch path; repository
+  # administrators may additionally protect v* tags with a tag ruleset.
+  validate_release:
+    name: Validate release provenance
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Require a reviewed release commit
+        shell: bash
+        env:
+          DEFAULT_BRANCH: main
+          TAG_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF_TYPE" != "tag" || ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release runs require a version tag such as v1.2.3" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin \
+            "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          tag_commit="$(git rev-parse --verify "$TAG_COMMIT^{commit}")"
+          main_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+
+          if ! git merge-base --is-ancestor "$tag_commit" "$main_ref"; then
+            echo "::error::${GITHUB_REF_NAME} does not point to a commit in protected $DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+
+          echo "${GITHUB_REF_NAME} points to reviewed commit $tag_commit on $DEFAULT_BRANCH"
+
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    needs: validate_release
     permissions:
       contents: read
     strategy:
@@ -117,7 +157,7 @@ jobs:
 
   sign:
     name: Sign ${{ matrix.target }}
-    needs: build
+    needs: [validate_release, build]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
