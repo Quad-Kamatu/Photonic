@@ -6256,6 +6256,16 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::MergeAnchors { node_id, indices } => {
+                    self.ds_merge_selected_anchors(
+                        node_id,
+                        &indices,
+                        doc,
+                        &mut doc_modified,
+                        history,
+                    );
+                }
+
                 PanelAction::DeleteAnchors { node_id, indices } => {
                     if let Some(node) = doc.nodes.get(&node_id).cloned() {
                         if let SceneNodeKind::Path(pn) = &node.kind {

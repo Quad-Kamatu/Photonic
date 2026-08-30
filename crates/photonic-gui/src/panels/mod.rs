@@ -504,6 +504,11 @@ pub enum PanelAction {
         indices: Vec<usize>,
         smooth: bool,
     },
+    /// Merge selected anchors into one point at their average position.
+    MergeAnchors {
+        node_id: NodeId,
+        indices: Vec<usize>,
+    },
     /// Delete the selected anchors of an edited path.
     DeleteAnchors {
         node_id: NodeId,

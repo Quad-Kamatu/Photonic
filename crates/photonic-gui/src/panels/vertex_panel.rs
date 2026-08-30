@@ -152,6 +152,18 @@ pub(crate) fn draw_vertex_panel(
 
     ui.add_space(6.0);
 
+    if selected.len() > 1
+        && ui
+            .button("Merge selected anchors")
+            .on_hover_text("Combine selected anchors into one point at their average position")
+            .clicked()
+    {
+        *action = Some(PanelAction::MergeAnchors {
+            node_id,
+            indices: selected.to_vec(),
+        });
+    }
+
     if ui
         .button(format!("{}  Remove anchor(s)", ph::TRASH))
         .on_hover_text("Delete the selected anchor points")

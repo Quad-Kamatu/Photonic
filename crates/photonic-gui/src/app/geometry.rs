@@ -2038,6 +2038,142 @@ pub(crate) fn bez_remove_elements(bez: &BezPath, indices: &[usize]) -> BezPath {
     result
 }
 
+/// Merge selected logical anchors into one anchor at their arithmetic mean.
+///
+/// All selected anchors must belong to the same subpath. The first selected
+/// anchor in contour order survives, moves to the centroid (with its attached
+/// handles), and the remaining selected anchors are dissolved so neighbours
+/// stay connected. Closed paths are kept valid and closed.
+pub(crate) fn bez_merge_anchors_at_average(
+    bez: &BezPath,
+    indices: &[usize],
+) -> Result<BezPath, &'static str> {
+    #[derive(Clone)]
+    struct LogicalAnchor {
+        aliases: Vec<usize>,
+        point: Point,
+    }
+
+    struct Subpath {
+        anchors: Vec<LogicalAnchor>,
+        closed: bool,
+    }
+
+    let selected: std::collections::HashSet<usize> = indices.iter().copied().collect();
+    if selected.len() < 2 {
+        return Err("Select at least two anchors to merge");
+    }
+
+    let mut subpaths = Vec::<Subpath>::new();
+    let mut current: Option<Subpath> = None;
+    for (element_index, element) in bez.elements().iter().copied().enumerate() {
+        let endpoint = match element {
+            PathEl::MoveTo(point) => {
+                if let Some(subpath) = current.take() {
+                    subpaths.push(subpath);
+                }
+                current = Some(Subpath {
+                    anchors: Vec::new(),
+                    closed: false,
+                });
+                Some(point)
+            }
+            PathEl::LineTo(point) | PathEl::CurveTo(_, _, point) | PathEl::QuadTo(_, point) => {
+                Some(point)
+            }
+            PathEl::ClosePath => {
+                if let Some(subpath) = current.as_mut() {
+                    subpath.closed = true;
+                }
+                None
+            }
+        };
+        if let (Some(subpath), Some(point)) = (current.as_mut(), endpoint) {
+            subpath.anchors.push(LogicalAnchor {
+                aliases: vec![element_index],
+                point,
+            });
+        }
+    }
+    if let Some(subpath) = current.take() {
+        subpaths.push(subpath);
+    }
+
+    // A materialized closed seam has two raw endpoints at the same visible
+    // position. Treat those indices as aliases of one logical anchor so a box
+    // selection does not accidentally count it twice.
+    for subpath in &mut subpaths {
+        if subpath.closed && subpath.anchors.len() > 1 {
+            let first = subpath.anchors[0].point;
+            let last = subpath.anchors.last().unwrap().point;
+            if (first.x - last.x).abs() <= 1e-9 && (first.y - last.y).abs() <= 1e-9 {
+                let duplicate = subpath.anchors.pop().unwrap();
+                subpath.anchors[0].aliases.extend(duplicate.aliases);
+            }
+        }
+    }
+
+    let touched: Vec<(usize, Vec<usize>)> = subpaths
+        .iter()
+        .enumerate()
+        .filter_map(|(subpath_index, subpath)| {
+            let selected_positions: Vec<usize> = subpath
+                .anchors
+                .iter()
+                .enumerate()
+                .filter_map(|(position, anchor)| {
+                    anchor
+                        .aliases
+                        .iter()
+                        .any(|index| selected.contains(index))
+                        .then_some(position)
+                })
+                .collect();
+            (!selected_positions.is_empty()).then_some((subpath_index, selected_positions))
+        })
+        .collect();
+
+    if touched.len() != 1 {
+        return Err("Selected anchors must be on the same contour");
+    }
+    let (subpath_index, selected_positions) = &touched[0];
+    if selected_positions.len() < 2 {
+        return Err("Select at least two distinct anchors to merge");
+    }
+
+    let subpath = &subpaths[*subpath_index];
+    let surviving_count = subpath.anchors.len() - selected_positions.len() + 1;
+    let minimum = if subpath.closed { 3 } else { 2 };
+    if surviving_count < minimum {
+        return Err(if subpath.closed {
+            "Merge needs at least three surviving anchors in a closed shape"
+        } else {
+            "Merge needs at least two surviving anchors in an open path"
+        });
+    }
+
+    let count = selected_positions.len() as f64;
+    let centroid = selected_positions
+        .iter()
+        .fold(Point::ZERO, |sum, position| {
+            let point = subpath.anchors[*position].point;
+            Point::new(sum.x + point.x / count, sum.y + point.y / count)
+        });
+    let survivor = &subpath.anchors[selected_positions[0]];
+    let moved = bez_move_anchors(
+        bez,
+        &survivor.aliases,
+        centroid.x - survivor.point.x,
+        centroid.y - survivor.point.y,
+    );
+    let dissolve: Vec<usize> = selected_positions[1..]
+        .iter()
+        .flat_map(|position| subpath.anchors[*position].aliases.iter().copied())
+        .collect();
+
+    Ok(bez_dissolve_anchors(&moved, &dissolve))
+}
+
 /// Remove selected logical anchors while reconnecting their surviving
 /// neighbours. Unlike [`bez_remove_elements`], this never turns a closed
 /// contour into an open path: closed subpaths remain closed, and a dissolve
@@ -2693,5 +2829,86 @@ mod dissolve_anchor_tests {
         let contours = sample_path_subpaths(&dissolved);
         assert_eq!(contours.len(), 2);
         assert!(contours.iter().all(|contour| contour.closed));
+    }
+}
+
+#[cfg(test)]
+mod merge_anchor_tests {
+    use super::*;
+
+    fn closed_polygon(points: &[(f64, f64)]) -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to(points[0]);
+        for point in &points[1..] {
+            path.line_to(*point);
+        }
+        path.close_path();
+        path
+    }
+
+    #[test]
+    fn merges_selected_anchors_at_their_centroid_and_keeps_shape_closed() {
+        let rectangle = closed_polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let merged = bez_merge_anchors_at_average(&rectangle, &[1, 2]).unwrap();
+
+        assert_eq!(path_anchor_points(&merged).len(), 3);
+        assert!(path_anchor_points(&merged)
+            .iter()
+            .any(|(_, point)| *point == Point::new(100.0, 50.0)));
+        assert!(matches!(merged.elements().last(), Some(PathEl::ClosePath)));
+    }
+
+    #[test]
+    fn merge_moves_the_surviving_anchors_handles_with_it() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.curve_to((10.0, 0.0), (30.0, 20.0), (40.0, 20.0));
+        path.curve_to((50.0, 20.0), (90.0, 0.0), (100.0, 0.0));
+        path.line_to((100.0, 100.0));
+        path.line_to((0.0, 100.0));
+        path.close_path();
+
+        let merged = bez_merge_anchors_at_average(&path, &[1, 2]).unwrap();
+        assert!(matches!(
+            merged.elements()[1],
+            PathEl::CurveTo(_, incoming, end)
+                if incoming == Point::new(60.0, 10.0)
+                    && end == Point::new(70.0, 10.0)
+        ));
+    }
+
+    #[test]
+    fn merge_rejects_anchors_from_different_contours() {
+        let mut compound =
+            closed_polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let second = closed_polygon(&[(200.0, 0.0), (300.0, 0.0), (300.0, 100.0), (200.0, 100.0)]);
+        compound.extend(second.elements().iter().copied());
+
+        assert_eq!(
+            bez_merge_anchors_at_average(&compound, &[1, 6]).unwrap_err(),
+            "Selected anchors must be on the same contour"
+        );
+    }
+
+    #[test]
+    fn merge_rejects_an_invalid_closed_result() {
+        let rectangle = closed_polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        assert!(bez_merge_anchors_at_average(&rectangle, &[0, 1, 2]).is_err());
+    }
+
+    #[test]
+    fn materialized_seam_aliases_count_as_one_anchor() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((100.0, 0.0));
+        path.line_to((100.0, 100.0));
+        path.line_to((0.0, 100.0));
+        path.line_to((0.0, 0.0));
+        path.close_path();
+
+        assert_eq!(
+            bez_merge_anchors_at_average(&path, &[0, 4]).unwrap_err(),
+            "Select at least two distinct anchors to merge"
+        );
     }
 }
