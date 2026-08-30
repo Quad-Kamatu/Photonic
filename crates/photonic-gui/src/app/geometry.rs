@@ -250,17 +250,64 @@ pub(crate) fn bez_to_screen_subpaths_xf(
         .collect()
 }
 
-/// Extract `(element_index, local_point)` for every element that has an endpoint.
-/// `ClosePath` is excluded (no anchor).
+fn path_element_endpoint(element: &PathEl) -> Option<Point> {
+    match element {
+        PathEl::MoveTo(point)
+        | PathEl::LineTo(point)
+        | PathEl::CurveTo(_, _, point)
+        | PathEl::QuadTo(_, point) => Some(*point),
+        PathEl::ClosePath => None,
+    }
+}
+
+/// Return `(MoveTo index, explicit closing endpoint index)` for closed contours
+/// whose final geometric endpoint coincides with their start. The two raw path
+/// elements represent one logical seam anchor.
+fn explicit_closed_seam_pairs(bez: &BezPath) -> Vec<(usize, usize)> {
+    let elements = bez.elements();
+    let mut pairs = Vec::new();
+    let mut start: Option<(usize, Point)> = None;
+    for (index, element) in elements.iter().enumerate() {
+        match element {
+            PathEl::MoveTo(point) => start = Some((index, *point)),
+            PathEl::ClosePath => {
+                if let (Some((start_index, start_point)), Some(last_index)) =
+                    (start, index.checked_sub(1))
+                {
+                    if last_index != start_index
+                        && path_element_endpoint(&elements[last_index]).is_some_and(|last_point| {
+                            (start_point.x - last_point.x).abs() <= 1e-9
+                                && (start_point.y - last_point.y).abs() <= 1e-9
+                        })
+                    {
+                        pairs.push((start_index, last_index));
+                    }
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    pairs
+}
+
+/// Extract `(element_index, local_point)` for every logical anchor. `ClosePath`
+/// is excluded, and an explicit endpoint coincident with a closed contour's
+/// `MoveTo` is folded into that one seam anchor.
 pub(crate) fn path_anchor_points(bez: &BezPath) -> Vec<(usize, Point)> {
+    let seam_duplicates: std::collections::HashSet<usize> = explicit_closed_seam_pairs(bez)
+        .into_iter()
+        .map(|(_, duplicate)| duplicate)
+        .collect();
     bez.elements()
         .iter()
         .enumerate()
-        .filter_map(|(i, el)| match el {
-            PathEl::MoveTo(p) | PathEl::LineTo(p) => Some((i, *p)),
-            PathEl::CurveTo(_, _, p) => Some((i, *p)),
-            PathEl::QuadTo(_, p) => Some((i, *p)),
-            PathEl::ClosePath => None,
+        .filter_map(|(index, element)| {
+            if seam_duplicates.contains(&index) {
+                None
+            } else {
+                path_element_endpoint(element).map(|point| (index, point))
+            }
         })
         .collect()
 }
@@ -450,7 +497,16 @@ pub(crate) fn ds_find_corner_widget(
 /// selected anchor lives on the next element, which sees `j-1` selected).
 pub(crate) fn bez_move_anchors(bez: &BezPath, selected: &[usize], dx: f64, dy: f64) -> BezPath {
     let els: Vec<PathEl> = bez.elements().iter().copied().collect();
-    let sel_set: std::collections::HashSet<usize> = selected.iter().copied().collect();
+    let mut sel_set: std::collections::HashSet<usize> = selected.iter().copied().collect();
+    // A curved closed edge must materialize its endpoint at the contour's
+    // MoveTo. Selecting either raw representation means moving the whole
+    // logical seam anchor, including both endpoints and both attached handles.
+    for (start, duplicate) in explicit_closed_seam_pairs(bez) {
+        if sel_set.contains(&start) || sel_set.contains(&duplicate) {
+            sel_set.insert(start);
+            sel_set.insert(duplicate);
+        }
+    }
     let shift = |p: Point| Point::new(p.x + dx, p.y + dy);
 
     let mut result = BezPath::new();
@@ -2910,5 +2966,32 @@ mod merge_anchor_tests {
             bez_merge_anchors_at_average(&path, &[0, 4]).unwrap_err(),
             "Select at least two distinct anchors to merge"
         );
+    }
+
+    #[test]
+    fn curved_merge_exposes_one_seam_anchor_and_keeps_it_joined_when_moved() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.curve_to((25.0, -10.0), (75.0, -10.0), (100.0, 0.0));
+        path.line_to((100.0, 100.0));
+        path.line_to((0.0, 100.0));
+        path.curve_to((-10.0, 75.0), (-10.0, 25.0), (0.0, 0.0));
+        path.close_path();
+
+        let merged = bez_merge_anchors_at_average(&path, &[1, 2]).unwrap();
+        assert_eq!(
+            path_anchor_points(&merged).len(),
+            3,
+            "the explicit curved seam must be exposed as one logical anchor"
+        );
+
+        let moved = bez_move_anchors(&merged, &[0], 20.0, 30.0);
+        let PathEl::MoveTo(first) = moved.elements()[0] else {
+            panic!("merged contour must start with MoveTo");
+        };
+        let PathEl::CurveTo(_, _, closing) = moved.elements()[moved.elements().len() - 2] else {
+            panic!("merged contour must retain its curved closing edge");
+        };
+        assert_eq!(first, closing, "moving the seam must not split it in two");
     }
 }
