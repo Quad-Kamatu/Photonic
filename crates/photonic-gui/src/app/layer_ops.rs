@@ -302,9 +302,10 @@ impl PhotonicApp {
         (!doc.is_layer_locked(&layer_id)).then_some(layer_id)
     }
 
-    /// Delete a layer and everything it contains. Refuses to remove the last
-    /// remaining layer. If the deleted layer was active, activation moves to a
-    /// surviving layer. One undoable step.
+    /// Delete a layer and everything it contains. Deleting the last layer also
+    /// creates a fresh empty layer so the document remains drawable. If the
+    /// deleted layer was active, activation moves to a survivor. One undoable
+    /// step.
     pub(crate) fn do_delete_layer(
         &mut self,
         layer_id: LayerId,
@@ -312,26 +313,78 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         doc_modified: &mut bool,
     ) {
-        if !doc.layers.contains_key(&layer_id) || doc.layer_order.len() < 2 {
+        if !doc.layers.contains_key(&layer_id) {
             return;
         }
-        let mut cmds = vec![Command::RemoveLayer { layer_id }];
-        // Re-home the active pointer to a survivor before the layer is gone.
-        if doc.active_layer_id == Some(layer_id) {
+        let mut cmds = Vec::new();
+        let roots = doc.layers[&layer_id].node_ids.clone();
+        if !roots.is_empty() {
+            let mut stack = roots.clone();
+            let mut nodes = Vec::new();
+            while let Some(node_id) = stack.pop() {
+                let Some(node) = doc.nodes.get(&node_id).cloned() else {
+                    continue;
+                };
+                if let SceneNodeKind::Group(group) = &node.kind {
+                    stack.extend(group.children.iter().copied());
+                }
+                nodes.push(node);
+            }
+            cmds.push(Command::RemoveSubtree {
+                layer_id,
+                roots,
+                nodes,
+            });
+        }
+        let replacement_id = if doc.layer_order.len() == 1 {
+            let replacement = Layer::new("Layer 1");
+            let replacement_id = replacement.id;
+            cmds.push(Command::AddLayer { layer: replacement });
+            cmds.push(Command::SetActiveLayer {
+                old_id: doc.active_layer_id,
+                new_id: Some(replacement_id),
+            });
+            Some(replacement_id)
+        } else if doc.active_layer_id == Some(layer_id) {
             let survivor = doc.layer_order.iter().copied().find(|id| *id != layer_id);
             cmds.push(Command::SetActiveLayer {
                 old_id: doc.active_layer_id,
                 new_id: survivor,
             });
-        }
+            survivor
+        } else {
+            doc.active_layer_id
+        };
+        cmds.push(Command::RemoveLayer { layer_id });
         history.execute(Command::Batch(cmds), doc);
-        // Drop any dangling node selection that pointed into the removed layer.
+
+        // Remove all GUI selection references invalidated with the layer.
+        let dangling: Vec<NodeId> = doc
+            .selection
+            .ids()
+            .filter(|id| !doc.nodes.contains_key(*id))
+            .copied()
+            .collect();
+        for id in dangling {
+            doc.selection.remove(&id);
+        }
         if self
             .selected_id
             .is_some_and(|id| !doc.nodes.contains_key(&id))
         {
             self.selected_id = None;
-            doc.selection.clear();
+        }
+        if self
+            .point_edit_node
+            .is_some_and(|id| !doc.nodes.contains_key(&id))
+        {
+            self.clear_point_edit();
+        }
+        self.selected_layer_ids
+            .retain(|id| doc.layers.contains_key(id));
+        if self.selected_layer_ids.is_empty() {
+            self.selected_layer_ids
+                .extend(replacement_id.filter(|id| doc.layers.contains_key(id)));
         }
         *doc_modified = true;
     }
@@ -576,6 +629,97 @@ impl PhotonicApp {
         self.selected_id = Some(node_id);
         doc.selection = Selection::single(node_id);
         *doc_modified = true;
+    }
+}
+
+#[cfg(test)]
+mod delete_layer_tests {
+    use super::*;
+
+    #[test]
+    fn deleting_last_layer_replaces_it_and_undo_restores_its_contents() {
+        let mut doc = Document::new("test", 320.0, 240.0);
+        let original_layer = doc.layer_order[0];
+        let child = SceneNode::new(
+            "Nested object",
+            original_layer,
+            SceneNodeKind::Group(GroupNode {
+                children: Vec::new(),
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+                live_boolean: None,
+            }),
+        );
+        let child_id = child.id;
+        let node = SceneNode::new(
+            "Only object",
+            original_layer,
+            SceneNodeKind::Group(GroupNode {
+                children: vec![child_id],
+                clip_children: false,
+                clip_node_id: None,
+                blend_spine_id: None,
+                live_boolean: None,
+            }),
+        );
+        let node_id = node.id;
+        doc.nodes.insert(child_id, child);
+        doc.add_node(node, Some(original_layer));
+        doc.selection = Selection::single(node_id);
+
+        let mut app = PhotonicApp::default();
+        app.selected_id = Some(node_id);
+        app.selected_layer_ids = vec![original_layer];
+        let mut history = CommandHistory::new(20);
+        let mut modified = false;
+
+        app.do_delete_layer(original_layer, &mut doc, &mut history, &mut modified);
+
+        assert!(modified);
+        assert_eq!(history.undo_depth(), 1);
+        assert_eq!(doc.layer_order.len(), 1);
+        let replacement = doc.layer_order[0];
+        assert_ne!(replacement, original_layer);
+        assert_eq!(doc.active_layer_id, Some(replacement));
+        assert!(doc.layers[&replacement].node_ids.is_empty());
+        assert!(!doc.nodes.contains_key(&node_id));
+        assert!(!doc.nodes.contains_key(&child_id));
+        assert!(doc.selection.is_empty());
+        assert_eq!(app.selected_layer_ids, vec![replacement]);
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.layer_order, vec![original_layer]);
+        assert_eq!(doc.active_layer_id, Some(original_layer));
+        assert!(doc.nodes.contains_key(&node_id));
+        assert!(doc.nodes.contains_key(&child_id));
+        assert_eq!(doc.layers[&original_layer].node_ids, vec![node_id]);
+        assert!(!doc.layers.contains_key(&replacement));
+    }
+
+    #[test]
+    fn deleting_active_layer_selects_a_survivor_and_undo_restores_it() {
+        let mut doc = Document::new("test", 320.0, 240.0);
+        let survivor = doc.layer_order[0];
+        let doomed = Layer::new("Doomed");
+        let doomed_id = doomed.id;
+        doc.add_layer(doomed);
+        doc.active_layer_id = Some(doomed_id);
+
+        let mut app = PhotonicApp::default();
+        app.selected_layer_ids = vec![doomed_id];
+        let mut history = CommandHistory::new(20);
+        let mut modified = false;
+
+        app.do_delete_layer(doomed_id, &mut doc, &mut history, &mut modified);
+
+        assert_eq!(doc.layer_order, vec![survivor]);
+        assert_eq!(doc.active_layer_id, Some(survivor));
+        assert_eq!(app.selected_layer_ids, vec![survivor]);
+
+        assert!(history.undo(&mut doc));
+        assert!(doc.layers.contains_key(&doomed_id));
+        assert_eq!(doc.active_layer_id, Some(doomed_id));
     }
 }
 

@@ -346,7 +346,7 @@ pub fn draw_layers_panel(
     egui::TopBottomPanel::bottom("layers_footer")
         .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(2.0, 4.0)))
         .show_inside(ui, |ui| {
-            draw_layers_footer(ui, doc, &mut action);
+            draw_layers_footer(ui, doc, selected_layer_ids, &mut action);
         });
 
     // ── Scrolling layer tree fills the remaining space above the footer ──────
@@ -795,13 +795,13 @@ fn layer_menu_items(
         }
         layer_lock_menu_item(ui, doc, lid, action);
         ui.separator();
-        // Delete — refuse when this is the only remaining layer.
-        let can_delete = doc.layer_order.len() > 1;
         if ui
-            .add_enabled(
-                can_delete,
-                egui::Button::new(format!("{} Delete Layer", ph::TRASH)),
-            )
+            .button(format!("{} Delete Layer", ph::TRASH))
+            .on_hover_text(if doc.layer_order.len() == 1 {
+                "Delete this layer and its contents, leaving a new empty layer"
+            } else {
+                "Delete this layer and everything it contains"
+            })
             .clicked()
         {
             *action = Some(PanelAction::DeleteLayer { layer_id: lid });
@@ -847,9 +847,14 @@ fn layer_lock_menu_item(
     }
 }
 
-/// The pinned footer: the adjustment slide-up tray, the four layer-action
+/// The pinned footer: the adjustment slide-up tray, the layer-action
 /// buttons, and the object-count readout.
-fn draw_layers_footer(ui: &mut Ui, doc: &Document, action: &mut Option<PanelAction>) {
+fn draw_layers_footer(
+    ui: &mut Ui,
+    doc: &Document,
+    selected_layer_ids: &[LayerId],
+    action: &mut Option<PanelAction>,
+) {
     // Slide-up tray drawn first so it appears *above* the buttons, rising up.
     let open = ui.data(|d| d.get_temp::<bool>(adjust_tray_open_id()).unwrap_or(false));
     let t = ui
@@ -859,7 +864,7 @@ fn draw_layers_footer(ui: &mut Ui, doc: &Document, action: &mut Option<PanelActi
         draw_adjustment_tray(ui, t, action);
     }
 
-    // Action bar — the four layer actions as a segmented multi-button pill:
+    // Action bar — layer actions as a segmented multi-button pill:
     // icon-only at rest, each expands its label on hover.
     let items = [
         MultiButtonItem::new(
@@ -882,6 +887,11 @@ fn draw_layers_footer(ui: &mut Ui, doc: &Document, action: &mut Option<PanelActi
             "Adjust",
             "Add a non-destructive adjustment layer",
         ),
+        MultiButtonItem::new(
+            ph::TRASH,
+            "Delete",
+            "Delete the selected layer and everything it contains",
+        ),
     ];
     // Even padding above/below, and centered horizontally in the drawer.
     ui.add_space(6.0);
@@ -895,10 +905,22 @@ fn draw_layers_footer(ui: &mut Ui, doc: &Document, action: &mut Option<PanelActi
             1 => *action = Some(PanelAction::AddSublayer),
             2 => *action = Some(PanelAction::AddLayerMaskSmart),
             // Adjust → toggle the slide-up tray of adjustment presets.
-            _ => ui.data_mut(|d| {
+            3 => ui.data_mut(|d| {
                 let cur = d.get_temp::<bool>(adjust_tray_open_id()).unwrap_or(false);
                 d.insert_temp(adjust_tray_open_id(), !cur);
             }),
+            4 => {
+                let target = selected_layer_ids
+                    .last()
+                    .copied()
+                    .filter(|id| doc.layers.contains_key(id))
+                    .or(doc.active_layer_id)
+                    .or_else(|| doc.layer_order.last().copied());
+                if let Some(layer_id) = target {
+                    *action = Some(PanelAction::DeleteLayer { layer_id });
+                }
+            }
+            _ => {}
         }
     }
 
