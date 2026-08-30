@@ -525,10 +525,12 @@ pub(crate) fn set_handle_loc(els: &mut [PathEl], loc: HandleLoc, pt: Point) {
 }
 
 /// Resolve the In/Out handle locations of the *logical* anchor at element index
-/// `i`, following the closed-path seam: a closed shape lists its start point
-/// twice (the `MoveTo` and the closing `CurveTo` endpoint), so that one logical
-/// anchor's two handles live on different elements. This maps both to a single
-/// anchor so smooth-mirroring, hit-testing and rendering treat the seam as one.
+/// `i`, following the closed-path seam when the path explicitly lists its start
+/// point twice (the `MoveTo` and a coincident closing curve endpoint). This maps
+/// both representations to one anchor so smooth-mirroring, hit-testing and
+/// rendering treat the seam as one. A plain `ClosePath` whose previous endpoint
+/// differs from `MoveTo` contributes a straight closing edge, so those two
+/// anchors remain independent.
 pub(crate) fn logical_handles(bez: &BezPath, i: usize) -> (Option<HandleLoc>, Option<HandleLoc>) {
     let els = bez.elements();
     let n = els.len();
@@ -553,11 +555,27 @@ pub(crate) fn logical_handles(bez: &BezPath, i: usize) -> (Option<HandleLoc>, Op
     }
     let closed = matches!(els[end], PathEl::ClosePath);
     let last_geom = if closed { end.saturating_sub(1) } else { end };
+    let endpoint = |el: &PathEl| match el {
+        PathEl::MoveTo(point)
+        | PathEl::LineTo(point)
+        | PathEl::QuadTo(_, point)
+        | PathEl::CurveTo(_, _, point) => Some(*point),
+        PathEl::ClosePath => None,
+    };
+    let explicit_duplicate_seam = closed
+        && endpoint(&els[start])
+            .zip(endpoint(&els[last_geom]))
+            .is_some_and(|(first, last)| {
+                (first.x - last.x).abs() <= 1e-9 && (first.y - last.y).abs() <= 1e-9
+            });
 
     // In = c2 of the curve ending at this anchor (or the closing curve at seam).
     let in_loc = if matches!(els.get(i), Some(PathEl::CurveTo(..))) {
         Some((i, false))
-    } else if closed && i == start && matches!(els.get(last_geom), Some(PathEl::CurveTo(..))) {
+    } else if explicit_duplicate_seam
+        && i == start
+        && matches!(els.get(last_geom), Some(PathEl::CurveTo(..)))
+    {
         Some((last_geom, false))
     } else {
         None
@@ -565,7 +583,10 @@ pub(crate) fn logical_handles(bez: &BezPath, i: usize) -> (Option<HandleLoc>, Op
     // Out = c1 of the curve leaving this anchor (or the first curve at seam).
     let out_loc = if i + 1 < n && matches!(els.get(i + 1), Some(PathEl::CurveTo(..))) {
         Some((i + 1, true))
-    } else if closed && i == last_geom && matches!(els.get(start + 1), Some(PathEl::CurveTo(..))) {
+    } else if explicit_duplicate_seam
+        && i == last_geom
+        && matches!(els.get(start + 1), Some(PathEl::CurveTo(..)))
+    {
         Some((start + 1, true))
     } else {
         None

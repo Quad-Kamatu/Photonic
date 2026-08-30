@@ -6398,6 +6398,32 @@ mod direct_select_geometry_tests {
     }
 
     #[test]
+    fn distinct_anchors_across_close_path_do_not_share_handles() {
+        // ClosePath contributes a straight edge back to MoveTo. When the final
+        // cubic ends somewhere else, its endpoint and MoveTo are two distinct
+        // anchors and must not borrow one another's handles across that edge.
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.curve_to((10.0, 0.0), (20.0, 10.0), (30.0, 10.0));
+        b.curve_to((40.0, 10.0), (50.0, 0.0), (60.0, 0.0));
+        b.close_path();
+
+        let (start_in, start_out) = anchor_handle_pair(&b, 0);
+        let (last_in, last_out) = anchor_handle_pair(&b, 2);
+
+        assert!(
+            start_in.is_none(),
+            "MoveTo has a straight incoming close edge"
+        );
+        assert_eq!(start_out.unwrap().1, Point::new(10.0, 0.0));
+        assert_eq!(last_in.unwrap().1, Point::new(50.0, 0.0));
+        assert!(
+            last_out.is_none(),
+            "final anchor has a straight outgoing close edge"
+        );
+    }
+
+    #[test]
     fn seam_smooth_mirror_actually_moves_opposite_handle() {
         let b = closed_curve();
         // Drag the start anchor's OUT handle with mirror on; the IN handle (which
