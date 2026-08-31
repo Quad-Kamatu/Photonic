@@ -536,6 +536,161 @@ pub(crate) fn bez_move_anchors(bez: &BezPath, selected: &[usize], dx: f64, dy: f
     result
 }
 
+/// Insert one anchor on the segment nearest `target_canvas`, provided that
+/// segment is within `max_distance_canvas`. Curves are split at the nearest
+/// parameter with De Casteljau subdivision, preserving their exact shape.
+/// Returns the rebuilt path and the new anchor's element index.
+pub(crate) fn bez_insert_anchor_near_canvas(
+    bez: &BezPath,
+    transform: &photonic_core::transform::Transform,
+    target_canvas: Point,
+    max_distance_canvas: f64,
+) -> Option<(BezPath, usize)> {
+    use kurbo::{CubicBez, ParamCurveNearest, QuadBez};
+
+    let to_canvas = |point: Point| {
+        let (x, y) = transform.apply(point.x, point.y);
+        Point::new(x, y)
+    };
+    let nearest_line = |start: Point, end: Point| {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let length_sq = dx * dx + dy * dy;
+        let t = if length_sq <= 1e-12 {
+            0.0
+        } else {
+            (((target_canvas.x - start.x) * dx + (target_canvas.y - start.y) * dy) / length_sq)
+                .clamp(0.0, 1.0)
+        };
+        let nearest = Point::new(start.x + dx * t, start.y + dy * t);
+        let distance_sq =
+            (nearest.x - target_canvas.x).powi(2) + (nearest.y - target_canvas.y).powi(2);
+        (t, distance_sq)
+    };
+
+    let mut current = None::<Point>;
+    let mut subpath_start = None::<Point>;
+    let mut best = None::<(usize, f64, f64)>; // element index, t, distance²
+    for (index, element) in bez.elements().iter().copied().enumerate() {
+        let candidate = match element {
+            PathEl::MoveTo(point) => {
+                current = Some(point);
+                subpath_start = Some(point);
+                None
+            }
+            PathEl::LineTo(point) => current.map(|start| {
+                let (t, distance_sq) = nearest_line(to_canvas(start), to_canvas(point));
+                current = Some(point);
+                (t, distance_sq)
+            }),
+            PathEl::CurveTo(control1, control2, point) => current.map(|start| {
+                let curve = CubicBez::new(
+                    to_canvas(start),
+                    to_canvas(control1),
+                    to_canvas(control2),
+                    to_canvas(point),
+                );
+                let nearest = curve.nearest(target_canvas, 1e-3);
+                current = Some(point);
+                (nearest.t, nearest.distance_sq)
+            }),
+            PathEl::QuadTo(control, point) => current.map(|start| {
+                let curve = QuadBez::new(to_canvas(start), to_canvas(control), to_canvas(point));
+                let nearest = curve.nearest(target_canvas, 1e-3);
+                current = Some(point);
+                (nearest.t, nearest.distance_sq)
+            }),
+            PathEl::ClosePath => {
+                let candidate = current.zip(subpath_start).and_then(|(start, end)| {
+                    let start_canvas = to_canvas(start);
+                    let end_canvas = to_canvas(end);
+                    ((start_canvas.x - end_canvas.x).abs() > 1e-9
+                        || (start_canvas.y - end_canvas.y).abs() > 1e-9)
+                        .then(|| nearest_line(start_canvas, end_canvas))
+                });
+                current = subpath_start;
+                subpath_start = None;
+                candidate
+            }
+        };
+        if let Some((t, distance_sq)) = candidate {
+            if best.is_none_or(|(_, _, best_distance_sq)| distance_sq < best_distance_sq) {
+                best = Some((index, t, distance_sq));
+            }
+        }
+    }
+
+    let (target_index, t, distance_sq) = best?;
+    if distance_sq > max_distance_canvas.max(0.0).powi(2) {
+        return None;
+    }
+    let t = t.clamp(1e-6, 1.0 - 1e-6);
+    let lerp = |a: Point, b: Point| Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+
+    let mut result = BezPath::new();
+    let mut current = None::<Point>;
+    let mut subpath_start = None::<Point>;
+    let mut inserted_index = None;
+    for (index, element) in bez.elements().iter().copied().enumerate() {
+        if index == target_index {
+            match element {
+                PathEl::LineTo(end) => {
+                    let split = lerp(current?, end);
+                    inserted_index = Some(result.elements().len());
+                    result.line_to(split);
+                    result.line_to(end);
+                }
+                PathEl::CurveTo(control1, control2, end) => {
+                    let start = current?;
+                    let q0 = lerp(start, control1);
+                    let q1 = lerp(control1, control2);
+                    let q2 = lerp(control2, end);
+                    let r0 = lerp(q0, q1);
+                    let r1 = lerp(q1, q2);
+                    let split = lerp(r0, r1);
+                    inserted_index = Some(result.elements().len());
+                    result.curve_to(q0, r0, split);
+                    result.curve_to(r1, q2, end);
+                }
+                PathEl::QuadTo(control, end) => {
+                    let start = current?;
+                    let q0 = lerp(start, control);
+                    let q1 = lerp(control, end);
+                    let split = lerp(q0, q1);
+                    inserted_index = Some(result.elements().len());
+                    result.quad_to(q0, split);
+                    result.quad_to(q1, end);
+                }
+                PathEl::ClosePath => {
+                    let split = lerp(current?, subpath_start?);
+                    inserted_index = Some(result.elements().len());
+                    result.line_to(split);
+                    result.close_path();
+                }
+                PathEl::MoveTo(_) => return None,
+            }
+        } else {
+            result.push(element);
+        }
+
+        match element {
+            PathEl::MoveTo(point) => {
+                current = Some(point);
+                subpath_start = Some(point);
+            }
+            PathEl::LineTo(point) | PathEl::CurveTo(_, _, point) | PathEl::QuadTo(_, point) => {
+                current = Some(point)
+            }
+            PathEl::ClosePath => {
+                current = subpath_start;
+                subpath_start = None;
+            }
+        }
+    }
+
+    inserted_index.map(|index| (result, index))
+}
+
 /// The local-space position of the bezier control handle on `kind` side of the
 /// anchor at element index `i`, or `None` if that side is not curved.
 ///
@@ -2997,5 +3152,109 @@ mod merge_anchor_tests {
             panic!("merged contour must retain its curved closing edge");
         };
         assert_eq!(first, closing, "moving the seam must not split it in two");
+    }
+}
+
+#[cfg(test)]
+mod insert_anchor_tests {
+    use super::*;
+
+    fn identity() -> photonic_core::transform::Transform {
+        photonic_core::transform::Transform::default()
+    }
+
+    #[test]
+    fn inserts_at_the_nearest_point_on_a_line() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((100.0, 0.0));
+
+        let (inserted, index) =
+            bez_insert_anchor_near_canvas(&path, &identity(), Point::new(25.0, 4.0), 5.0).unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(
+            inserted.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::LineTo(Point::new(25.0, 0.0)),
+                PathEl::LineTo(Point::new(100.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn cubic_split_preserves_the_exact_curve_shape() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.curve_to((0.0, 100.0), (100.0, 100.0), (100.0, 0.0));
+
+        let (inserted, index) =
+            bez_insert_anchor_near_canvas(&path, &identity(), Point::new(50.0, 75.0), 1.0).unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(
+            inserted.elements(),
+            &[
+                PathEl::MoveTo(Point::new(0.0, 0.0)),
+                PathEl::CurveTo(
+                    Point::new(0.0, 50.0),
+                    Point::new(25.0, 75.0),
+                    Point::new(50.0, 75.0),
+                ),
+                PathEl::CurveTo(
+                    Point::new(75.0, 75.0),
+                    Point::new(100.0, 50.0),
+                    Point::new(100.0, 0.0),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_on_an_implicit_closing_edge_and_keeps_it_closed() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((100.0, 0.0));
+        path.line_to((100.0, 100.0));
+        path.line_to((0.0, 100.0));
+        path.close_path();
+
+        let (inserted, index) =
+            bez_insert_anchor_near_canvas(&path, &identity(), Point::new(0.0, 50.0), 1.0).unwrap();
+        assert_eq!(index, 4);
+        assert!(matches!(
+            inserted.elements()[4],
+            PathEl::LineTo(point) if point == Point::new(0.0, 50.0)
+        ));
+        assert!(matches!(inserted.elements()[5], PathEl::ClosePath));
+    }
+
+    #[test]
+    fn inserts_into_the_target_compound_contour_without_dropping_others() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((100.0, 0.0));
+        path.move_to((200.0, 0.0));
+        path.line_to((300.0, 0.0));
+
+        let (inserted, index) =
+            bez_insert_anchor_near_canvas(&path, &identity(), Point::new(250.0, 0.0), 1.0).unwrap();
+        assert_eq!(index, 3);
+        assert_eq!(inserted.elements().len(), 5);
+        assert_eq!(&inserted.elements()[..2], &path.elements()[..2]);
+        assert!(matches!(
+            inserted.elements()[3],
+            PathEl::LineTo(point) if point == Point::new(250.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn misses_when_the_click_is_outside_the_segment_tolerance() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((100.0, 0.0));
+        assert!(
+            bez_insert_anchor_near_canvas(&path, &identity(), Point::new(50.0, 20.0), 8.0,)
+                .is_none()
+        );
     }
 }

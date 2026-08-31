@@ -280,6 +280,57 @@ impl PhotonicApp {
         *doc_modified = true;
     }
 
+    /// Insert an anchor on the edited path segment nearest a canvas-space
+    /// click. The split preserves the segment's exact geometry and is recorded
+    /// as one undoable node update.
+    fn ds_insert_anchor_at_canvas(
+        &mut self,
+        canvas_x: f64,
+        canvas_y: f64,
+        view: &CanvasView,
+        doc: &mut Document,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) -> bool {
+        const SEGMENT_HIT_RADIUS_PX: f64 = 8.0;
+        let Some(node_id) = self.point_edit_node else {
+            return false;
+        };
+        let Some(old_node) = doc.nodes.get(&node_id).cloned() else {
+            return false;
+        };
+        let SceneNodeKind::Path(path_node) = &old_node.kind else {
+            return false;
+        };
+        let old_path = path_node.path_data.to_bez_path();
+        let tolerance_canvas = SEGMENT_HIT_RADIUS_PX / view.zoom.max(1e-6);
+        let Some((new_path, new_anchor_index)) = bez_insert_anchor_near_canvas(
+            &old_path,
+            &old_node.transform,
+            Point::new(canvas_x, canvas_y),
+            tolerance_canvas,
+        ) else {
+            return false;
+        };
+
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(path_node) = &mut new_node.kind {
+            path_node.path_data = PathData::from_bez_path(&new_path);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        self.point_selected = vec![new_anchor_index];
+        self.point_context_anchor = None;
+        self.file_status = Some("Added anchor point".into());
+        *doc_modified = true;
+        true
+    }
+
     /// Hit-test the current point-edit node's anchors at canvas position
     /// `(cx, cy)`, returning the nearest anchor's element index within the
     /// grab radius. Shared by the tool handler and by the radial-wheel
@@ -971,7 +1022,15 @@ impl PhotonicApp {
 
                 let hit_anchor = self.ds_anchor_at(cx, cy, doc, view);
 
-                if let Some(anchor_idx) = hit_anchor {
+                let inserted_anchor = ctrl
+                    && self.active_tool == Tool::DirectSelect
+                    && hit_anchor.is_none()
+                    && self.ds_insert_anchor_at_canvas(cx, cy, view, doc, doc_modified, history);
+
+                if inserted_anchor {
+                    // The insertion helper selects the new anchor so its handles
+                    // are immediately available on curved segments.
+                } else if let Some(anchor_idx) = hit_anchor {
                     if add_sel {
                         // Toggle
                         if let Some(pos) = self.point_selected.iter().position(|&i| i == anchor_idx)
@@ -1337,6 +1396,53 @@ mod tests {
             .iter()
             .any(|(_, point)| *point == Point::new(100.0, 50.0)));
         assert!(app.point_selected.is_empty());
+        assert!(app.point_context_anchor.is_none());
+
+        assert!(history.undo(&mut doc));
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected after undo");
+        };
+        assert_eq!(path.path_data.to_bez_path().elements(), bez.elements());
+    }
+
+    #[test]
+    fn inserted_anchor_is_selected_and_undoes_as_one_edit() {
+        let mut bez = BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.curve_to((0.0, 100.0), (100.0, 100.0), (100.0, 0.0));
+
+        let mut doc = Document::new("test", 200.0, 200.0);
+        let layer = doc.layer_order[0];
+        let node = SceneNode::new(
+            "shape",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::from_bez_path(&bez))),
+        );
+        let node_id = node.id;
+        doc.add_node(node, Some(layer));
+        let mut app = PhotonicApp::default();
+        app.point_edit_node = Some(node_id);
+        app.point_selected = vec![0];
+        app.point_context_anchor = Some(0);
+        let mut history = CommandHistory::new(20);
+        let mut modified = false;
+
+        assert!(app.ds_insert_anchor_at_canvas(
+            50.0,
+            75.0,
+            &CanvasView::default(),
+            &mut doc,
+            &mut modified,
+            &mut history,
+        ));
+
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected");
+        };
+        assert!(modified);
+        assert_eq!(history.undo_depth(), 1);
+        assert_eq!(path_anchor_points(&path.path_data.to_bez_path()).len(), 3);
+        assert_eq!(app.point_selected, vec![1]);
         assert!(app.point_context_anchor.is_none());
 
         assert!(history.undo(&mut doc));
