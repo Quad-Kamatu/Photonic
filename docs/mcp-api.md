@@ -1599,7 +1599,7 @@ Export one or more artboards to raster images — one image per artboard. Return
 
 ## `export_audit_log`
 
-Export the complete in-memory MCP audit log as a JSON array (oldest first). Includes every tool call recorded since the server started, up to 1000 entries.
+Export the retained in-memory MCP audit log as a JSON array (oldest first). Argument summaries are bounded, and the formatted response is capped at 256 KiB; when the retained buffer does not fit, only the oldest entries that fit are returned.
 
 _No parameters._
 
@@ -2108,9 +2108,9 @@ _No parameters._
 
 Return the most recent MCP tool calls recorded since the server started.
 
-Each entry includes: `id` (sequential), `timestamp` (ISO 8601), `tool_name`, `args` (full arguments), `result_summary` (first 200 chars of result text), `duration_ms`, and `is_error`.
+Each entry includes: `id` (sequential), `timestamp` (ISO 8601), `tool_name`, `args` (a bounded structural summary), `result_summary` (first 200 chars of result text), `duration_ms`, and `is_error`. Responses are capped at a fixed byte budget.
 
-Useful for multi-agent accountability: see exactly what was called, by whom (if the calling agent passes an `author` in its args), and with what parameters.
+Useful for multi-agent accountability: see what was called, by whom (if the calling agent passes an `author` in its args), and with which bounded parameters.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |

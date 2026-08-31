@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 
 /// Maximum combined compact-serialized size of retained argument values.
 pub const MAX_AUDIT_ARGUMENT_BYTES: usize = 1024 * 1024;
+/// Maximum size of a formatted audit list or export response.
+pub const MAX_AUDIT_EXPORT_BYTES: usize = 256 * 1024;
 
 const MAX_AUDIT_ARGUMENT_BYTES_PER_ENTRY: usize = 8 * 1024;
 const MAX_AUDIT_ENTRIES: usize = 1000;
