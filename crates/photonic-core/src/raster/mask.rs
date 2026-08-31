@@ -5,9 +5,7 @@
 //! give partial coverage (feathered edges, anti-aliasing), exactly like a
 //! Photoshop selection or layer mask.
 
-use super::image::{
-    checked_raster_pixel_count, luma, RasterImage, MAX_PERSISTED_RASTER_PIXELS,
-};
+use super::image::{checked_raster_pixel_count, luma, RasterImage, MAX_PERSISTED_RASTER_PIXELS};
 use serde::{
     de::{self, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
