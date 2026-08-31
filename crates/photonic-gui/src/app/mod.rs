@@ -2059,6 +2059,7 @@ impl PhotonicApp {
         let open_drawer = prefs.open_drawer;
         let mut s = Self::default();
         s.prefs = prefs;
+        s.font_library.recent_families = s.prefs.recent_font_families.clone();
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
         s.open_drawer = open_drawer;
@@ -2089,6 +2090,7 @@ impl PhotonicApp {
             ..Self::default()
         };
         s.prefs = prefs;
+        s.font_library.recent_families = s.prefs.recent_font_families.clone();
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
         s.open_drawer = open_drawer;
@@ -2155,6 +2157,8 @@ impl PhotonicApp {
             point_edit_node: self.point_edit_node,
             point_selected: &self.point_selected,
             font_library: &mut self.font_library,
+            typography_defaults: &mut self.prefs.typography_defaults,
+            typography_only: false,
             prop_search: &mut self.prop_search,
             shear_x: &mut self.shear_x,
             shear_y: &mut self.shear_y,
@@ -2303,37 +2307,56 @@ impl PhotonicApp {
                     if let Some(error) = load_error {
                         self.file_status =
                             Some(format!("Font installed but could not load: {error}"));
-                    } else if let Some(old_node) = doc.nodes.get(&installed.node_id).cloned() {
-                        if matches!(old_node.kind, SceneNodeKind::Text(_)) {
-                            let mut new_node = old_node.clone();
-                            if let SceneNodeKind::Text(text) = &mut new_node.kind {
-                                text.font_family = installed.font.family.clone();
+                    } else {
+                        self.font_library
+                            .record_recent_family(&installed.font.family);
+                        self.font_library.picker_open = false;
+                        self.prefs.recent_font_families = self.font_library.recent_families.clone();
+                        self.prefs.save();
+                        if let Some(node_id) = installed.node_id {
+                            if let Some(old_node) = doc.nodes.get(&node_id).cloned() {
+                                if matches!(old_node.kind, SceneNodeKind::Text(_)) {
+                                    let mut new_node = old_node.clone();
+                                    if let SceneNodeKind::Text(text) = &mut new_node.kind {
+                                        text.font_family = installed.font.family.clone();
+                                    }
+                                    history.execute(
+                                        Command::UpdateNode {
+                                            old: old_node,
+                                            new: new_node,
+                                        },
+                                        doc,
+                                    );
+                                    doc_modified = true;
+                                    self.file_status = Some(format!(
+                                        "Installed and applied {} ({}, {})",
+                                        installed.font.family,
+                                        installed.font.subset,
+                                        installed.font.license
+                                    ));
+                                } else {
+                                    self.file_status = Some(format!(
+                                        "Installed {} — the original text selection changed",
+                                        installed.font.family
+                                    ));
+                                }
+                            } else {
+                                self.file_status = Some(format!(
+                                    "Installed {} — the original text object was removed",
+                                    installed.font.family
+                                ));
                             }
-                            history.execute(
-                                Command::UpdateNode {
-                                    old: old_node,
-                                    new: new_node,
-                                },
-                                doc,
-                            );
-                            doc_modified = true;
+                        } else {
+                            self.prefs.typography_defaults.font_family =
+                                installed.font.family.clone();
+                            self.prefs.save();
                             self.file_status = Some(format!(
-                                "Installed and applied {} ({}, {})",
+                                "Installed {} and set it as the new-text default ({}, {})",
                                 installed.font.family,
                                 installed.font.subset,
                                 installed.font.license
                             ));
-                        } else {
-                            self.file_status = Some(format!(
-                                "Installed {} — the original text selection changed",
-                                installed.font.family
-                            ));
                         }
-                    } else {
-                        self.file_status = Some(format!(
-                            "Installed {} — the original text object was removed",
-                            installed.font.family
-                        ));
                     }
                     ctx.request_repaint();
                 }
@@ -2442,6 +2465,12 @@ impl PhotonicApp {
                 // intended to be usable without hunting through drawers.
                 self.open_drawer = Some(DrawerGroup::Inspector);
                 self.last_drawer_group = DrawerGroup::Inspector;
+                self.prefs.open_drawer = self.open_drawer;
+                self.prop_search.clear();
+            }
+            if cur == Tool::Text {
+                self.open_drawer = Some(DrawerGroup::Typography);
+                self.last_drawer_group = DrawerGroup::Typography;
                 self.prefs.open_drawer = self.open_drawer;
                 self.prop_search.clear();
             }
@@ -2923,6 +2952,18 @@ impl PhotonicApp {
         self.draw_object_options_dialog(ctx, doc, history);
 
         // ── Top toolbar ──────────────────────────────────────────────────────
+        let selected_text_quick = self.selected_id.and_then(|node_id| {
+            doc.nodes.get(&node_id).and_then(|node| match &node.kind {
+                SceneNodeKind::Text(text) => Some((
+                    node_id,
+                    text.font_family.clone(),
+                    text.font_size,
+                    text.font_weight,
+                    text.font_style,
+                )),
+                _ => None,
+            })
+        });
         let toolbar_resp = egui::TopBottomPanel::top("toolbar")
             .frame(
                 egui::Frame::side_top_panel(&ctx.style())
@@ -2970,6 +3011,91 @@ impl PhotonicApp {
                             Some(DrawerKind::Tools)
                         };
                         self.selected_drawer_option = None;
+                    }
+
+                    // First-class Typography entry point. Unlike the generic
+                    // Inspector, this is always available: with text selected it
+                    // edits that object; otherwise it edits new-text defaults.
+                    let typography_active = self.open_drawer == Some(DrawerGroup::Typography);
+                    if ui
+                        .selectable_label(typography_active, "Typography")
+                        .clicked()
+                    {
+                        self.open_drawer = if typography_active {
+                            None
+                        } else {
+                            Some(DrawerGroup::Typography)
+                        };
+                        if self.open_drawer.is_some() {
+                            self.last_drawer_group = DrawerGroup::Typography;
+                        }
+                        self.prefs.open_drawer = self.open_drawer;
+                        self.prop_search.clear();
+                        self.prefs.save();
+                    }
+
+                    // High-frequency type controls stay visible beside the entry
+                    // point whenever a text object is selected.
+                    if let Some((node_id, family, font_size, font_weight, font_style)) =
+                        selected_text_quick.as_ref()
+                    {
+                        ui.separator();
+                        let family_label = if family.chars().count() > 18 {
+                            format!("{}…", family.chars().take(17).collect::<String>())
+                        } else {
+                            family.clone()
+                        };
+                        if ui
+                            .small_button(format!("{} {}", ph::TEXT_T, family_label))
+                            .on_hover_text("Open the font family picker")
+                            .clicked()
+                        {
+                            self.open_drawer = Some(DrawerGroup::Typography);
+                            self.last_drawer_group = DrawerGroup::Typography;
+                            self.prefs.open_drawer = self.open_drawer;
+                            self.prop_search.clear();
+                            self.prefs.save();
+                        }
+                        let mut size = *font_size;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut size)
+                                    .speed(0.5)
+                                    .range(1.0..=1000.0)
+                                    .suffix(" px"),
+                            )
+                            .on_hover_text("Font size")
+                            .changed()
+                        {
+                            self.pending_panel_actions
+                                .push(PanelAction::SetTextEssentials {
+                                    node_id: *node_id,
+                                    font_size: Some(size),
+                                    align: None,
+                                });
+                        }
+                        let bold = *font_weight >= 700;
+                        if ui
+                            .add(egui::Button::new(RichText::new("B").strong()).selected(bold))
+                            .on_hover_text("Bold")
+                            .clicked()
+                        {
+                            self.pending_panel_actions.push(PanelAction::SetFontWeight {
+                                node_id: *node_id,
+                                weight: if bold { 400 } else { 700 },
+                            });
+                        }
+                        let italic = *font_style == photonic_core::node::FontStyle::Italic;
+                        if ui
+                            .add(egui::Button::new(RichText::new("I").italics()).selected(italic))
+                            .on_hover_text("Italic")
+                            .clicked()
+                        {
+                            self.pending_panel_actions.push(PanelAction::SetFontStyle {
+                                node_id: *node_id,
+                                style: if italic { "normal" } else { "italic" }.into(),
+                            });
+                        }
                     }
 
                     // Audit log toggle
@@ -5800,6 +5926,7 @@ impl PhotonicApp {
                             let (cx, cy) = (self.snap(cx), self.snap(cy));
                             let [r, g, b, a] = self.fill_color;
                             let mut text_node = TextNode::new("Text");
+                            self.prefs.typography_defaults.apply_to(&mut text_node);
                             text_node.fill = Fill::solid(Color { r, g, b, a });
                             let kind = SceneNodeKind::Text(text_node);
                             let num = doc.node_count() + 1;

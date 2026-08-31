@@ -2442,6 +2442,7 @@ impl PhotonicApp {
                         use photonic_core::node::TextNode;
                         let [r, g, b, a] = fill;
                         let mut text_node = TextNode::new("Text");
+                        self.prefs.typography_defaults.apply_to(&mut text_node);
                         text_node.fill = Fill::solid(Color { r, g, b, a });
                         let num = doc.node_count() + 1;
                         let mut node = SceneNode::new(
@@ -3350,6 +3351,50 @@ impl PhotonicApp {
                             doc_modified = true;
                         }
                     }
+                }
+
+                PanelAction::SetTextEssentials {
+                    node_id,
+                    font_size,
+                    align,
+                } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        if matches!(node.kind, SceneNodeKind::Text(_)) {
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Text(ref mut text) = new_node.kind {
+                                if let Some(font_size) = font_size {
+                                    text.font_size = font_size.clamp(1.0, 1000.0);
+                                }
+                                if let Some(align) = align {
+                                    text.align = align;
+                                }
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                            self.mixed_scene_tex_cache = None;
+                        }
+                    }
+                }
+
+                PanelAction::SetTypographyDefaults { mut defaults } => {
+                    defaults.font_size = defaults.font_size.clamp(1.0, 1000.0);
+                    defaults.font_weight = defaults.font_weight.clamp(100, 900);
+                    defaults.line_height = defaults.line_height.clamp(0.5, 5.0);
+                    defaults.letter_spacing = defaults.letter_spacing.clamp(-20.0, 50.0);
+                    if defaults.font_family.trim().is_empty() {
+                        defaults.font_family = "sans-serif".into();
+                    }
+                    self.font_library
+                        .record_recent_family(&defaults.font_family);
+                    self.prefs.recent_font_families = self.font_library.recent_families.clone();
+                    self.prefs.typography_defaults = defaults;
+                    self.prefs.save();
                 }
 
                 PanelAction::FlipNodes {
@@ -6060,7 +6105,7 @@ impl PhotonicApp {
                             }
                             let mut new_node = node.clone();
                             if let SceneNodeKind::Text(ref mut text) = new_node.kind {
-                                text.font_family = family;
+                                text.font_family = family.clone();
                             }
                             history.execute(
                                 Command::UpdateNode {
@@ -6071,6 +6116,10 @@ impl PhotonicApp {
                             );
                             doc_modified = true;
                             self.mixed_scene_tex_cache = None;
+                            self.font_library.record_recent_family(&family);
+                            self.prefs.recent_font_families =
+                                self.font_library.recent_families.clone();
+                            self.prefs.save();
                         }
                     }
                 }

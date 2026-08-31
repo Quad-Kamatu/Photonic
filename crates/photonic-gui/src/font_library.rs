@@ -79,6 +79,7 @@ pub struct InstalledFont {
 pub enum FontLibraryTab {
     #[default]
     Installed,
+    Recent,
     Library,
 }
 
@@ -91,7 +92,7 @@ pub enum CatalogStatus {
 }
 
 pub struct FontInstallResult {
-    pub node_id: NodeId,
+    pub node_id: Option<NodeId>,
     pub font: InstalledFont,
     pub paths: Vec<PathBuf>,
 }
@@ -103,7 +104,7 @@ pub struct FontPreview {
 }
 
 struct InstallRequest {
-    node_id: NodeId,
+    node_id: Option<NodeId>,
     id: String,
     family: String,
     subset: String,
@@ -118,12 +119,14 @@ pub struct FontLibraryState {
     pub catalog: Vec<CatalogFont>,
     pub catalog_status: CatalogStatus,
     pub installed_families: Vec<String>,
+    pub recent_families: Vec<String>,
     pub managed_fonts: Vec<InstalledFont>,
     pub installing_id: Option<String>,
     pub preview_loading_token: Option<String>,
     pub preview_ready_token: Option<String>,
     pub preview_font_key: Option<String>,
     pub preview_error: Option<String>,
+    pub picker_open: bool,
     installed_synced: bool,
     catalog_rx: Option<Receiver<Result<Vec<CatalogFont>, String>>>,
     install_rx: Option<Receiver<Result<FontInstallResult, String>>>,
@@ -141,12 +144,14 @@ impl Default for FontLibraryState {
             catalog: Vec::new(),
             catalog_status: CatalogStatus::NotLoaded,
             installed_families: Vec::new(),
+            recent_families: Vec::new(),
             managed_fonts: scan_installed_fonts(&photonic_render::photonic_font_cache_dir()),
             installing_id: None,
             preview_loading_token: None,
             preview_ready_token: None,
             preview_font_key: None,
             preview_error: None,
+            picker_open: false,
             installed_synced: false,
             catalog_rx: None,
             install_rx: None,
@@ -209,7 +214,7 @@ impl FontLibraryState {
 
     pub fn start_install(
         &mut self,
-        node_id: NodeId,
+        node_id: Option<NodeId>,
         id: String,
         family: String,
         subset: String,
@@ -320,6 +325,13 @@ impl FontLibraryState {
         self.managed_fonts
             .iter()
             .any(|font| font.id == id && font.subset == subset)
+    }
+
+    pub fn record_recent_family(&mut self, family: &str) {
+        self.recent_families
+            .retain(|existing| !existing.eq_ignore_ascii_case(family));
+        self.recent_families.insert(0, family.to_string());
+        self.recent_families.truncate(12);
     }
 }
 
@@ -708,6 +720,15 @@ mod tests {
     }
 
     #[test]
+    fn recently_used_fonts_are_deduplicated_and_moved_to_the_front() {
+        let mut state = FontLibraryState::default();
+        state.record_recent_family("Inter");
+        state.record_recent_family("Abel");
+        state.record_recent_family("inter");
+        assert_eq!(state.recent_families, vec!["inter", "Abel"]);
+    }
+
+    #[test]
     fn installed_manifests_are_discovered_without_partial_staging_dirs() {
         let root =
             std::env::temp_dir().join(format!("photonic-font-test-{}", uuid::Uuid::new_v4()));
@@ -755,7 +776,7 @@ mod tests {
         ));
         let result = install_font(
             InstallRequest {
-                node_id: uuid::Uuid::new_v4(),
+                node_id: Some(uuid::Uuid::new_v4()),
                 id: "abel".into(),
                 family: "Abel".into(),
                 subset: "latin".into(),

@@ -525,6 +525,16 @@ pub enum PanelAction {
         line_height: Option<f64>,
         letter_spacing: Option<f64>,
     },
+    /// Set the high-frequency type controls surfaced at the top of Typography.
+    SetTextEssentials {
+        node_id: NodeId,
+        font_size: Option<f64>,
+        align: Option<photonic_core::node::TextAlign>,
+    },
+    /// Persist the typography used by subsequently-created text objects.
+    SetTypographyDefaults {
+        defaults: crate::preferences::TypographyDefaults,
+    },
     /// Add a drop shadow behind a node.
     AddDropShadow { node_id: NodeId },
     /// Create a sample radar chart at canvas center (5 axes, 2 series).
@@ -750,7 +760,8 @@ pub enum PanelAction {
     SetFontFamily { node_id: NodeId, family: String },
     /// Download a Fontsource family into Photonic's local cache, then apply it.
     InstallFont {
-        node_id: NodeId,
+        /// `None` installs the family and makes it the new-text default.
+        node_id: Option<NodeId>,
         id: String,
         family: String,
         subset: String,
@@ -1019,6 +1030,9 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) point_edit_node: Option<NodeId>,
     pub(crate) point_selected: &'a [usize],
     pub(crate) font_library: &'a mut crate::font_library::FontLibraryState,
+    pub(crate) typography_defaults: &'a mut crate::preferences::TypographyDefaults,
+    /// Restricts `draw_selected_node` to its typography-only slice.
+    pub(crate) typography_only: bool,
     pub(crate) prop_search: &'a mut String,
     pub(crate) shear_x: &'a mut f64,
     pub(crate) shear_y: &'a mut f64,
@@ -1103,7 +1117,7 @@ impl<'a> PropPanelCtx<'a> {
     }
 }
 
-/// One of the six Canva-style drawer groups surfaced by the left icon rail.
+/// One of the Canva-style drawer groups surfaced by the left icon rail.
 ///
 /// Each group owns a disjoint slice of the ~43 property section functions; every
 /// section is reachable through exactly one group. `draw_drawer` renders the
@@ -1115,6 +1129,8 @@ pub enum DrawerGroup {
     /// Selection inspector: navigator, selected node, tool/shape options, symbol
     /// overrides, text-variable binding (+ the Direct-Select vertex panel).
     Inspector,
+    /// Dedicated text formatting and open-font browser.
+    Typography,
     /// Shape/appearance operations: combine, boolean, blend, pathfinder, etc.
     Modify,
     /// Alignment, distribution, distances, dimensions, layer ops.
@@ -1132,9 +1148,10 @@ impl DrawerGroup {
     /// intentionally absent — it now lives on the right rail (see
     /// [`RightDrawerGroup`]) — but the `History` variant is retained so
     /// `draw_drawer` can still render it there.
-    pub const ALL: [DrawerGroup; 6] = [
+    pub const ALL: [DrawerGroup; 7] = [
         DrawerGroup::Tools,
         DrawerGroup::Inspector,
+        DrawerGroup::Typography,
         DrawerGroup::Modify,
         DrawerGroup::Arrange,
         DrawerGroup::Assets,
@@ -1146,6 +1163,7 @@ impl DrawerGroup {
         match self {
             DrawerGroup::Tools => ph::TOOLBOX,
             DrawerGroup::Inspector => ph::SLIDERS_HORIZONTAL,
+            DrawerGroup::Typography => ph::TEXT_T,
             DrawerGroup::Modify => ph::MAGIC_WAND,
             DrawerGroup::Arrange => ph::ARROWS_OUT_CARDINAL,
             DrawerGroup::Assets => ph::SWATCHES,
@@ -1159,6 +1177,7 @@ impl DrawerGroup {
         match self {
             DrawerGroup::Tools => "Tools",
             DrawerGroup::Inspector => "Inspector",
+            DrawerGroup::Typography => "Typography",
             DrawerGroup::Modify => "Modify",
             DrawerGroup::Arrange => "Arrange",
             DrawerGroup::Assets => "Assets",
@@ -1176,6 +1195,7 @@ impl DrawerGroup {
         match self {
             DrawerGroup::Tools
             | DrawerGroup::Inspector
+            | DrawerGroup::Typography
             | DrawerGroup::Assets
             | DrawerGroup::Document
             | DrawerGroup::History => true,
@@ -1296,6 +1316,7 @@ pub(crate) fn draw_drawer(
             draw_symbol_overrides(ui, ctx);
             draw_text_variable_binding(ui, ctx);
         }
+        DrawerGroup::Typography => draw_typography_panel(ui, ctx),
         DrawerGroup::Modify => {
             draw_combine(ui, ctx);
             draw_boolean_ops(ui, ctx);
