@@ -201,4 +201,32 @@ mod tests {
         assert_eq!(exported[0].tool_name, "tool_1");
         assert!(text.contains("response capped"));
     }
+
+    #[test]
+    fn bounded_list_keeps_newest_entries_and_caps_the_response() {
+        let entries: Vec<_> = (1..=400).map(|id| entry(id, 1024)).rev().collect();
+        let retained = entries.len();
+        let output = serialize_entries_bounded(&entries, |returned, byte_limited| {
+            if byte_limited {
+                format!(
+                    "Last {returned} of {retained} recorded calls (newest first; response capped at {MAX_AUDIT_EXPORT_BYTES} bytes):"
+                )
+            } else {
+                format!("Last {returned} of {retained} recorded calls (newest first):")
+            }
+        })
+        .expect("audit list should serialize");
+
+        assert!(output.len() <= MAX_AUDIT_EXPORT_BYTES);
+        assert!(output.contains("response capped"));
+        let json = output
+            .split_once('\n')
+            .expect("list should have a header")
+            .1;
+        let listed: Vec<AuditEntry> = serde_json::from_str(json).expect("valid list JSON");
+        assert!(!listed.is_empty());
+        assert!(listed.len() < entries.len());
+        assert_eq!(listed[0].id, 400);
+        assert_eq!(listed.last().unwrap().id, 400 - listed.len() as u64 + 1);
+    }
 }
