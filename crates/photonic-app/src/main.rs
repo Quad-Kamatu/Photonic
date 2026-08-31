@@ -14,7 +14,7 @@ use anyhow::Result;
 use args::Args;
 use clap::Parser;
 use egui_wgpu::ScreenDescriptor;
-use photonic_core::{document::Document, history::CommandHistory, AuditLog};
+use photonic_core::{document::Document, history::CommandHistory, AuditLog, PHOTON_FILE_EXTENSION};
 use photonic_gui::{NativeClipboardPaste, PhotonicApp};
 use photonic_mcp::server::AppState;
 use photonic_mcp::{McpServer, McpServerConfig, MCP_SECRET_HEADER};
@@ -43,7 +43,7 @@ use winit::{
 fn native_project_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(PHOTON_FILE_EXTENSION))
         .then(|| path.to_path_buf())
 }
 
@@ -1119,7 +1119,8 @@ fn register_file_association() {
     };
 
     // .photon → ProgID
-    if let Ok((ext, _)) = classes.create_subkey(".photon") {
+    let extension_key = format!(".{PHOTON_FILE_EXTENSION}");
+    if let Ok((ext, _)) = classes.create_subkey(&extension_key) {
         let _ = ext.set_value("", &"PhotonicDocument");
     }
 
@@ -1148,7 +1149,10 @@ fn register_file_association() {
         );
     }
 
-    tracing::info!("file assoc: .photon registered → PhotonicDocument");
+    tracing::info!(
+        "file assoc: .{} registered → PhotonicDocument",
+        PHOTON_FILE_EXTENSION
+    );
 }
 
 #[cfg(not(windows))]
@@ -1686,5 +1690,27 @@ mod mcp_config_tests {
         assert_eq!(std::fs::read(&path).unwrap(), br#"{"secret":"private"}"#);
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod file_lifecycle_tests {
+    use super::native_project_path;
+    use photonic_core::PHOTON_FILE_EXTENSION;
+    use std::path::Path;
+
+    #[test]
+    fn native_project_path_matches_the_canonical_extension() {
+        assert_eq!(PHOTON_FILE_EXTENSION, "photon");
+        assert_eq!(
+            native_project_path(Path::new("project.photon")),
+            Some(Path::new("project.photon").to_path_buf())
+        );
+        assert_eq!(
+            native_project_path(Path::new("PROJECT.PHOTON")),
+            Some(Path::new("PROJECT.PHOTON").to_path_buf())
+        );
+        assert_eq!(native_project_path(Path::new("project.photonic")), None);
+        assert_eq!(native_project_path(Path::new("artwork.svg")), None);
     }
 }

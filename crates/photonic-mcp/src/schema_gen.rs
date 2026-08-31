@@ -2437,7 +2437,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "add_annotation",
-            "description": "Attach a non-printing text comment to a node or to the document as a whole.\n\nAnnotations are stored in the `.photonic` file but are completely invisible in all export formats (SVG, PNG, ICO). They are not part of the undo/redo history.\n\nUse cases:\n- AI agents recording *why* a design decision was made: \"Chose this radius because the brief said 'approachable'.\"\n- Human reviewers leaving redline feedback: \"This stroke weight should match the header.\"\n- Cross-session notes that survive save/reload.\n\nReturns the new `annotation_id` UUID.",
+            "description": "Attach a non-printing text comment to a node or to the document as a whole.\n\nAnnotations are stored in the `.photon` file but are completely invisible in all export formats (SVG, PNG, ICO). They are not part of the undo/redo history.\n\nUse cases:\n- AI agents recording *why* a design decision was made: \"Chose this radius because the brief said 'approachable'.\"\n- Human reviewers leaving redline feedback: \"This stroke weight should match the header.\"\n- Cross-session notes that survive save/reload.\n\nReturns the new `annotation_id` UUID.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4232,7 +4232,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_document_bleed",
-            "description": "Set the print bleed and/or slug margins for the document. Bleed is the extra artwork bled past the trim edge (typically 3 mm) to prevent white borders after cutting. Slug is the additional area outside bleed reserved for printer marks and file info. Values persist in the .photonic file. Provide only the fields you want to change.",
+            "description": "Set the print bleed and/or slug margins for the document. Bleed is the extra artwork bled past the trim edge (typically 3 mm) to prevent white borders after cutting. Slug is the additional area outside bleed reserved for printer marks and file info. Values persist in the .photon file. Provide only the fields you want to change.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4249,7 +4249,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_document_color_mode",
-            "description": "Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photonic file and is used as the default color space when exporting PDF without an explicit color_mode override.",
+            "description": "Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photon file and is used as the default color space when exporting PDF without an explicit color_mode override.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4265,7 +4265,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_document_dpi",
-            "description": "Set the document resolution (DPI) — the honored physical-size property on export: exported PDF/raster physical size = pixel size / dpi × 72 pt. A 1050×600 px document at 300 DPI exports at 252×144 pt (3.5×2 in); the same pixels at 72 DPI export at 1050×600 pt. Presets set this automatically (e.g. 300 for print). Default is 72 (px ≡ pt). Persists in the .photonic file.",
+            "description": "Set the document resolution (DPI) — the honored physical-size property on export: exported PDF/raster physical size = pixel size / dpi × 72 pt. A 1050×600 px document at 300 DPI exports at 252×144 pt (3.5×2 in); the same pixels at 72 DPI export at 1050×600 pt. Presets set this automatically (e.g. 300 for print). Default is 72 (px ≡ pt). Persists in the .photon file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
