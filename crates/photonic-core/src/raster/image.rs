@@ -25,25 +25,50 @@ pub struct RasterImage {
     pub pixels: Vec<u8>,
 }
 
+/// Maximum width or height accepted by MCP raster operations.
+pub const MAX_RASTER_DIMENSION: u32 = 16_384;
+/// Maximum number of RGBA pixels accepted by MCP raster operations.
+pub const MAX_RASTER_PIXELS: usize = 64 * 1024 * 1024;
+
 impl RasterImage {
     /// A fully transparent image of the given size.
     pub fn new(width: u32, height: u32) -> Self {
         let w = width.max(1);
         let h = height.max(1);
-        Self {
-            width: w,
-            height: h,
-            pixels: vec![0u8; (w as usize) * (h as usize) * 4],
-        }
+        Self::try_new(w, h).unwrap_or_else(|error| panic!("invalid raster dimensions: {error}"))
+    }
+
+    /// A fully transparent image of the given size, returning errors instead of
+    /// panicking when the RGBA buffer length cannot be represented or allocated.
+    pub fn try_new(width: u32, height: u32) -> Result<Self, String> {
+        let pixel_len = checked_pixel_len(width, height)?;
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(pixel_len)
+            .map_err(|error| format!("could not allocate raster pixel buffer: {error}"))?;
+        pixels.resize(pixel_len, 0);
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
     }
 
     /// An image filled with a single RGBA color.
     pub fn filled(width: u32, height: u32, rgba: [u8; 4]) -> Self {
-        let mut img = Self::new(width, height);
+        let w = width.max(1);
+        let h = height.max(1);
+        Self::try_filled(w, h, rgba)
+            .unwrap_or_else(|error| panic!("invalid raster dimensions: {error}"))
+    }
+
+    /// An image filled with a single RGBA color, returning allocation errors.
+    pub fn try_filled(width: u32, height: u32, rgba: [u8; 4]) -> Result<Self, String> {
+        let mut img = Self::try_new(width, height)?;
         for px in img.pixels.chunks_exact_mut(4) {
             px.copy_from_slice(&rgba);
         }
-        img
+        Ok(img)
     }
 
     /// Build from raw RGBA bytes. Errors if the length doesn't match `w*h*4`.
@@ -227,6 +252,28 @@ fn checked_pixel_len(width: u32, height: u32) -> Result<usize, String> {
         .ok_or_else(|| "image dimensions overflow pixel buffer length".to_string())
 }
 
+/// Validate raster dimensions before a caller-controlled operation allocates or
+/// resizes an RGBA image. The returned error is suitable for surfacing through an
+/// MCP tool result.
+pub fn validate_raster_dimensions(width: u32, height: u32) -> Result<(), String> {
+    let pixel_len = checked_pixel_len(width, height)?;
+    if width > MAX_RASTER_DIMENSION || height > MAX_RASTER_DIMENSION {
+        return Err(format!(
+            "raster dimensions {}x{} exceed the maximum of {}x{}",
+            width, height, MAX_RASTER_DIMENSION, MAX_RASTER_DIMENSION
+        ));
+    }
+
+    let pixels = pixel_len / 4;
+    if pixels > MAX_RASTER_PIXELS {
+        return Err(format!(
+            "raster dimensions {}x{} contain {} pixels, exceeding the {}-pixel budget",
+            width, height, pixels, MAX_RASTER_PIXELS
+        ));
+    }
+    Ok(())
+}
+
 // ── sRGB luminance ─────────────────────────────────────────────────────────────
 
 /// Perceptual luma (Rec. 601) of an sRGB pixel, 0..1.
@@ -317,6 +364,22 @@ mod tests {
     fn from_rgba_validates_length() {
         assert!(RasterImage::from_rgba(2, 2, vec![0; 16]).is_ok());
         assert!(RasterImage::from_rgba(2, 2, vec![0; 15]).is_err());
+    }
+
+    #[test]
+    fn raster_dimension_validator_enforces_boundaries() {
+        assert!(validate_raster_dimensions(0, 1).is_err());
+        assert!(validate_raster_dimensions(1, 0).is_err());
+        assert!(validate_raster_dimensions(MAX_RASTER_DIMENSION, 1).is_ok());
+        assert!(validate_raster_dimensions(MAX_RASTER_DIMENSION + 1, 1).is_err());
+        assert!(validate_raster_dimensions(8192, 8192).is_ok());
+        assert!(validate_raster_dimensions(8193, 8192).is_err());
+    }
+
+    #[test]
+    fn try_new_rejects_pixel_buffer_length_overflow() {
+        let error = RasterImage::try_new(u32::MAX, u32::MAX).unwrap_err();
+        assert!(error.contains("overflow"), "unexpected error: {error}");
     }
 
     #[test]

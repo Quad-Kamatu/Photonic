@@ -1016,12 +1016,12 @@ Useful for comparing profiles (skills, stats, attributes) across multiple subjec
 
 ## `create_raster_layer`
 
-Create a blank raster (pixel) layer of a given size — a transparent canvas to paint on, or filled with a solid color. Edit with brush_stroke, gradient_fill, apply_filter, etc.
+Create a blank raster (pixel) layer of a given size — a transparent canvas to paint on, or filled with a solid color. Edit with brush_stroke, gradient_fill, apply_filter, etc. Dimensions are limited to 16384 pixels per side and 67108864 pixels total.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `height` | integer | yes | Height in pixels |
-| `width` | integer | yes | Width in pixels |
+| `height` | integer | yes | Height in pixels (maximum 16384; width × height maximum 67108864) |
+| `width` | integer | yes | Width in pixels (maximum 16384; width × height maximum 67108864) |
 | `fill` | any | no | Optional fill color: hex string (#rrggbb / #rrggbbaa) or [r,g,b,a] (0-255). Default: transparent. |
 | `layer_id` | string | no |  |
 | `name` | string | no |  |
@@ -1652,15 +1652,15 @@ Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF). Ret
 
 PNG is lossless with optional transparency. JPEG is lossy with configurable quality (1–100) and always has a white background. WebP is lossy with transparency support and configurable quality. TIFF is lossless with full RGBA support, suitable for print workflows. Use this to obtain a file-ready raster export without the GUI file menu.
 
-Optionally specify width/height to resize the output. If omitted, the capture uses the current canvas dimensions.
+Optionally specify width/height to resize the output. Each supplied dimension is limited to 16384 pixels per side and a paired resize is limited to 67108864 pixels total. If omitted, the capture uses the current canvas dimensions.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `format` | enum (`png`, `jpeg`, `webp`, `gif`, `tiff`) | no | Output format (default: png) |
-| `height` | integer | no | Output height in pixels. Omit to use current canvas height. |
+| `height` | integer | no | Output height in pixels (maximum 16384; paired resize maximum 67108864 pixels). Omit to use current canvas height. |
 | `path` | string | no | Write the encoded image to this filesystem path (parent dirs created) and return a small result (path + width/height) instead of base64. Omit to return base64 inline. Use this for full-resolution PNGs, whose base64 is too large for the MCP socket. |
 | `quality` | integer | no | JPEG/WebP quality 1–100 (default: 90 for JPEG, 80 for WebP). Ignored for PNG. |
-| `width` | integer | no | Output width in pixels. Omit to use current canvas width. |
+| `width` | integer | no | Output width in pixels (maximum 16384; paired resize maximum 67108864 pixels). Omit to use current canvas width. |
 
 ## `export_selection_as_svg`
 

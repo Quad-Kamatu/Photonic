@@ -251,7 +251,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_raster_layer",
-            "description": "Create a blank raster (pixel) layer of a given size — a transparent canvas to paint on, or filled with a solid color. Edit with brush_stroke, gradient_fill, apply_filter, etc.",
+            "description": "Create a blank raster (pixel) layer of a given size — a transparent canvas to paint on, or filled with a solid color. Edit with brush_stroke, gradient_fill, apply_filter, etc. Dimensions are limited to 16384 pixels per side and 67108864 pixels total.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1906,7 +1906,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "export_raster",
-            "description": "Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF). Returns the image data as a base64-encoded string, OR — when `path` is given — writes the image to disk and returns only a small result (path + dimensions), keeping full-resolution PNGs off the socket.\n\nPNG is lossless with optional transparency. JPEG is lossy with configurable quality (1–100) and always has a white background. WebP is lossy with transparency support and configurable quality. TIFF is lossless with full RGBA support, suitable for print workflows. Use this to obtain a file-ready raster export without the GUI file menu.\n\nOptionally specify width/height to resize the output. If omitted, the capture uses the current canvas dimensions.",
+            "description": "Export the current canvas as a raster image (PNG, JPEG, WebP, GIF, or TIFF). Returns the image data as a base64-encoded string, OR — when `path` is given — writes the image to disk and returns only a small result (path + dimensions), keeping full-resolution PNGs off the socket.\n\nPNG is lossless with optional transparency. JPEG is lossy with configurable quality (1–100) and always has a white background. WebP is lossy with transparency support and configurable quality. TIFF is lossless with full RGBA support, suitable for print workflows. Use this to obtain a file-ready raster export without the GUI file menu.\n\nOptionally specify width/height to resize the output. Each supplied dimension is limited to 16384 pixels per side and a paired resize is limited to 67108864 pixels total. If omitted, the capture uses the current canvas dimensions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1917,11 +1917,11 @@ pub fn tool_list() -> Value {
                     },
                     "width": {
                         "type": "integer",
-                        "description": "Output width in pixels. Omit to use current canvas width."
+                        "description": "Output width in pixels (maximum 16384; paired resize maximum 67108864 pixels). Omit to use current canvas width."
                     },
                     "height": {
                         "type": "integer",
-                        "description": "Output height in pixels. Omit to use current canvas height."
+                        "description": "Output height in pixels (maximum 16384; paired resize maximum 67108864 pixels). Omit to use current canvas height."
                     },
                     "quality": {
                         "type": "integer",
