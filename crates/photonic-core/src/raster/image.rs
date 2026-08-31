@@ -385,9 +385,12 @@ mod tests {
     }
 
     #[test]
-    fn try_new_rejects_pixel_buffer_length_overflow() {
+    fn try_new_rejects_extreme_dimensions() {
         let error = RasterImage::try_new(u32::MAX, u32::MAX).unwrap_err();
-        assert!(error.contains("overflow"), "unexpected error: {error}");
+        assert!(
+            error.contains("overflow") || error.contains("exceed maximum"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -407,7 +410,7 @@ mod tests {
         let encoded = RasterImage::new(MAX_RASTER_DIMENSION + 1, 1).to_png();
         let err = RasterImage::from_encoded(&encoded).unwrap_err();
 
-        assert!(err.to_ascii_lowercase().contains("limit"), "{err}");
+        assert!(err.contains("exceed the maximum"), "{err}");
     }
 
     #[test]
