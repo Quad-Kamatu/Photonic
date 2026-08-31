@@ -7,6 +7,14 @@
 
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::io::Cursor;
+
+/// Maximum number of pixels in one persisted raster image or mask.
+///
+/// This keeps decoded project data bounded while still allowing the largest
+/// built-in 24×36 inch, 300-DPI print preset (77,760,000 pixels).
+pub(crate) const MAX_RASTER_PIXELS: usize = 100_000_000;
+const MAX_DECODE_BYTES: u64 = (MAX_RASTER_PIXELS as u64) * 4;
 
 /// An 8-bit RGBA raster image with straight alpha.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +70,7 @@ impl RasterImage {
 
     /// Decode a PNG/JPEG/WebP/etc. encoded image into an RGBA8 buffer.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, String> {
-        let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+        let img = decode_encoded(bytes)?;
         let rgba = img.to_rgba8();
         let (width, height) = rgba.dimensions();
         Self::from_rgba(width, height, rgba.into_raw())
@@ -176,13 +184,46 @@ impl RasterImage {
     }
 }
 
+fn decode_encoded(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    // Read only the encoded header first so a malicious image cannot make the
+    // decoder allocate its full pixel buffer before the project limit is known.
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let (width, height) = reader.into_dimensions().map_err(|e| e.to_string())?;
+    checked_raster_pixel_count(width, height)?;
+
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    reader.decode().map_err(|e| e.to_string())
+}
+
+pub(crate) fn checked_raster_pixel_count(width: u32, height: u32) -> Result<usize, String> {
+    if width == 0 || height == 0 {
+        return Err("raster dimensions must be non-zero".to_string());
+    }
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "raster dimensions overflow pixel count".to_string())?;
+    if pixels > MAX_RASTER_PIXELS {
+        return Err(format!(
+            "raster dimensions {}x{} exceed maximum of {} pixels",
+            width, height, MAX_RASTER_PIXELS
+        ));
+    }
+    Ok(pixels)
+}
+
 fn checked_pixel_len(width: u32, height: u32) -> Result<usize, String> {
     if width == 0 || height == 0 {
         return Err("image dimensions must be non-zero".to_string());
     }
-    (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
+    checked_raster_pixel_count(width, height)?
+        .checked_mul(4)
         .ok_or_else(|| "image dimensions overflow pixel buffer length".to_string())
 }
 
@@ -219,6 +260,8 @@ impl Serialize for RasterImage {
 impl<'de> Deserialize<'de> for RasterImage {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let repr = RasterImageRepr::deserialize(d)?;
+        let expected =
+            checked_pixel_len(repr.width, repr.height).map_err(serde::de::Error::custom)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(repr.png.as_bytes())
             .map_err(serde::de::Error::custom)?;
@@ -229,8 +272,6 @@ impl<'de> Deserialize<'de> for RasterImage {
                 repr.width, repr.height, img.width, img.height
             )));
         }
-        let expected =
-            checked_pixel_len(repr.width, repr.height).map_err(serde::de::Error::custom)?;
         if img.pixels.len() != expected {
             return Err(serde::de::Error::custom(format!(
                 "pixel buffer length {} does not match {}x{}x4 = {}",
@@ -309,6 +350,16 @@ mod tests {
 
         let err = serde_json::from_value::<RasterImage>(value).unwrap_err();
         assert!(err.to_string().contains("do not match decoded dimensions"));
+    }
+
+    #[test]
+    fn serde_rejects_oversized_dimensions_before_decoding() {
+        let img = RasterImage::filled(1, 1, [1, 2, 3, 255]);
+        let mut value = serde_json::to_value(&img).unwrap();
+        value["width"] = serde_json::json!((MAX_RASTER_PIXELS + 1) as u64);
+
+        let err = serde_json::from_value::<RasterImage>(value).unwrap_err();
+        assert!(err.to_string().contains("exceed maximum"));
     }
 
     #[test]
