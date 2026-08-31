@@ -390,7 +390,7 @@ impl PhotonicApp {
                                 match boolean_op(&acc, p, bool_op) {
                                     Ok(r) => acc = r,
                                     Err(e) => {
-                                        err = Some(e);
+                                        err = Some(e.to_string());
                                         break;
                                     }
                                 }
@@ -1538,36 +1538,44 @@ impl PhotonicApp {
                                     &front_pn.path_data,
                                     front_node.transform.to_kurbo(),
                                 );
-                                let faces = divide_paths(&back_baked, &front_baked);
-                                if !faces.is_empty() {
-                                    let target_layer = back_node.layer_id;
-                                    let source_pns: [&PathNode; 2] = [back_pn, front_pn];
-                                    let source_nodes: [&SceneNode; 2] = [&back_node, &front_node];
-                                    let mut cmds: Vec<Command> = Vec::new();
-                                    cmds.push(Command::RemoveNode { node_id: back_id });
-                                    cmds.push(Command::RemoveNode { node_id: front_id });
-                                    for (i, (path_data, source_idx)) in
-                                        faces.into_iter().enumerate()
-                                    {
-                                        let src_pn = source_pns[source_idx];
-                                        let src_node = source_nodes[source_idx];
-                                        let mut new_pn = src_pn.clone();
-                                        new_pn.path_data = path_data;
-                                        let mut new_node = SceneNode::new(
-                                            format!("{} face {}", src_node.name, i + 1),
-                                            target_layer,
-                                            SceneNodeKind::Path(new_pn),
-                                        );
-                                        new_node.opacity = src_node.opacity;
-                                        new_node.blend_mode = src_node.blend_mode;
-                                        new_node.tags = src_node.tags.clone();
-                                        cmds.push(Command::AddNode {
-                                            node: new_node,
-                                            layer_id: Some(target_layer),
-                                        });
+                                match divide_paths(&back_baked, &front_baked) {
+                                    Ok(faces) if !faces.is_empty() => {
+                                        let target_layer = back_node.layer_id;
+                                        let source_pns: [&PathNode; 2] = [back_pn, front_pn];
+                                        let source_nodes: [&SceneNode; 2] =
+                                            [&back_node, &front_node];
+                                        let mut cmds: Vec<Command> = Vec::new();
+                                        cmds.push(Command::RemoveNode { node_id: back_id });
+                                        cmds.push(Command::RemoveNode { node_id: front_id });
+                                        for (i, (path_data, source_idx)) in
+                                            faces.into_iter().enumerate()
+                                        {
+                                            let src_pn = source_pns[source_idx];
+                                            let src_node = source_nodes[source_idx];
+                                            let mut new_pn = src_pn.clone();
+                                            new_pn.path_data = path_data;
+                                            let mut new_node = SceneNode::new(
+                                                format!("{} face {}", src_node.name, i + 1),
+                                                target_layer,
+                                                SceneNodeKind::Path(new_pn),
+                                            );
+                                            new_node.opacity = src_node.opacity;
+                                            new_node.blend_mode = src_node.blend_mode;
+                                            new_node.tags = src_node.tags.clone();
+                                            cmds.push(Command::AddNode {
+                                                node: new_node,
+                                                layer_id: Some(target_layer),
+                                            });
+                                        }
+                                        history.execute(Command::Batch(cmds), doc);
+                                        doc_modified = true;
                                     }
-                                    history.execute(Command::Batch(cmds), doc);
-                                    doc_modified = true;
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        self.file_status = Some(format!(
+                                            "Pathfinder divide failed; document unchanged: {error}"
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1760,20 +1768,34 @@ impl PhotonicApp {
                                                 &target_pn.path_data,
                                                 target_node.transform.to_kurbo(),
                                             );
-                                            let overlap = boolean_op(
+                                            let overlap = match boolean_op(
                                                 &target_baked,
                                                 &cutter_baked,
                                                 BooleanOp::Intersect,
-                                            )
-                                            .unwrap_or_else(|_| {
-                                                photonic_core::PathData::from_bez_path(
-                                                    &kurbo::BezPath::new(),
-                                                )
-                                            });
+                                            ) {
+                                                Ok(overlap) => overlap,
+                                                Err(error) => {
+                                                    self.file_status = Some(format!(
+                                                        "Divide objects failed; document unchanged: {error}"
+                                                    ));
+                                                    continue 'actions;
+                                                }
+                                            };
                                             if overlap.is_empty() {
                                                 continue;
                                             }
-                                            let faces = divide_paths(&target_baked, &cutter_baked);
+                                            let faces = match divide_paths(
+                                                &target_baked,
+                                                &cutter_baked,
+                                            ) {
+                                                Ok(faces) => faces,
+                                                Err(error) => {
+                                                    self.file_status = Some(format!(
+                                                        "Divide objects failed; document unchanged: {error}"
+                                                    ));
+                                                    continue 'actions;
+                                                }
+                                            };
                                             cmds.push(Command::RemoveNode {
                                                 node_id: *target_id,
                                             });

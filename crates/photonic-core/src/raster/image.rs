@@ -43,10 +43,7 @@ impl RasterImage {
         // A RasterImage is always at least 1×1: reject zero dimensions rather
         // than build a degenerate buffer whose stored size disagrees with its
         // length (which would panic on the next pixel access).
-        if width == 0 || height == 0 {
-            return Err("image dimensions must be non-zero".to_string());
-        }
-        let expected = (width as usize) * (height as usize) * 4;
+        let expected = checked_pixel_len(width, height)?;
         if pixels.len() != expected {
             return Err(format!(
                 "pixel buffer length {} does not match {}x{}x4 = {}",
@@ -68,11 +65,7 @@ impl RasterImage {
         let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
         let rgba = img.to_rgba8();
         let (width, height) = rgba.dimensions();
-        Ok(Self {
-            width: width.max(1),
-            height: height.max(1),
-            pixels: rgba.into_raw(),
-        })
+        Self::from_rgba(width, height, rgba.into_raw())
     }
 
     /// Encode the image as PNG bytes.
@@ -183,6 +176,16 @@ impl RasterImage {
     }
 }
 
+fn checked_pixel_len(width: u32, height: u32) -> Result<usize, String> {
+    if width == 0 || height == 0 {
+        return Err("image dimensions must be non-zero".to_string());
+    }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "image dimensions overflow pixel buffer length".to_string())
+}
+
 // ── sRGB luminance ─────────────────────────────────────────────────────────────
 
 /// Perceptual luma (Rec. 601) of an sRGB pixel, 0..1.
@@ -219,11 +222,23 @@ impl<'de> Deserialize<'de> for RasterImage {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(repr.png.as_bytes())
             .map_err(serde::de::Error::custom)?;
-        let mut img = RasterImage::from_encoded(&bytes).map_err(serde::de::Error::custom)?;
-        // Trust the stored dims if decode disagrees (defensive, should match).
+        let img = RasterImage::from_encoded(&bytes).map_err(serde::de::Error::custom)?;
         if img.width != repr.width || img.height != repr.height {
-            img.width = repr.width.max(1);
-            img.height = repr.height.max(1);
+            return Err(serde::de::Error::custom(format!(
+                "stored image dimensions {}x{} do not match decoded dimensions {}x{}",
+                repr.width, repr.height, img.width, img.height
+            )));
+        }
+        let expected =
+            checked_pixel_len(repr.width, repr.height).map_err(serde::de::Error::custom)?;
+        if img.pixels.len() != expected {
+            return Err(serde::de::Error::custom(format!(
+                "pixel buffer length {} does not match {}x{}x4 = {}",
+                img.pixels.len(),
+                repr.width,
+                repr.height,
+                expected
+            )));
         }
         Ok(img)
     }
@@ -283,6 +298,17 @@ mod tests {
         assert!(json.contains("\"png\""));
         let back: RasterImage = serde_json::from_str(&json).unwrap();
         assert_eq!(img, back);
+    }
+
+    #[test]
+    fn serde_rejects_forged_dimensions() {
+        let img = RasterImage::filled(1, 1, [1, 2, 3, 255]);
+        let mut value = serde_json::to_value(&img).unwrap();
+        value["width"] = serde_json::json!(2);
+        value["height"] = serde_json::json!(2);
+
+        let err = serde_json::from_value::<RasterImage>(value).unwrap_err();
+        assert!(err.to_string().contains("do not match decoded dimensions"));
     }
 
     #[test]

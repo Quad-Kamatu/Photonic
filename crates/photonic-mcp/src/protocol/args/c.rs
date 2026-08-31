@@ -4,6 +4,119 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Arguments for the native CSS-to-editable-vector compiler (#251).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateVectorsFromCssArgs {
+    pub css: String,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub origin: Option<CssPointArg>,
+    #[serde(default)]
+    pub viewport: Option<CssViewportArg>,
+    #[serde(default)]
+    pub layer_id: Option<Uuid>,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default = "default_css_strict")]
+    pub strict: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct CssPointArg {
+    pub x: f64,
+    pub y: f64,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct CssViewportArg {
+    pub width: f64,
+    pub height: f64,
+}
+fn default_css_strict() -> bool {
+    true
+}
+
+/// Arguments for the bounded JSX + Tailwind component importer (#252).
+/// This is deliberately source-only: it never evaluates JavaScript, follows
+/// imports, or loads a Tailwind configuration from the host machine.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateVectorsFromReactArgs {
+    /// A static JSX fragment containing intrinsic HTML elements only.
+    #[serde(default)]
+    pub jsx: Option<String>,
+    /// Untouched module source for one of the explicitly supported static
+    /// snapshots.  Source is parsed as text only; it is never evaluated.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Pinned literal data used to resolve a bounded dynamic collection (for
+    /// example the catalogue passed to `tiles.map`).
+    #[serde(default)]
+    pub snapshot: Option<ReactSnapshotArg>,
+    /// Local entry module. It and every resolved module must be underneath
+    /// `module_roots`; this importer never fetches network source.
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
+    pub export_name: Option<String>,
+    /// JSON-only static props snapshot. No functions, expressions or hooks.
+    #[serde(default)]
+    pub props: Option<Value>,
+    #[serde(default)]
+    pub module_roots: Vec<String>,
+    #[serde(default)]
+    pub theme_tokens: Option<ReactThemeTokensArg>,
+    /// Event-handler policy for file-backed snapshots. By default any rendered
+    /// handler is rejected. `strip` removes handlers without executing them and
+    /// records each removed interaction in diagnostics and provenance.
+    #[serde(default)]
+    pub interaction_policy: Option<String>,
+    /// Explicit values for bounded conditional content in resolved wrappers.
+    /// For the kiosk slice, backgroundImage must be null and
+    /// enableInactivity must be false.
+    #[serde(default)]
+    pub dynamic_content: Option<Value>,
+    #[serde(default)]
+    pub origin: Option<CssPointArg>,
+    #[serde(default)]
+    pub viewport: Option<CssViewportArg>,
+    #[serde(default)]
+    pub layer_id: Option<Uuid>,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default = "default_css_strict")]
+    pub strict: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactThemeTokensArg {
+    #[serde(default)]
+    pub card: Option<String>,
+    #[serde(default)]
+    pub foreground: Option<String>,
+    #[serde(default)]
+    pub muted_foreground: Option<String>,
+    #[serde(default)]
+    pub border: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactSnapshotArg {
+    /// The only currently supported template: `bgch-hub-app-directory-v1`.
+    pub template: String,
+    #[serde(default)]
+    pub tiles: Vec<ReactSnapshotTileArg>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactSnapshotTileArg {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
 /// Arguments for the `set_paint` tool — apply one paint to many nodes at once,
 /// each re-fit to its own bounding box (issue #202). The paint uses the same
 /// object shape as `fill`; a gradient may set `"units": "bbox"` with 0–1 coords

@@ -81,6 +81,25 @@ pub async fn apply_transform(state: &AppState, args: ApplyTransformArgs) -> Tool
     );
     use photonic_core::{ops::transform_ops, transform::Transform};
 
+    let missing_parameter = match args.operation {
+        TransformOperation::Translate if args.translate.is_none() => Some("translate"),
+        TransformOperation::Rotate if args.rotate.is_none() => Some("rotate"),
+        TransformOperation::Scale if args.scale.is_none() => Some("scale"),
+        TransformOperation::Matrix if args.matrix.is_none() => Some("matrix"),
+        TransformOperation::Shear if args.shear.is_none() => Some("shear"),
+        _ => None,
+    };
+    if let Some(parameter) = missing_parameter {
+        return ToolResult::error(format!(
+            "apply_transform operation requires the '{parameter}' parameter"
+        ));
+    }
+    if let Some(matrix) = args.matrix {
+        if !matrix.iter().all(|coefficient| coefficient.is_finite()) {
+            return ToolResult::error("Transform matrix coefficients must be finite");
+        }
+    }
+
     // Read phase: collect the nodes we need, then release the doc lock immediately.
     // Holding a tokio MutexGuard across `.await` blocks the render thread's
     // blocking_lock() call for the entire duration of the loop — causing the
@@ -107,6 +126,23 @@ pub async fn apply_transform(state: &AppState, args: ApplyTransformArgs) -> Tool
     // Prepare phase: compute every transform in-place — no locks held.
     let mut commands: Vec<Command> = Vec::with_capacity(old_nodes.len());
     for node in old_nodes {
+        if let SceneNodeKind::Path(path) = &node.kind {
+            let parsed = match path.path_data.try_to_bez_path() {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return ToolResult::error(format!(
+                        "Cannot transform path node {}: invalid geometry: {}",
+                        node.id, error
+                    ))
+                }
+            };
+            if parsed.segments().next().is_none() {
+                return ToolResult::error(format!(
+                    "Cannot transform path node {}: path has no drawable geometry",
+                    node.id
+                ));
+            }
+        }
         let old = node.clone();
         let mut new_node = node;
         match &args.operation {
@@ -2603,6 +2639,7 @@ pub async fn rotate_copies(state: &AppState, args: RotateCopiesArgs) -> ToolResu
 mod tests {
     use super::*;
     use crate::server::{AppState, McpServerConfig};
+    use kurbo::Shape;
     use photonic_core::{
         color::Color,
         node::PathNode,
@@ -2641,6 +2678,23 @@ mod tests {
                 GradientStop::new(1.0, Color::WHITE),
             ],
         )
+    }
+
+    const DANCER_CONTOUR: &str = "M714.6176303490295,407.12902770204585C719.0967149614303,407.12902770204585 718.2340759953883,407.60282833073194 725.4573601610513,400.88144525891346C726.144894070665,400.2416838047889 725.8049499944054,394.8349653218793 725.9927741786374,394.8349653218793C725.9927741786374,394.8349653218793 725.9927741786374,394.8349653218793 720.7035937499999,397.68125C720.7035937499999,397.68125 720.70359375,397.68124999999986 709.0400444299803,406.0971033737129C709.0400444299803,406.0971033737129 709.0400444299802,406.09710337371297 709.0400444299802,406.09710337371297Z";
+
+    async fn seed_dancer_contour(state: &AppState) -> uuid::Uuid {
+        let mut doc = state.document.lock().await;
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let node = SceneNode::new(
+            "dancer contour",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(
+                PathData::from_svg(DANCER_CONTOUR).expect("real compact contour parses"),
+            )),
+        );
+        let id = node.id;
+        doc.add_node(node, Some(layer_id));
+        id
     }
 
     async fn seed_gradient_path(state: &AppState) -> uuid::Uuid {
@@ -2745,5 +2799,102 @@ mod tests {
                 vec![50.0, 720.0, 70.0, 720.0]
             )
         );
+    }
+
+    #[tokio::test]
+    async fn matrix_translation_preserves_dancer_geometry_and_translates_world_bounds() {
+        let state = test_state();
+        let id = seed_dancer_contour(&state).await;
+        let (before_path, before_bounds, before_area, before_anchors) = {
+            let doc = state.document.lock().await;
+            let node = &doc.nodes[&id];
+            let SceneNodeKind::Path(path) = &node.kind else {
+                unreachable!()
+            };
+            let bez = path.path_data.to_bez_path();
+            (
+                path.path_data.clone(),
+                node.local_bounds().unwrap(),
+                bez.area().abs(),
+                bez.elements()
+                    .iter()
+                    .filter(|element| !matches!(element, kurbo::PathEl::ClosePath))
+                    .count(),
+            )
+        };
+        let matrix = [1.0, 0.0, 0.0, 1.0, 56.73772898238582, 14.472548564763088];
+        let result = apply_transform(
+            &state,
+            ApplyTransformArgs {
+                node_ids: vec![id],
+                operation: TransformOperation::Matrix,
+                translate: None,
+                rotate: None,
+                scale: None,
+                matrix: Some(matrix),
+                shear: None,
+            },
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{:?}", result.content);
+
+        let doc = state.document.lock().await;
+        let node = &doc.nodes[&id];
+        let SceneNodeKind::Path(path) = &node.kind else {
+            unreachable!()
+        };
+        let after = path.path_data.to_bez_path();
+        assert_eq!(path.path_data, before_path);
+        assert_eq!(node.transform.matrix, matrix);
+        assert_eq!(
+            after
+                .elements()
+                .iter()
+                .filter(|element| !matches!(element, kurbo::PathEl::ClosePath))
+                .count(),
+            before_anchors
+        );
+        assert!((after.area().abs() - before_area).abs() < 1e-9);
+        let local = node.local_bounds().unwrap();
+        assert_eq!(local, before_bounds);
+        let world = node.transform.to_kurbo().transform_rect_bbox(local);
+        assert!((world.x0 - (before_bounds.x0 + matrix[4])).abs() < 1e-9);
+        assert!((world.y0 - (before_bounds.y0 + matrix[5])).abs() < 1e-9);
+        assert!((world.x1 - (before_bounds.x1 + matrix[4])).abs() < 1e-9);
+        assert!((world.y1 - (before_bounds.y1 + matrix[5])).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn transform_rejects_legacy_empty_path_without_mutating_it() {
+        let state = test_state();
+        let id = {
+            let mut doc = state.document.lock().await;
+            let layer_id = doc.active_layer_id.unwrap();
+            let node = SceneNode::new(
+                "empty legacy path",
+                layer_id,
+                SceneNodeKind::Path(PathNode::new(PathData::new())),
+            );
+            let id = node.id;
+            doc.add_node(node, Some(layer_id));
+            id
+        };
+        let result = apply_transform(
+            &state,
+            ApplyTransformArgs {
+                node_ids: vec![id],
+                operation: TransformOperation::Matrix,
+                translate: None,
+                rotate: None,
+                scale: None,
+                matrix: Some([1.0, 0.0, 0.0, 1.0, 10.0, 20.0]),
+                shear: None,
+            },
+        )
+        .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(state.document.lock().await.nodes[&id]
+            .transform
+            .is_identity());
     }
 }

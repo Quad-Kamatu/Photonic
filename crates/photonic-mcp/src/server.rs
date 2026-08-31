@@ -1,12 +1,13 @@
 use crate::dispatch;
 use crate::handlers;
 use crate::handlers::clipboard::ClipboardRing;
-use crate::protocol::envelope::{self, Dialect, ProtocolMode, RpcError, DEFAULT_BODY_LIMIT};
+use crate::protocol::envelope::{self, Dialect, ProtocolMode, RpcError};
 use crate::protocol::*;
 pub use crate::schema_gen::tool_list;
 use axum::{
-    extract::{DefaultBodyLimit, State},
-    http::HeaderMap,
+    extract::{DefaultBodyLimit, Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -16,13 +17,21 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use subtle::ConstantTimeEq;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
+
+/// Header used to authenticate requests when `McpServerConfig::secret` is set.
+pub const MCP_SECRET_HEADER: &str = "x-mcp-secret";
+
+/// Maximum encoded JSON-RPC request size accepted by the MCP endpoint.
+const MCP_REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Configuration for the MCP server.
 #[derive(Debug, Clone)]
 pub struct McpServerConfig {
     pub port: u16,
+    /// Shared secret expected in the [`MCP_SECRET_HEADER`] header, when set.
     pub secret: Option<String>,
     /// Protocol negotiation policy (`dual` default — see `ProtocolMode`).
     pub protocol_mode: crate::protocol::ProtocolMode,
@@ -201,7 +210,7 @@ impl McpServer {
 ///
 /// Deliberately carries NO CORS layer (28 §4 point 1): the server has no
 /// legitimate browser client, so it emits no `access-control-allow-origin`
-/// and answers no preflight. Combined with the bearer requirement below —
+/// and answers no preflight. Combined with the configured-secret requirement below —
 /// which forces a preflight for any cross-origin caller — that closes the
 /// "any page you visit can drive your editor" vector. Neither half suffices
 /// alone.
@@ -210,39 +219,39 @@ impl McpServer {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp))
-        // Cap request body size (DoS / huge tool args) before JSON parse.
-        .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
-        // `route_layer`, not `layer`: auth runs only for matched routes (so
-        // unknown paths still 404 without touching the auth path) and, more
-        // importantly, runs BEFORE `handle_mcp` deserializes the body, so an
-        // unauthenticated caller cannot probe the JSON-RPC parser.
-        .route_layer(axum::middleware::from_fn_with_state(
+        // Authenticate the request metadata before any body extractor runs.
+        .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            require_bearer,
+            require_authentication,
         ))
+        .layer(DefaultBodyLimit::max(MCP_REQUEST_BODY_LIMIT))
         .with_state(state)
 }
 
-/// Rejects every request that does not present the session token
-/// (28 §4 point 2).
-///
-/// On rejection this returns a bare 401 — no body, no JSON-RPC error object,
-/// no `WWW-Authenticate` header — so an unauthenticated prober learns nothing
-/// about what is listening. The presented token is never logged.
-async fn require_bearer(
+/// Reject every request that does not present the configured session secret.
+/// Authentication runs before JSON body extraction, so unauthenticated callers
+/// cannot probe the JSON-RPC parser or force large request allocations.
+async fn require_authentication(
     State(state): State<AppState>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
+    request: Request,
+    next: Next,
 ) -> Response {
-    // No secret configured → open. In production `main.rs` always sets one;
-    // this arm exists for `McpServerConfig::default()`, used only by
-    // in-process test states that bypass the transport entirely.
-    let Some(expected) = state.config.secret.as_deref() else {
-        return next.run(req).await;
+    if !is_authorized(request.headers(), state.config.secret.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    next.run(request).await
+}
+
+fn is_authorized(headers: &HeaderMap, secret: Option<&str>) -> bool {
+    let Some(secret) = secret else {
+        return true;
     };
 
-    let presented = req
-        .headers()
+    let header_secret = headers
+        .get(MCP_SECRET_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let bearer_secret = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split_once(' '))
@@ -250,10 +259,10 @@ async fn require_bearer(
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
         .map(|(_, token)| token);
 
-    match presented {
-        Some(token) if crate::auth::token_eq(token, expected) => next.run(req).await,
-        _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
-    }
+    [header_secret, bearer_secret]
+        .into_iter()
+        .flatten()
+        .any(|provided| bool::from(secret.as_bytes().ct_eq(provided.as_bytes())))
 }
 
 /// Main MCP JSON-RPC handler (HTTP).
@@ -270,7 +279,16 @@ async fn handle_mcp(
         .get("mcp-name")
         .or_else(|| headers.get("Mcp-Name"))
         .and_then(|v| v.to_str().ok());
+    let is_notification = req.id.is_none();
     match process_rpc_request(state, req, header_method, header_name).await {
+        Ok(resp) if is_notification => {
+            let _ = resp;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err((_, resp)) if is_notification => {
+            let _ = resp;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(resp) => Json(resp).into_response(),
         Err((status, resp)) => (status, Json(resp)).into_response(),
     }
@@ -418,3 +436,222 @@ async fn dispatch_method(
 }
 
 pub(crate) use crate::dispatch::dispatch_tool_inner;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::clipboard::new_clipboard_ring;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, Method, Request},
+    };
+    use photonic_core::{history::CommandHistory, AuditLog, Document};
+    use serde_json::json;
+    use std::sync::{mpsc, Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+    use tower::util::ServiceExt;
+
+    fn test_state(secret: Option<&str>) -> AppState {
+        let (tx, _rx) = mpsc::channel();
+        AppState {
+            document: Arc::new(Mutex::new(Document::new("auth test", 200.0, 100.0))),
+            history: Arc::new(Mutex::new(CommandHistory::new(100))),
+            document_path: Arc::new(StdMutex::new(None)),
+            capture_tx: Arc::new(StdMutex::new(tx)),
+            config: McpServerConfig {
+                port: 7842,
+                secret: secret.map(str::to_owned),
+                protocol_mode: ProtocolMode::Dual,
+            },
+            path_policy: PathPolicy::test_default(),
+            audit_log: Arc::new(StdMutex::new(AuditLog::new())),
+            clipboard_ring: Arc::new(new_clipboard_ring()),
+            video_engine: Arc::new(handlers::video_jobs::VideoEngineHandle::new()),
+            video_jobs: Arc::new(StdMutex::new(handlers::video_jobs::JobRegistry::new())),
+        }
+    }
+
+    fn save_request(path: &std::path::Path, secret: Option<&str>) -> axum::http::Request<Body> {
+        let mut builder = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(secret) = secret {
+            builder = builder.header(MCP_SECRET_HEADER, secret);
+        }
+        builder
+            .body(Body::from(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "save_document",
+                        "arguments": { "path": path }
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configured_secret_rejects_missing_and_incorrect_headers_before_dispatch() {
+        let base = std::env::temp_dir().join(format!("photonic-mcp-auth-{}", uuid::Uuid::new_v4()));
+        let path = base.join("missing.photon");
+        let state = test_state(Some("correct-secret"));
+        let app = build_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(save_request(&path, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!path.exists(), "unauthenticated request must not dispatch");
+
+        let response = app
+            .clone()
+            .oneshot(save_request(&path, Some("wrong-secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!path.exists(), "incorrect secret must not dispatch");
+
+        let response = app
+            .oneshot(save_request(&path, Some("correct-secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(path.exists(), "authenticated request should dispatch");
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_oversized_body_is_rejected_before_body_extraction() {
+        let app = build_router(test_state(Some("correct-secret")));
+        let oversized_body = vec![b' '; MCP_REQUEST_BODY_LIMIT + 1];
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn authenticated_oversized_body_is_capped() {
+        let app = build_router(test_state(Some("correct-secret")));
+        let oversized_body = vec![b' '; MCP_REQUEST_BODY_LIMIT + 1];
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(MCP_SECRET_HEADER, "correct-secret")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn no_secret_preserves_local_development_behavior() {
+        let base =
+            std::env::temp_dir().join(format!("photonic-mcp-no-auth-{}", uuid::Uuid::new_v4()));
+        let path = base.join("allowed.photon");
+        let app = build_router(test_state(None));
+
+        let response = app.oneshot(save_request(&path, None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(path.exists());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    async fn post_json(request: Value) -> (StatusCode, Vec<u8>) {
+        let response = build_router(test_state(None))
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn initialized_notification_returns_no_content() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notification_errors_emit_no_response_bytes() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_returns_id_matched_json_rpc_response() {
+        let (status, body) = post_json(json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize"
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        assert!(response["result"].is_object());
+        assert!(response.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_endpoint_does_not_enable_cross_origin_requests() {
+        let app = build_router(test_state(None));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/mcp")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "content-type, x-mcp-secret",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert!(!response
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+}

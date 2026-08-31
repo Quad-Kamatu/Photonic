@@ -17,8 +17,13 @@ impl PathData {
 
     /// Construct from an SVG path data string (M, L, C, Q, A, Z commands).
     pub fn from_svg(svg: &str) -> Result<Self, String> {
-        // Validate by parsing
-        BezPath::from_svg(svg).map_err(|e| e.to_string())?;
+        // Validate by parsing. kurbo intentionally accepts some strings that
+        // contain no SVG commands (for example "_") as an empty path, so an
+        // `Ok` result alone is not sufficient for a geometry constructor.
+        let parsed = BezPath::from_svg(svg).map_err(|e| e.to_string())?;
+        if parsed.elements().is_empty() {
+            return Err("SVG path data contains no geometry".to_string());
+        }
         Ok(Self {
             svg: svg.to_string(),
         })
@@ -298,11 +303,25 @@ impl PathData {
 
     /// Get the underlying kurbo `BezPath`.
     pub fn to_bez_path(&self) -> BezPath {
+        self.try_to_bez_path().unwrap_or_default()
+    }
+
+    /// Parse the stored SVG data without converting malformed geometry into an
+    /// empty path. Mutation code should use this form so a parse failure cannot
+    /// silently erase a node's contours.
+    pub fn try_to_bez_path(&self) -> Result<BezPath, String> {
         if self.svg.is_empty() {
-            BezPath::new()
+            Ok(BezPath::new())
         } else {
-            BezPath::from_svg(&self.svg).unwrap_or_default()
+            BezPath::from_svg(&self.svg).map_err(|e| e.to_string())
         }
+    }
+
+    /// Whether this path contains at least one drawable segment. A lone
+    /// `MoveTo` is syntactically parseable but has no renderable geometry.
+    pub fn has_drawable_geometry(&self) -> bool {
+        self.try_to_bez_path()
+            .is_ok_and(|path| path.segments().next().is_some())
     }
 
     /// Get the SVG path data string.
@@ -1168,6 +1187,25 @@ impl PartialEq for PathData {
 mod arc_length_tests {
     use super::*;
     use std::f64::consts::PI;
+
+    #[test]
+    fn compact_exported_cubic_syntax_parses_as_drawable_geometry() {
+        // Real compact command adjacency and decimal/comma syntax emitted by
+        // Photonic's MBD Dancer SVG export.
+        let path = PathData::from_svg(
+            "M714.6176303490295,407.12902770204585C719.0967149614303,407.12902770204585 718.2340759953883,407.60282833073194 725.4573601610513,400.88144525891346C726.144894070665,400.2416838047889 725.8049499944054,394.8349653218793 725.9927741786374,394.8349653218793Z",
+        )
+        .expect("compact M/C/Z syntax should parse");
+        assert!(path.has_drawable_geometry());
+        assert_eq!(path.to_bez_path().elements().len(), 4);
+    }
+
+    #[test]
+    fn non_command_text_is_not_accepted_as_an_empty_path() {
+        let error = PathData::from_svg("_").expect_err("placeholder is not path geometry");
+        assert!(error.contains("no geometry"), "{error}");
+        assert!(PathData::from_svg("").is_err());
+    }
 
     #[test]
     fn empty_path_returns_none() {

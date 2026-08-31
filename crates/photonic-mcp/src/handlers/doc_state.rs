@@ -211,7 +211,7 @@ pub async fn get_document_info(state: &AppState) -> ToolResult {
     }))
 }
 
-pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
+pub async fn undo(state: &AppState, args: UndoRedoArgs) -> (ToolResult, bool) {
     tracing::debug!("tool: undo");
     let steps = args.steps.unwrap_or(1);
     // Acquire both locks once so the render thread is only blocked for one
@@ -226,14 +226,16 @@ pub async fn undo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
             break;
         }
     }
-    if count > 0 {
+    let moved = count > 0;
+    let result = if moved {
         ToolResult::text(format!("Undid {} step(s)", count))
     } else {
         ToolResult::text("Nothing to undo")
-    }
+    };
+    (result, moved)
 }
 
-pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
+pub async fn redo(state: &AppState, args: UndoRedoArgs) -> (ToolResult, bool) {
     tracing::debug!("tool: redo");
     let steps = args.steps.unwrap_or(1);
     let mut doc = state.document.lock().await;
@@ -246,11 +248,13 @@ pub async fn redo(state: &AppState, args: UndoRedoArgs) -> ToolResult {
             break;
         }
     }
-    if count > 0 {
+    let moved = count > 0;
+    let result = if moved {
         ToolResult::text(format!("Redid {} step(s)", count))
     } else {
         ToolResult::text("Nothing to redo")
-    }
+    };
+    (result, moved)
 }
 
 pub async fn resize_canvas(state: &AppState, args: ResizeCanvasArgs) -> ToolResult {
@@ -530,7 +534,6 @@ pub async fn apply_document_template(
     args: ApplyDocumentTemplateArgs,
 ) -> ToolResult {
     tracing::debug!("tool: apply_document_template");
-    use photonic_core::history::Command;
 
     let template = match photonic_core::document::Document::from_json(&args.template_json) {
         Ok(t) => t,
@@ -538,26 +541,14 @@ pub async fn apply_document_template(
     };
 
     let mut doc = state.document.lock().await;
-    let mut history = state.history.lock().await;
-    let mut commands: Vec<Command> = Vec::new();
 
     // 1. Canvas size.
     if template.width > 0.0
         && template.height > 0.0
         && (template.width != doc.width || template.height != doc.height)
     {
-        commands.push(Command::ResizeCanvas {
-            old_width: doc.width,
-            old_height: doc.height,
-            new_width: template.width,
-            new_height: template.height,
-        });
-    }
-
-    // Execute canvas resize early so subsequent operations see correct size.
-    if !commands.is_empty() {
-        history.execute_discrete(Command::Batch(commands.clone()), &mut doc);
-        commands.clear();
+        doc.width = template.width;
+        doc.height = template.height;
     }
 
     // 2. Guides — add only those not already present (deduplicate by axis+position).
@@ -595,13 +586,10 @@ pub async fn apply_document_template(
             if !name_exists {
                 let mut new_layer = tlayer.clone();
                 new_layer.node_ids.clear(); // template layers have no nodes
-                commands.push(Command::AddLayer { layer: new_layer });
+                doc.add_layer(new_layer);
                 layers_added += 1;
             }
         }
-    }
-    if !commands.is_empty() {
-        history.execute_discrete(Command::Batch(commands), &mut doc);
     }
 
     ToolResult::text(format!(

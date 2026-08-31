@@ -1676,7 +1676,7 @@ pub(crate) fn build_geometry(
             let opacity = path_node.fill.opacity * node.opacity * gop;
             let mesh = tessellate_fill(
                 &path_node.path_data,
-                false,
+                path_node.is_compound,
                 adaptive_tolerance(view_scale, &node.transform.matrix),
             );
             if !mesh.is_empty() {
@@ -2017,7 +2017,7 @@ mod blend_tests {
     use super::*;
     use photonic_core::{
         color::Color,
-        node::{PathNode, SceneNode, SceneNodeKind},
+        node::{GroupNode, PathNode, SceneNode, SceneNodeKind},
         path::PathData,
         style::Fill,
         Document,
@@ -2210,6 +2210,45 @@ mod blend_tests {
             max_diff < 1e-3,
             "Tier A vs Tier B max linear diff {max_diff:.5} exceeds 1e-3"
         );
+    }
+
+    #[test]
+    fn raster_export_preserves_compound_path_cutouts() {
+        let Some(renderer) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping compound raster export test");
+            return;
+        };
+        let mut document = Document::new("compound", 64.0, 64.0);
+        let layer_id = document.active_layer_id.unwrap();
+        let data = PathData::from_svg(
+            "M8 8 L56 8 L56 56 L8 56 Z \
+             M18 18 L28 18 L28 28 L18 28 Z \
+             M36 36 L46 36 L46 46 L36 46 Z",
+        )
+        .unwrap();
+        let mut path = PathNode::new(data).with_fill(Fill::solid(Color::BLACK));
+        path.is_compound = true;
+        document.add_node(
+            SceneNode::new("compound", layer_id, SceneNodeKind::Path(path)),
+            None,
+        );
+
+        let png = renderer.render_png_with_opts(
+            &document,
+            64,
+            64,
+            &ExportOptions {
+                background: ExportBackground::Transparent,
+                ..ExportOptions::default()
+            },
+        );
+        let image = image::load_from_memory(&png).unwrap().to_rgba8();
+        let outer = image.get_pixel(10, 10).0;
+        let hole_1 = image.get_pixel(23, 23).0;
+        let hole_2 = image.get_pixel(41, 41).0;
+        assert!(outer[3] > 0, "outer contour is filled: {outer:?}");
+        assert_eq!(hole_1[3], 0, "first cutout is transparent: {hole_1:?}");
+        assert_eq!(hole_2[3], 0, "second cutout is transparent: {hole_2:?}");
     }
 
     // Backdrop and source fills chosen so every separable mode yields a distinct
@@ -2437,6 +2476,54 @@ mod blend_tests {
             (p[0] as i32 - 127).abs() < 32 && p[1] < 32 && (p[2] as i32 - 127).abs() < 32,
             "half-opacity blue over red should be ~purple, got {p:?}"
         );
+    }
+
+    #[test]
+    fn group_opacity_is_not_applied_twice_to_css_style_background_path() {
+        let Some(r) = try_renderer() else {
+            eprintln!("no GPU adapter — skipping group-opacity test");
+            return;
+        };
+        let mut doc = Document::new("css-opacity", 20.0, 20.0);
+        let layer = doc.active_layer_id.unwrap();
+        doc.add_node(
+            SceneNode::new(
+                "backdrop",
+                layer,
+                SceneNodeKind::Path(
+                    PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                        .with_fill(Fill::solid(Color::new(1.0, 0.0, 0.0, 1.0))),
+                ),
+            ),
+            None,
+        );
+        let mut background = SceneNode::new(
+            "element/background",
+            layer,
+            SceneNodeKind::Path(
+                PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_fill(Fill::solid(Color::new(0.0, 0.0, 1.0, 1.0))),
+            ),
+        );
+        background.opacity = 1.0;
+        let background_id = background.id;
+        doc.add_node(background, None);
+        let mut group = GroupNode::new();
+        group.children.push(background_id);
+        let mut element = SceneNode::new("element", layer, SceneNodeKind::Group(group));
+        element.opacity = 0.5;
+        doc.add_node(element, None);
+
+        let png = r.render_png_at_size(&doc, 20, 20);
+        let pixel = image::load_from_memory(&png)
+            .unwrap()
+            .to_rgba8()
+            .get_pixel(10, 10)
+            .0;
+        // The render target is sRGB, so a 50% source-over blend is not 127 in
+        // byte space. Double application would instead leave the pixel mostly
+        // red (roughly 224/137 for red/blue).
+        assert!(pixel[0] < 180 && pixel[2] > 180, "pixel: {pixel:?}");
     }
 
     /// P4 (headless): a Color Overlay layer style recolours the shape. A RED

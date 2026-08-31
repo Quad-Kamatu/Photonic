@@ -113,6 +113,11 @@ pub async fn create_path(state: &AppState, args: CreatePathArgs) -> ToolResult {
         Ok(p) => p,
         Err(e) => return ToolResult::error(format!("Invalid SVG path data: {}", e)),
     };
+    if !path_data.has_drawable_geometry() {
+        return ToolResult::error(
+            "Invalid SVG path data: path contains no drawable segments".to_string(),
+        );
+    }
 
     let mut path_node = PathNode::new(path_data);
     if let Err(e) = apply_style(&mut path_node, args.fill, args.stroke) {

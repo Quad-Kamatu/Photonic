@@ -57,6 +57,14 @@ PHOTONIC_MCP_TOKEN=$(cat ~/.config/Photonic/mcp_token) \
 
 Default `tools/list` is **compact** (search + promoted tools). Full catalog: `params.full: true`.
 
+The MCP server listens on `http://localhost:7842` and accepts JSON-RPC 2.0 requests.
+Pass `--mcp-secret <SECRET>` to require the `X-MCP-Secret: <SECRET>` header on
+every request. Authentication is checked before request-body parsing, and MCP
+request bodies are limited to 2 MiB. The generated Claude configuration is
+created and updated with owner-only permissions on Unix; Windows uses the user
+profile's inherited ACL. Without a secret, local development behavior remains
+unchanged. The endpoint does not enable browser CORS; native MCP clients do
+not need it.
 
 ### Lua REPL
 

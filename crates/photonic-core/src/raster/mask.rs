@@ -6,14 +6,47 @@
 //! Photoshop selection or layer mask.
 
 use super::image::{luma, RasterImage};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Mask {
     pub width: u32,
     pub height: u32,
     /// Coverage values, row-major. `len == width * height`.
     pub data: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct MaskRepr {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+}
+
+impl<'de> Deserialize<'de> for Mask {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let repr = MaskRepr::deserialize(d)?;
+        let expected = (repr.width as usize)
+            .checked_mul(repr.height as usize)
+            .ok_or_else(|| serde::de::Error::custom("mask dimensions overflow data length"))?;
+        if repr.width == 0 || repr.height == 0 {
+            return Err(serde::de::Error::custom("mask dimensions must be non-zero"));
+        }
+        if repr.data.len() != expected {
+            return Err(serde::de::Error::custom(format!(
+                "mask data length {} does not match {}x{} = {}",
+                repr.data.len(),
+                repr.width,
+                repr.height,
+                expected
+            )));
+        }
+        Ok(Self {
+            width: repr.width,
+            height: repr.height,
+            data: repr.data,
+        })
+    }
 }
 
 impl Mask {
@@ -483,6 +516,33 @@ fn antialias_edge(binary: &[u8], width: u32, height: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serde_rejects_invalid_dimensions_and_data_lengths() {
+        for value in [
+            serde_json::json!({"width": 0, "height": 1, "data": []}),
+            serde_json::json!({
+                "width": u32::MAX,
+                "height": u32::MAX,
+                "data": []
+            }),
+            serde_json::json!({"width": 2, "height": 2, "data": [0, 0, 0]}),
+        ] {
+            assert!(
+                serde_json::from_value::<Mask>(value).is_err(),
+                "malformed mask should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_preserves_valid_mask() {
+        let mut mask = Mask::empty(2, 2);
+        mask.set(1, 0, 255);
+        let json = serde_json::to_string(&mask).unwrap();
+        let back: Mask = serde_json::from_str(&json).unwrap();
+        assert_eq!(mask, back);
+    }
 
     #[test]
     fn rect_selects_region() {

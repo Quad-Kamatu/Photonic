@@ -1,0 +1,100 @@
+{
+  "fixture_version": 1,
+  "issue": 252,
+  "name": "BGCH Hub AppDirectory — super-admin static snapshot",
+  "source": {
+    "path": "/home/josephh/Code Bases/BGCH/bgch-suite/apps/hub/src/components/AppDirectory.jsx",
+    "sha256": "4ceee0a20625514fe0cf5aa9a8404030a12a3c2bcea0e6c4bfd4f829b7732f8c",
+    "export": "AppDirectory"
+  },
+  "viewport": { "width": 1120, "height": 720 },
+  "origin": { "x": 0, "y": 0 },
+  "snapshot": {
+    "props": {
+      "capabilities": [],
+      "isSuperAdmin": true,
+      "loading": false,
+      "hasAccessRecord": true
+    },
+    "imports": {
+      "@bgch/waffle": {
+        "source_path": "/home/josephh/Code Bases/BGCH/bgch-suite/packages/waffle/src",
+        "suite_apps_sha256": "9bd33c3db385655aa448ed510ce7b7390213227e588e7106de47e26a603ecf6f",
+        "allowed_exports": ["SUITE_APPS", "filterApps"]
+      },
+      "@bgch/ui": {
+        "allowed_exports": ["Alert", "AlertTitle", "AlertDescription", "Card", "CardContent", "EmptyState"],
+        "component_policy": "static_component_expansion_only"
+      },
+      "lucide-react": {
+        "allowed_exports": ["AlertCircle", "ExternalLink"],
+        "component_policy": "local_svg_or_vector_path_only"
+      }
+    }
+  },
+  "request": {
+    "tool": "create_vectors_from_react",
+    "arguments": {
+      "source_path": "/home/josephh/Code Bases/BGCH/bgch-suite/apps/hub/src/components/AppDirectory.jsx",
+      "export_name": "AppDirectory",
+      "props": {
+        "capabilities": [],
+        "isSuperAdmin": true,
+        "loading": false,
+        "hasAccessRecord": true
+      },
+      "module_roots": ["/home/josephh/Code Bases/BGCH/bgch-suite"],
+      "viewport": { "width": 1120, "height": 720 },
+      "origin": { "x": 0, "y": 0 },
+      "group_name": "BGCH Hub — All Apps",
+      "strict": true,
+      "dry_run": false
+    }
+  },
+  "assertions": {
+    "no_diagnostics_at_or_above": "error",
+    "semantic_roles": { "link": 7, "image": 7, "text": 15 },
+    "tile_names_in_source_order": ["PEOPLE", "VIMS", "FIRM", "LESSON", "GRANT", "CHECK-IN", "PROG"],
+    "tile_urls_in_source_order": [
+      "https://people.bgcharlem.org",
+      "https://inventory.bgcharlem.org",
+      "https://incident.bgcharlem.org",
+      "https://lesson.bgcharlem.org",
+      "https://grant.bgcharlem.org",
+      "https://checkin.bgcharlem.org",
+      "https://prog.bgcharlem.org"
+    ],
+    "tile_icon_urls_match": "^https://people\\.bgcharlem\\.org/(people|vims|firm|lesson|grant|checkin|prog)-icon\\.svg$",
+    "required_text": [
+      "HR & Operations",
+      "Inventory Management",
+      "Incident Reporting",
+      "Curriculum & Lessons",
+      "Grant Reporting",
+      "Member Check-In",
+      "Program Management",
+      "You'll confirm your Google account once when you open an app."
+    ],
+    "forbidden_text": ["No apps are assigned to your account yet"],
+    "layout": {
+      "desktop_min_width": 1024,
+      "columns": 3,
+      "tile_count": 7,
+      "visible_rows": [3, 3, 1],
+      "gap_px": 16,
+      "all_tiles_inside_viewport": true
+    },
+    "editable": {
+      "text_nodes": true,
+      "icon_nodes": true,
+      "tile_background_nodes": true,
+      "one_undo_removes_entire_import": true
+    },
+    "safety": {
+      "must_not_execute_javascript": true,
+      "must_not_fetch_network_assets": true,
+      "must_not_mutate_on_preflight_failure": true,
+      "resolved_files_must_be_under_module_roots": true
+    }
+  }
+}

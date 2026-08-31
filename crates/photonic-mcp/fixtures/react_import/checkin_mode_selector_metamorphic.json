@@ -1,0 +1,67 @@
+{
+  "fixture_version": 1,
+  "base_fixture": "checkin_mode_selector.json",
+  "setup": {
+    "copy_to_fresh_temporary_root": true,
+    "sole_module_root": "<temporary_root>",
+    "copy": [
+      "apps/checkin/src/features/mode-selection/components/ModeSelector.jsx",
+      "apps/checkin/src/components/layout/KioskLayout.jsx",
+      "apps/checkin/src/components/layout/index.js",
+      "apps/checkin/src/components/ui/button.jsx",
+      "apps/checkin/src/components/ui/card.jsx",
+      "apps/checkin/src/index.css"
+    ],
+    "implementation_must_not_change_between_cases": true
+  },
+  "cases": [
+    {
+      "id": "content_and_order",
+      "mutations": [
+        { "file": "ModeSelector.jsx", "replace": ["Welcome!", "Hello from fixture!"] },
+        { "file": "ModeSelector.jsx", "operation": "swap_complete_Event_Check-in_and_General_Visit_sections" }
+      ],
+      "expect": { "contains_text": "Hello from fixture!", "first_section": "General Visit", "second_section": "Event Check-in" }
+    },
+    {
+      "id": "layout_classes",
+      "mutations": [
+        { "file": "KioskLayout.jsx", "replace": ["justify-center p-5", "justify-center p-10"] },
+        { "file": "ModeSelector.jsx", "replace": ["mb-6", "mb-10"] },
+        { "file": "KioskLayout.jsx", "replace": ["rounded-xl", "rounded-2xl"] }
+      ],
+      "expect": { "outer_padding_px": 40, "section_gap_increases": true, "card_radius_px": 16 }
+    },
+    {
+      "id": "theme_and_button_source",
+      "mutations": [
+        { "file": "index.css", "replace": ["--color-bgch-blue: #005a9c", "--color-bgch-blue: #123456"] },
+        { "file": "index.css", "replace": ["--color-bgch-gold: #FDB813", "--color-bgch-gold: #fedc45"] },
+        { "file": "index.css", "replace": ["--color-primary-blue: #007bff", "--color-primary-blue: #2244cc"] },
+        { "file": "button.jsx", "replace": ["h-12 px-10", "h-16 px-12"] }
+      ],
+      "expect": { "backdrop": "#123456", "card_top_border": "#fedc45", "button_fill": "#2244cc", "button_height_px": 64 }
+    },
+    {
+      "id": "interaction_policy",
+      "expect_variants": [
+        { "interaction_policy": "strip", "result": "success", "stripped_handlers_min": 2 },
+        { "interaction_policy": "strict", "result": "error", "code": "JSX_INTERACTION_UNSUPPORTED", "exact_source_span": true, "zero_mutation": true }
+      ]
+    },
+    {
+      "id": "rendered_unknown_expression",
+      "mutation": { "file": "ModeSelector.jsx", "replace": ["<h1 className=", "<h1 data-fixture={unknownValue} className="] },
+      "expect": { "code": "JSX_UNSUPPORTED_EXPRESSION", "exact_source_span": true, "zero_mutation": true }
+    },
+    {
+      "id": "missing_or_outside_import",
+      "variants": [
+        { "remove": "apps/checkin/src/components/layout/KioskLayout.jsx", "code": "IMPORT_UNRESOLVED" },
+        { "symlink_dependency_outside_root": "KioskLayout.jsx", "code": "IMPORT_OUTSIDE_ROOT" }
+      ],
+      "expect": { "zero_mutation": true }
+    }
+  ],
+  "anti_template_rule": "Every successful mutation must change the dry-run plan and committed editable nodes without rebuilding the importer. Filename/export recognition plus fixed ModeSelector artwork fails."
+}

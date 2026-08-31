@@ -112,6 +112,46 @@ pub fn tool_list() -> Value {
                 }
             },
             {
+                "name": "create_vectors_from_css",
+                "description": "Compile a bounded CSS snippet into editable Photonic groups and vector paths. Strict mode (the default) rejects unsupported/lossy CSS without mutation; dry_run returns the deterministic plan without changing the document.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "css": { "type": "string", "description": "Inline declaration block or supported selector tree." },
+                        "selector": { "type": "string", "description": "Optional virtual root selector." },
+                        "origin": { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } },
+                        "viewport": { "type": "object", "properties": { "width": {"type":"number"}, "height": {"type":"number"} } },
+                        "layer_id": { "type": "string" },
+                        "group_name": { "type": "string" },
+                        "strict": { "type": "boolean", "default": true },
+                        "dry_run": { "type": "boolean", "default": false }
+                    },
+                    "required": ["css"]
+                }
+            },
+            {
+                "name": "create_vectors_from_react",
+                "description": "Import a bounded, static local JSX fragment or an allowlisted local React snapshot into editable Photonic groups and vector paths. The snapshot resolver reads only explicitly bounded local modules and assets; it never executes JavaScript, fetches network resources, follows arbitrary imports, or loads external Tailwind configuration. Unsupported or dynamic input is rejected before the document changes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "jsx": { "type": "string", "description": "Static JSX fragment of intrinsic layout elements." },
+                        "source_path": { "type": "string", "description": "Allowlisted local module path; it and every resolved module/asset must be beneath module_roots." },
+                        "export_name": { "type": "string", "description": "Named React export to import." },
+                        "props": { "type": "object", "description": "JSON-only static props snapshot." },
+                        "module_roots": { "type": "array", "items": {"type":"string"}, "description": "Approved local roots for source and bounded imports." },
+                        "theme_tokens": { "type": "object", "description": "Optional hex overrides for source-resolved light theme tokens.", "properties": { "card": {"type":"string"}, "foreground": {"type":"string"}, "muted_foreground": {"type":"string"}, "border": {"type":"string"} } },
+                        "interaction_policy": { "type": "string", "enum": ["reject", "strip"], "default": "reject", "description": "Reject rendered event handlers, or strip them with warnings/provenance. JavaScript is never executed." },
+                        "dynamic_content": { "type": "object", "description": "Pinned bounded wrapper branches, such as backgroundImage:null and enableInactivity:false." },
+                        "origin": { "type": "object", "properties": { "x": {"type":"number"}, "y": {"type":"number"} } },
+                        "viewport": { "type": "object", "properties": { "width": {"type":"number"}, "height": {"type":"number"} } },
+                        "layer_id": { "type": "string" }, "group_name": { "type": "string" },
+                        "strict": { "type": "boolean", "default": true }, "dry_run": { "type": "boolean", "default": false }
+                    },
+                    "oneOf": [{"required":["jsx"]},{"required":["source_path","export_name","props","module_roots"]}]
+                }
+            },
+            {
                 "name": "create_flare",
                 "description": "Create a procedural lens flare vector effect at the specified position. Generates a grouped set of paths: a semi-transparent halo circle, radiating ray triangles, and concentric stroke rings.\n\nAll parts are grouped as 'Lens Flare'. Useful for light effects, sparkle decorations, and sci-fi/fantasy illustrations.",
                 "inputSchema": {
@@ -2662,6 +2702,25 @@ pub fn tool_list() -> Value {
                 }
             },
             {
+                "name": "list_checkpoints",
+                "description": "List all saved document checkpoints, including their IDs, names, and creation times. Use these IDs with diff_checkpoints or restore_checkpoint.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "restore_checkpoint",
+                "description": "Restore the document to a saved checkpoint by ID, clearing undo/redo history. This mutates the document.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "checkpoint_id": {
+                            "type": "string",
+                            "description": "UUID of the checkpoint to restore"
+                        }
+                    },
+                    "required": ["checkpoint_id"]
+                }
+            },
+            {
                 "name": "diff_checkpoints",
                 "description": "Compare two checkpoint snapshots and return a structured JSON diff of added, removed, and modified nodes and layers. Use list_checkpoints first to get checkpoint IDs.",
                 "inputSchema": {
@@ -2937,29 +2996,6 @@ pub fn tool_list() -> Value {
                         "delta_a": { "type": "number", "description": "Alpha channel delta (−1.0 to 1.0). Default 0." }
                     },
                     "required": []
-                }
-            },
-            {
-                "name": "make_compound_path",
-                "description": "Combine two or more path nodes into a single compound path using the even-odd fill rule. Overlapping areas become holes. The bottommost node's fill/stroke style is preserved; all other nodes are removed. Single undoable step.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Two or more path node IDs to combine.", "minItems": 2 },
-                        "name": { "type": "string", "description": "Optional name for the resulting compound path node." }
-                    },
-                    "required": ["node_ids"]
-                }
-            },
-            {
-                "name": "release_compound_path",
-                "description": "Release a compound path back into individual path nodes. Each subpath becomes its own node with the compound path's fill/stroke. The compound path node is removed. Single undoable step.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "node_id": { "type": "string", "description": "ID of the compound path node to release." }
-                    },
-                    "required": ["node_id"]
                 }
             },
             {

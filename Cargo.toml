@@ -13,7 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 license = "MIT"
 
 [workspace.dependencies]
@@ -38,7 +38,6 @@ glyphon = "0.6"
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

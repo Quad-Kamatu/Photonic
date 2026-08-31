@@ -83,7 +83,8 @@ impl PhotonicApp {
                                                         let mut new_history = CommandHistory::default();
                                                         apply_opened_history(&mut new_history, hist_snap);
                                                         self.file_status = Some(format!("Opened {}", path.file_name().unwrap_or_default().to_string_lossy()));
-                                                        self.open_in_new_tab(doc, history, view, loaded, new_history, Some(path));
+                                                        let native_path = native_project_path(&path);
+                                                        self.open_in_new_tab(doc, history, view, loaded, new_history, native_path);
                                                         doc_modified = true;
                                                     }
                                                     Err(e) => self.file_status = Some(format!("Open failed: {e}")),

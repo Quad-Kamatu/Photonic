@@ -62,8 +62,21 @@ def render_tool(tool: dict) -> str:
     return "\n".join(out)
 
 
+def validate_tool_names(tools: list[dict]) -> None:
+    """Reject tool manifests that cannot be indexed reliably by name."""
+    names = set()
+    for index, tool in enumerate(tools):
+        name = tool.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"tool at index {index} has an empty or missing name")
+        if name in names:
+            raise ValueError(f"duplicate tool name at index {index}: {name!r}")
+        names.add(name)
+
+
 def main() -> None:
     tools = json.load(sys.stdin)
+    validate_tool_names(tools)
     tools.sort(key=lambda t: t.get("name", ""))
 
     lines = [

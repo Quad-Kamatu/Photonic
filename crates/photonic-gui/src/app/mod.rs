@@ -18,6 +18,7 @@ pub mod source_marks;
 // crates can only reach items through a fully `pub` module chain. See the
 // hooks' doc comments in `autosave.rs` for the full rationale.
 pub mod autosave;
+mod clipboard;
 mod close_guard;
 mod command_center;
 mod direct_select;
@@ -69,6 +70,13 @@ use crate::{
     radial_wheel::{WheelContext, WheelNodeKind, WheelState},
     tools::Tool,
 };
+
+pub use clipboard::NativeClipboardPaste;
+
+/// Marker kept in the native clipboard after Photonic copies scene objects.
+/// It makes egui emit a paste event even though the actual object snapshot is
+/// held in-process by [`GuiClipboard`].
+pub(crate) const INTERNAL_OBJECT_CLIPBOARD_MARKER: &str = "photonic:objects";
 
 /// In-process copy/paste buffer for scene objects (Ctrl+C / Ctrl+V).
 ///
@@ -1379,6 +1387,10 @@ pub struct PhotonicApp {
     /// too), so a group of paths or images pastes intact — within the document
     /// and across open documents (the snapshot is detached from the source doc).
     pub gui_clipboard: GuiClipboard,
+    /// Clipboard content captured by the native window host for the next GUI
+    /// frame. This is separate from `gui_clipboard` because egui only exposes
+    /// text clipboard events and cannot carry image pixels.
+    pending_native_clipboard_paste: Option<(NativeClipboardPaste, bool)>,
 
     /// Clips copied (Ctrl+C) / cut (Ctrl+X) in video mode, held in-process for
     /// Ctrl+V paste-at-playhead. Session-wide (not per-tab), mirroring
@@ -1850,6 +1862,7 @@ impl Default for PhotonicApp {
             magic_wand_tolerance: 0.05,
             gui_clipboard: GuiClipboard::default(),
             timeline_clipboard: Vec::new(),
+            pending_native_clipboard_paste: None,
         }
     }
 }
@@ -2061,12 +2074,59 @@ fn load_document(
         .unwrap_or("")
         .to_lowercase();
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if ext == "svg" {
+    if ext == "svg" && !content.trim_start().starts_with('{') {
         photonic_core::import_svg(&content)
             .map(|doc| (doc, None))
             .map_err(|e| e.to_string())
     } else {
         photonic_core::load_photon(&content).map_err(|e| e.to_string())
+    }
+}
+
+/// Only native `.photon` projects are writable in place. Imported source files
+/// become unsaved documents so Save/Autosave can never overwrite the source.
+fn native_project_path(path: &Path) -> Option<std::path::PathBuf> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
+        .then(|| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod file_lifecycle_tests {
+    use super::{load_document, native_project_path};
+    use std::path::Path;
+
+    #[test]
+    fn only_native_projects_are_writable_in_place() {
+        assert_eq!(
+            native_project_path(Path::new("project.photon")),
+            Some(Path::new("project.photon").to_path_buf())
+        );
+        assert_eq!(
+            native_project_path(Path::new("PROJECT.PHOTON")),
+            Some(Path::new("PROJECT.PHOTON").to_path_buf())
+        );
+        assert_eq!(native_project_path(Path::new("artwork.svg")), None);
+        assert_eq!(native_project_path(Path::new("photo.png")), None);
+    }
+
+    #[test]
+    fn photon_json_mislabeled_as_svg_remains_recoverable() {
+        let path = std::env::temp_dir().join(format!(
+            "photonic-mislabeled-svg-{}.svg",
+            std::process::id()
+        ));
+        let document = photonic_core::Document::new("Recovered", 64.0, 32.0);
+        let json = photonic_core::save_photon(&document, None).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        let (loaded, history) = load_document(&path).expect("mislabeled project should open");
+        assert_eq!(loaded.name, "Recovered");
+        assert!(history.is_none());
+        assert_eq!(native_project_path(&path), None);
+
+        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -2205,10 +2265,21 @@ fn write_photon_file(
     history.enforce_size();
     let snap = history.snapshot_state();
     let json = photonic_core::save_photon(doc, Some(&snap)).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())
+    photonic_core::write_atomic_file(path, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 impl PhotonicApp {
+    /// Queue clipboard content read by the native window host. `paste_in_place`
+    /// mirrors Ctrl+Shift+V; the queue is consumed by the global shortcut
+    /// handler on the next egui frame.
+    pub fn queue_native_clipboard_paste(
+        &mut self,
+        payload: NativeClipboardPaste,
+        paste_in_place: bool,
+    ) {
+        self.pending_native_clipboard_paste = Some((payload, paste_in_place));
+    }
+
     /// Take a palette MCP request for execution by the application host.
     /// The canvas viewport in **physical pixels** `(x, y, w, h)` as laid out on
     /// the previous frame, or `None` before the first frame.
@@ -3090,7 +3161,7 @@ impl PhotonicApp {
                             *doc = loaded;
                             apply_opened_history(history, hist_snap);
                             self.fit_pending = true;
-                            self.current_file = Some(path);
+                            self.current_file = native_project_path(&path);
                             self.selected_id = None;
                             self.show_welcome = false;
                             doc_modified = true;
@@ -3174,7 +3245,7 @@ impl PhotonicApp {
                                         *doc = loaded;
                                         apply_opened_history(history, hist_snap);
                                         self.fit_pending = true;
-                                        self.current_file = Some(path);
+                                        self.current_file = native_project_path(&path);
                                         self.selected_id = None;
                                         self.show_welcome = false;
                                         doc_modified = true;
@@ -4338,13 +4409,23 @@ impl PhotonicApp {
                             continue;
                         }
                         if let SceneNodeKind::Path(pn) = &node.kind {
-                            let pts = bez_to_screen_points_xf(
+                            let subpaths = bez_to_screen_subpaths_xf(
                                 &pn.path_data.to_bez_path(),
                                 view,
                                 &node.transform,
                             );
-                            if pts.len() >= 2 {
-                                painter.add(egui::Shape::line(pts, outline_stroke));
+                            for (pts, closed) in subpaths {
+                                if pts.len() >= 2 {
+                                    painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                                        points: pts,
+                                        closed,
+                                        fill: egui::Color32::TRANSPARENT,
+                                        stroke: egui::epaint::PathStroke::new(
+                                            outline_stroke.width,
+                                            outline_stroke.color,
+                                        ),
+                                    }));
+                                }
                             }
                         }
                     }
@@ -4364,14 +4445,25 @@ impl PhotonicApp {
                                 let bez = preview.to_bez_path();
                                 // Smooth wireframe: sample curves so fitted
                                 // Béziers render as curves, not chords.
-                                let pts = bez_to_screen_points_xf(&bez, view, &node.transform);
-                                if pts.len() >= 2 {
+                                let subpaths =
+                                    bez_to_screen_subpaths_xf(&bez, view, &node.transform);
+                                if subpaths.iter().any(|(pts, _)| pts.len() >= 2) {
                                     let painter = ui.painter_at(rect);
                                     let accent = egui::Color32::from_rgb(110, 86, 207);
-                                    painter.add(egui::Shape::line(
-                                        pts,
-                                        egui::Stroke::new(1.5, accent),
-                                    ));
+                                    for (pts, closed) in subpaths {
+                                        if pts.len() >= 2 {
+                                            painter.add(egui::Shape::Path(
+                                                egui::epaint::PathShape {
+                                                    points: pts,
+                                                    closed,
+                                                    fill: egui::Color32::TRANSPARENT,
+                                                    stroke: egui::epaint::PathStroke::new(
+                                                        1.5, accent,
+                                                    ),
+                                                },
+                                            ));
+                                        }
+                                    }
                                     // Dots at real anchor points only (not every
                                     // sampled point along a curve).
                                     for p in anchor_screen_points_xf(&bez, view, &node.transform) {
@@ -4401,20 +4493,30 @@ impl PhotonicApp {
                                 dlg.cached_thr = dlg.threshold;
                             }
                             if let Some(preview) = &dlg.preview {
-                                let pts = bez_to_screen_points_xf(
+                                let subpaths = bez_to_screen_subpaths_xf(
                                     &preview.to_bez_path(),
                                     view,
                                     &node.transform,
                                 );
-                                if pts.len() >= 2 {
+                                if subpaths.iter().any(|(pts, _)| pts.len() >= 2) {
                                     let painter = ui.painter_at(rect);
                                     let accent = egui::Color32::from_rgb(86, 170, 207);
-                                    painter.add(egui::Shape::line(
-                                        pts.clone(),
-                                        egui::Stroke::new(1.5, accent),
-                                    ));
-                                    for p in &pts {
-                                        painter.circle_filled(*p, 2.0, accent);
+                                    for (pts, closed) in subpaths {
+                                        if pts.len() >= 2 {
+                                            painter.add(egui::Shape::Path(
+                                                egui::epaint::PathShape {
+                                                    points: pts.clone(),
+                                                    closed,
+                                                    fill: egui::Color32::TRANSPARENT,
+                                                    stroke: egui::epaint::PathStroke::new(
+                                                        1.5, accent,
+                                                    ),
+                                                },
+                                            ));
+                                            for p in &pts {
+                                                painter.circle_filled(*p, 2.0, accent);
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -13,9 +13,9 @@ use args::Args;
 use clap::Parser;
 use egui_wgpu::ScreenDescriptor;
 use photonic_core::{document::Document, history::CommandHistory, AuditLog};
-use photonic_gui::PhotonicApp;
+use photonic_gui::{NativeClipboardPaste, PhotonicApp};
 use photonic_mcp::server::AppState;
-use photonic_mcp::{McpServer, McpServerConfig};
+use photonic_mcp::{McpServer, McpServerConfig, MCP_SECRET_HEADER};
 use photonic_render::PhotonicRenderer;
 use repl::LuaRepl;
 use serde::{Deserialize, Serialize};
@@ -30,12 +30,105 @@ use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowAttributes, WindowId},
 };
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
+
+fn native_project_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
+        .then(|| path.to_path_buf())
+}
+
+/// Detect a paste shortcut before egui consumes the keyboard event. egui-winit
+/// intentionally swallows Ctrl/Cmd+V, including the image-only case where it
+/// cannot emit an `Event::Paste` text event.
+fn native_clipboard_paste_request(event: &WindowEvent, modifiers: egui::Modifiers) -> Option<bool> {
+    let WindowEvent::KeyboardInput {
+        event: key_event,
+        is_synthetic,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if *is_synthetic || key_event.state != ElementState::Pressed {
+        return None;
+    }
+
+    let logical_paste = matches!(&key_event.logical_key, Key::Named(NamedKey::Paste));
+    let logical_v = matches!(
+        &key_event.logical_key,
+        Key::Character(text) if text.as_str().eq_ignore_ascii_case("v")
+    );
+    let physical_v = matches!(key_event.physical_key, PhysicalKey::Code(KeyCode::KeyV));
+    let command_v = modifiers.command || modifiers.ctrl || modifiers.mac_cmd;
+    let windows_insert = cfg!(target_os = "windows")
+        && modifiers.shift
+        && (matches!(&key_event.logical_key, Key::Named(NamedKey::Insert))
+            || matches!(key_event.physical_key, PhysicalKey::Code(KeyCode::Insert)));
+
+    (logical_paste || (command_v && (logical_v || physical_v)) || windows_insert)
+        .then_some(modifiers.shift)
+}
+
+const MAX_NATIVE_CLIPBOARD_PIXELS: u64 = 64_000_000;
+
+/// Read the richest useful clipboard representation. HTML/SVG is considered
+/// before raster pixels so vector artwork copied from a design tool remains
+/// editable when the clipboard offers both formats.
+fn read_native_clipboard() -> Option<NativeClipboardPaste> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let html = clipboard
+        .get()
+        .html()
+        .ok()
+        .filter(|html| !html.trim().is_empty());
+    let image = clipboard.get_image().ok().and_then(|image| {
+        let width = u32::try_from(image.width).ok()?;
+        let height = u32::try_from(image.height).ok()?;
+        let pixels = u64::from(width).checked_mul(u64::from(height))?;
+        if pixels == 0 || pixels > MAX_NATIVE_CLIPBOARD_PIXELS {
+            return None;
+        }
+        let rgba = image.bytes.into_owned();
+        let expected = pixels
+            .checked_mul(4)
+            .and_then(|len| usize::try_from(len).ok())?;
+        (rgba.len() == expected).then_some(NativeClipboardPaste::Image {
+            width,
+            height,
+            rgba,
+        })
+    });
+    let text = clipboard
+        .get_text()
+        .ok()
+        .filter(|text| !text.trim().is_empty());
+
+    if html.as_deref().is_some_and(looks_like_svg_clipboard_text) {
+        return html.map(NativeClipboardPaste::Text);
+    }
+    if text.as_deref().is_some_and(|text| {
+        text.trim() == "photonic:objects" || looks_like_svg_clipboard_text(text)
+    }) {
+        return text.map(NativeClipboardPaste::Text);
+    }
+    if image.is_some() {
+        return image;
+    }
+    html.or(text).map(NativeClipboardPaste::Text)
+}
+
+fn looks_like_svg_clipboard_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<svg") && lower.contains("</svg")
+}
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -123,7 +216,7 @@ fn main() -> Result<()> {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-        if is_svg {
+        if is_svg && !content.trim_start().starts_with('{') {
             let doc = photonic_core::import_svg(&content)
                 .map_err(|e| anyhow::anyhow!("failed to import SVG '{}': {e}", path.display()))?;
             (doc, None)
@@ -156,7 +249,9 @@ fn main() -> Result<()> {
 
     // Audit log shared between the MCP server thread and the GUI Audit panel.
     let audit_log = Arc::new(std::sync::Mutex::new(AuditLog::new()));
-    let mcp_document_path = Arc::new(std::sync::Mutex::new(args.file.clone()));
+    let mcp_document_path = Arc::new(std::sync::Mutex::new(
+        args.file.as_deref().and_then(native_project_path),
+    ));
 
     let secret = args.mcp_secret.clone().or_else(|| {
         // Generate a session token when not pinned (28 §4 / MCP local profile).
@@ -460,6 +555,7 @@ impl PhotonicWinitApp {
             && !self.mcp_running.load(Ordering::Relaxed)
         {
             info!("Restarting MCP server on user request");
+            write_mcp_config(self.mcp_config.port, self.mcp_config.secret.as_deref());
             self.mcp_state = spawn_mcp_server(
                 Arc::clone(&self.document),
                 Arc::clone(&self.history),
@@ -662,16 +758,7 @@ impl ApplicationHandler for PhotonicWinitApp {
                 renderer.surface_format(),
             ));
 
-        write_mcp_config();
-        spawn_mcp_server(
-            Arc::clone(&self.document),
-            Arc::clone(&self.history),
-            self.mcp_capture_tx.clone(),
-            self.mcp_config.clone(),
-            Arc::clone(&self.mcp_running),
-            Arc::clone(&self.audit_log),
-            Arc::clone(&self.mcp_document_path),
-        );
+        write_mcp_config(self.mcp_config.port, self.mcp_config.secret.as_deref());
         info!("GPU renderer + egui initialized — window open");
         window.request_redraw();
 
@@ -710,7 +797,7 @@ impl ApplicationHandler for PhotonicWinitApp {
                 if let Ok(doc) = self.document.try_lock() {
                     state.gui.welcome.add_recent(path.clone(), doc.name.clone());
                 }
-                state.gui.current_file = Some(path);
+                state.gui.current_file = native_project_path(&path);
             }
         }
     }
@@ -719,6 +806,15 @@ impl ApplicationHandler for PhotonicWinitApp {
         let Some(state) = &mut self.state else { return };
 
         let response = state.egui_state.on_window_event(&state.window, &event);
+        if let Some(paste_in_place) =
+            native_clipboard_paste_request(&event, state.egui_state.egui_input().modifiers)
+        {
+            if let Some(payload) = read_native_clipboard() {
+                state
+                    .gui
+                    .queue_native_clipboard_paste(payload, paste_in_place);
+            }
+        }
 
         match event {
             WindowEvent::CloseRequested => {
@@ -1228,40 +1324,112 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
 /// is always available when `claude` runs.
 ///
 /// Uses the HTTP transport — Claude Code connects directly to the already-running
-/// Photonic MCP HTTP server on port 7842.  No proxy subprocess needed.
-fn write_mcp_config() {
-    let server_entry = serde_json::json!({
+/// Photonic MCP HTTP server on the configured port. No proxy subprocess needed.
+fn write_mcp_config(port: u16, secret: Option<&str>) {
+    let server_entry = mcp_server_entry(port, secret);
+
+    let Some(path) = claude_settings_path() else {
+        return;
+    };
+
+    match write_mcp_config_at(&path, server_entry) {
+        Ok(()) => info!(
+            "Registered Photonic MCP server in Claude settings at {:?}",
+            path
+        ),
+        Err(error) => tracing::warn!("Could not update Claude settings at {:?}: {error}", path),
+    }
+}
+
+fn mcp_server_entry(port: u16, secret: Option<&str>) -> serde_json::Value {
+    let mut server_entry = serde_json::json!({
         "type": "http",
-        "url": format!("http://127.0.0.1:{}/mcp", 7842)
+        "url": format!("http://127.0.0.1:{port}/mcp")
     });
+    if let Some(secret) = secret {
+        server_entry["headers"] = serde_json::json!({ MCP_SECRET_HEADER: secret });
+    }
+    server_entry
+}
 
-    let claude_settings_path = claude_settings_path();
-    if let Some(p) = &claude_settings_path {
-        let mut settings: serde_json::Value = p
-            .exists()
-            .then(|| std::fs::read_to_string(p).ok())
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
+/// Add Photonic's MCP entry to one Claude configuration file.
+///
+/// A missing file is initialized, but an existing file must be readable,
+/// valid JSON, and an object before it can be changed. This prevents a
+/// malformed configuration from being overwritten with a file containing only
+/// Photonic's server.
+fn write_mcp_config_at(
+    path: &std::path::Path,
+    server_entry: serde_json::Value,
+) -> std::io::Result<()> {
+    let mut settings = match std::fs::read(path) {
+        Ok(contents) => serde_json::from_slice(&contents).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid JSON: {error}"),
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error),
+    };
 
-        if !settings["mcpServers"].is_object() {
-            settings["mcpServers"] = serde_json::json!({});
-        }
-        settings["mcpServers"]["photonic"] = server_entry;
+    let Some(settings_object) = settings.as_object_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Claude settings must be a JSON object",
+        ));
+    };
 
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::write(
-            p,
-            serde_json::to_string_pretty(&settings).unwrap_or_default(),
-        ) {
-            Ok(_) => info!(
-                "Registered Photonic MCP server in Claude settings at {:?}",
-                p
-            ),
-            Err(e) => tracing::warn!("Could not update Claude settings: {e}"),
-        }
+    let mcp_servers = settings_object
+        .entry("mcpServers".to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(mcp_servers) = mcp_servers.as_object_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Claude settings mcpServers must be a JSON object",
+        ));
+    };
+    mcp_servers.insert("photonic".to_owned(), server_entry);
+
+    let contents = serde_json::to_vec_pretty(&settings).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("could not serialize Claude settings: {error}"),
+        )
+    })?;
+    write_private_claude_settings(path, &contents)
+}
+
+fn write_private_claude_settings(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        options.mode(0o600);
+        let mut file = options.open(path)?;
+        // `mode` only applies to newly-created files. Tighten an existing file
+        // before writing a secret so a permissive prior mode has no exposure
+        // window while the new contents are being written.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents)?;
+        file.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Windows user-profile files inherit the profile directory's ACL.
+        let mut file = options.open(path)?;
+        file.write_all(contents)?;
+        file.sync_all()
     }
 }
 
@@ -1507,4 +1675,108 @@ fn run_claude_stream(user_msg: String, is_first: bool, tx: std::sync::mpsc::Send
         let _ = tx.send(ClaudeEvent::Error("(no response from claude)".into()));
     }
     let _ = tx.send(ClaudeEvent::Done);
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+    use super::{mcp_server_entry, write_mcp_config_at, write_private_claude_settings};
+    use serde_json::json;
+    use std::{fs, io};
+
+    fn test_directory() -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("photonic-claude-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).expect("create temporary test directory");
+        path
+    }
+
+    #[test]
+    fn write_mcp_config_uses_the_configured_port() {
+        let entry = mcp_server_entry(9000, Some("top-secret"));
+        assert_eq!(entry["url"], "http://127.0.0.1:9000/mcp");
+        assert_eq!(entry["headers"]["x-mcp-secret"], "top-secret");
+    }
+
+    #[test]
+    fn malformed_config_is_preserved() {
+        let directory = test_directory();
+        let path = directory.join("claude.json");
+        let original = b"{ not valid JSON\n";
+        fs::write(&path, original).expect("write malformed config");
+
+        let error =
+            write_mcp_config_at(&path, mcp_server_entry(7842, None)).expect_err("malformed config");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).expect("read config"), original);
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
+    }
+
+    #[test]
+    fn valid_config_preserves_unrelated_settings_and_servers() {
+        let directory = test_directory();
+        let path = directory.join("claude.json");
+        let original = json!({
+            "theme": "dark",
+            "mcpServers": {"other": {"type": "stdio", "command": "other-server"}}
+        });
+        fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+
+        let entry = mcp_server_entry(9123, Some("test-secret"));
+        write_mcp_config_at(&path, entry.clone()).expect("update valid config");
+
+        let updated: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read updated config")).unwrap();
+        assert_eq!(updated["theme"], original["theme"]);
+        assert_eq!(
+            updated["mcpServers"]["other"],
+            original["mcpServers"]["other"]
+        );
+        assert_eq!(updated["mcpServers"]["photonic"], entry);
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
+    }
+
+    #[test]
+    fn malformed_mcp_servers_structure_is_preserved() {
+        let directory = test_directory();
+        let path = directory.join("claude.json");
+        let original = br#"{"mcpServers":[]}"#;
+        fs::write(&path, original).expect("write malformed config");
+
+        let error = write_mcp_config_at(&path, mcp_server_entry(7842, None))
+            .expect_err("malformed structure");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).expect("read preserved config"), original);
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_settings_are_created_and_updated_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "photonic-private-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(".claude.json");
+
+        write_private_claude_settings(&path, br#"{"first":true}"#).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_claude_settings(&path, br#"{"secret":"private"}"#).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"secret":"private"}"#);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

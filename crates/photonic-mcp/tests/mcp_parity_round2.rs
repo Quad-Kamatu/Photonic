@@ -141,7 +141,7 @@ async fn lock_track(state: &AppState, track_id: &str) {
 async fn undo(state: &AppState) {
     let args = serde_json::from_value(json!({})).unwrap();
     let result = handlers::doc_state::undo(state, args).await;
-    assert_ok(&result, "undo");
+    assert_ok(&result.0, "undo");
 }
 
 // ─── replace_clip_source (G-5) ──────────────────────────────────────────────

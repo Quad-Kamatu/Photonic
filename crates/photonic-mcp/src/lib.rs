@@ -24,4 +24,4 @@ pub mod server;
 pub mod stdio;
 
 pub use handlers::doc_export::register_export_gpu;
-pub use server::{McpServer, McpServerConfig};
+pub use server::{McpServer, McpServerConfig, MCP_SECRET_HEADER};

@@ -1,7 +1,6 @@
 use crate::handlers::shared::{ordering::*, paths::*};
 use crate::protocol::*;
 use crate::server::AppState;
-use kurbo;
 use photonic_core::{
     history::Command,
     node::{PathNode, SceneNode, SceneNodeKind},
@@ -264,7 +263,15 @@ pub async fn pathfinder_divide(state: &AppState, args: PathfinderDivideArgs) -> 
     let back_baked = apply_affine_to_path(&back_pn.path_data, back_node.transform.to_kurbo());
     let front_baked = apply_affine_to_path(&front_pn.path_data, front_node.transform.to_kurbo());
 
-    let faces = divide_paths(&back_baked, &front_baked);
+    let faces = match divide_paths(&back_baked, &front_baked) {
+        Ok(faces) => faces,
+        Err(e) => {
+            return ToolResult::error(format!(
+                "pathfinder_divide geometry stage failed for nodes {} and {}: {}",
+                back_id, front_id, e
+            ))
+        }
+    };
     if faces.is_empty() {
         return ToolResult::error("Divide produced no faces — shapes may not overlap");
     }
@@ -888,15 +895,28 @@ pub async fn divide_objects_below(state: &AppState, args: DivideObjectsBelowArgs
             apply_affine_to_path(&target_pn.path_data, target_node.transform.to_kurbo());
 
         // Skip if no overlap.
-        let overlap = boolean_op(&target_baked, &cutter_baked, BooleanOp::Intersect)
-            .unwrap_or_else(|_| {
-                photonic_core::path::PathData::from_bez_path(&kurbo::BezPath::new())
-            });
+        let overlap = match boolean_op(&target_baked, &cutter_baked, BooleanOp::Intersect) {
+            Ok(overlap) => overlap,
+            Err(e) => {
+                return ToolResult::error(format!(
+                    "divide_objects_below overlap-check stage failed for node {}: {}",
+                    target_id, e
+                ))
+            }
+        };
         if overlap.is_empty() {
             continue;
         }
 
-        let faces = divide_paths(&target_baked, &cutter_baked);
+        let faces = match divide_paths(&target_baked, &cutter_baked) {
+            Ok(faces) => faces,
+            Err(e) => {
+                return ToolResult::error(format!(
+                    "divide_objects_below divide stage failed for node {}: {}",
+                    target_id, e
+                ))
+            }
+        };
         commands.push(Command::RemoveNode {
             node_id: *target_id,
         });

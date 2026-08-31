@@ -144,65 +144,110 @@ pub(crate) fn selection_canvas_bounds(
 
 // ─── Direct-select helpers ────────────────────────────────────────────────────
 
-/// Like `bez_to_screen_points` but applies a node transform before projecting.
-pub(crate) fn bez_to_screen_points_xf(
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SampledSubpath {
+    pub(crate) points: Vec<Point>,
+    pub(crate) closed: bool,
+}
+
+/// Sample each contour in `bez` independently.
+///
+/// Keeping the contours separate is important for editor overlays: flattening
+/// every `MoveTo` into one point list invents a line from the previous contour
+/// to the next one (and closing that list invents another line back to the
+/// first contour).
+pub(crate) fn sample_path_subpaths(bez: &BezPath) -> Vec<SampledSubpath> {
+    let mut subpaths = Vec::new();
+    let mut points: Vec<Point> = Vec::new();
+    let mut cur_local: Option<Point> = None;
+    let mut closed = false;
+
+    let flush = |subpaths: &mut Vec<SampledSubpath>, points: &mut Vec<Point>, closed: &mut bool| {
+        if !points.is_empty() {
+            subpaths.push(SampledSubpath {
+                points: std::mem::take(points),
+                closed: *closed,
+            });
+        }
+        *closed = false;
+    };
+
+    for el in bez.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                flush(&mut subpaths, &mut points, &mut closed);
+                points.push(p);
+                cur_local = Some(p);
+            }
+            PathEl::LineTo(p) => {
+                if cur_local.is_some() {
+                    points.push(p);
+                    cur_local = Some(p);
+                }
+            }
+            PathEl::CurveTo(c1, c2, p) => {
+                if let Some(cur) = cur_local {
+                    for i in 1..=16u32 {
+                        let t = i as f64 / 16.0;
+                        let u = 1.0 - t;
+                        points.push(Point::new(
+                            u * u * u * cur.x
+                                + 3.0 * u * u * t * c1.x
+                                + 3.0 * u * t * t * c2.x
+                                + t * t * t * p.x,
+                            u * u * u * cur.y
+                                + 3.0 * u * u * t * c1.y
+                                + 3.0 * u * t * t * c2.y
+                                + t * t * t * p.y,
+                        ));
+                    }
+                    cur_local = Some(p);
+                }
+            }
+            PathEl::QuadTo(c, p) => {
+                if let Some(cur) = cur_local {
+                    for i in 1..=8u32 {
+                        let t = i as f64 / 8.0;
+                        let u = 1.0 - t;
+                        points.push(Point::new(
+                            u * u * cur.x + 2.0 * u * t * c.x + t * t * p.x,
+                            u * u * cur.y + 2.0 * u * t * c.y + t * t * p.y,
+                        ));
+                    }
+                    cur_local = Some(p);
+                }
+            }
+            PathEl::ClosePath => {
+                closed = true;
+                cur_local = points.first().copied();
+            }
+        }
+    }
+    flush(&mut subpaths, &mut points, &mut closed);
+    subpaths
+}
+
+/// Sample each contour independently, then apply the node transform and view.
+pub(crate) fn bez_to_screen_subpaths_xf(
     bez: &BezPath,
     view: &CanvasView,
     transform: &photonic_core::transform::Transform,
-) -> Vec<egui::Pos2> {
-    use kurbo::PathEl;
-    let mut pts: Vec<egui::Pos2> = Vec::new();
-    let mut cur_local = (0.0f64, 0.0f64);
-    for el in bez.elements() {
-        match el {
-            PathEl::MoveTo(p) => {
-                cur_local = (p.x, p.y);
-                let (cx, cy) = transform.apply(p.x, p.y);
-                let (sx, sy) = view.canvas_to_screen(cx, cy);
-                pts.push(egui::pos2(sx as f32, sy as f32));
-            }
-            PathEl::LineTo(p) => {
-                cur_local = (p.x, p.y);
-                let (cx, cy) = transform.apply(p.x, p.y);
-                let (sx, sy) = view.canvas_to_screen(cx, cy);
-                pts.push(egui::pos2(sx as f32, sy as f32));
-            }
-            PathEl::CurveTo(c1, c2, p) => {
-                let (x0, y0) = cur_local;
-                for i in 1..=16u32 {
-                    let t = i as f64 / 16.0;
-                    let u = 1.0 - t;
-                    let lx = u * u * u * x0
-                        + 3.0 * u * u * t * c1.x
-                        + 3.0 * u * t * t * c2.x
-                        + t * t * t * p.x;
-                    let ly = u * u * u * y0
-                        + 3.0 * u * u * t * c1.y
-                        + 3.0 * u * t * t * c2.y
-                        + t * t * t * p.y;
-                    let (cx, cy) = transform.apply(lx, ly);
+) -> Vec<(Vec<egui::Pos2>, bool)> {
+    sample_path_subpaths(bez)
+        .into_iter()
+        .map(|subpath| {
+            let points = subpath
+                .points
+                .into_iter()
+                .map(|p| {
+                    let (cx, cy) = transform.apply(p.x, p.y);
                     let (sx, sy) = view.canvas_to_screen(cx, cy);
-                    pts.push(egui::pos2(sx as f32, sy as f32));
-                }
-                cur_local = (p.x, p.y);
-            }
-            PathEl::QuadTo(c, p) => {
-                let (x0, y0) = cur_local;
-                for i in 1..=8u32 {
-                    let t = i as f64 / 8.0;
-                    let u = 1.0 - t;
-                    let lx = u * u * x0 + 2.0 * u * t * c.x + t * t * p.x;
-                    let ly = u * u * y0 + 2.0 * u * t * c.y + t * t * p.y;
-                    let (cx, cy) = transform.apply(lx, ly);
-                    let (sx, sy) = view.canvas_to_screen(cx, cy);
-                    pts.push(egui::pos2(sx as f32, sy as f32));
-                }
-                cur_local = (p.x, p.y);
-            }
-            PathEl::ClosePath => {}
-        }
-    }
-    pts
+                    egui::pos2(sx as f32, sy as f32)
+                })
+                .collect();
+            (points, subpath.closed)
+        })
+        .collect()
 }
 
 /// Extract `(element_index, local_point)` for every element that has an endpoint.
@@ -1989,6 +2034,92 @@ mod convert_anchor_tests {
 
     fn sel(indices: &[usize]) -> HashSet<usize> {
         indices.iter().copied().collect()
+    }
+
+    fn append_closed_contour(bez: &mut BezPath, x0: f64, y0: f64, x1: f64, y1: f64) {
+        bez.move_to(Point::new(x0, y0));
+        bez.curve_to(
+            Point::new(x0 + (x1 - x0) / 3.0, y0 - 2.0),
+            Point::new(x0 + 2.0 * (x1 - x0) / 3.0, y0 - 2.0),
+            Point::new(x1, y0),
+        );
+        bez.line_to(Point::new(x1, y1));
+        bez.curve_to(
+            Point::new(x1 - (x1 - x0) / 3.0, y1 + 2.0),
+            Point::new(x0 + (x1 - x0) / 3.0, y1 + 2.0),
+            Point::new(x0, y1),
+        );
+        bez.close_path();
+    }
+
+    #[test]
+    fn compound_selection_overlay_never_connects_contours() {
+        let mut bez = BezPath::new();
+        append_closed_contour(&mut bez, 0.0, 0.0, 100.0, 100.0);
+        append_closed_contour(&mut bez, 20.0, 20.0, 35.0, 40.0);
+        append_closed_contour(&mut bez, 60.0, 55.0, 80.0, 80.0);
+
+        // This is the exact point data used to build the direct-selection
+        // overlay. Each MoveTo must start a fresh contour, and each ClosePath
+        // may only close back to that contour's own first point.
+        let subpaths = sample_path_subpaths(&bez);
+        assert_eq!(subpaths.len(), 3);
+        assert!(subpaths.iter().all(|subpath| subpath.closed));
+
+        let segments: Vec<(usize, Point, Point)> = subpaths
+            .iter()
+            .enumerate()
+            .flat_map(|(contour_id, subpath)| {
+                let mut contour_segments: Vec<_> = subpath
+                    .points
+                    .windows(2)
+                    .map(|pair| (contour_id, pair[0], pair[1]))
+                    .collect();
+                contour_segments.push((
+                    contour_id,
+                    *subpath.points.last().unwrap(),
+                    subpath.points[0],
+                ));
+                contour_segments
+            })
+            .collect();
+
+        for contour_id in 0..2 {
+            let from = *subpaths[contour_id].points.last().unwrap();
+            let to = subpaths[contour_id + 1].points[0];
+            assert!(
+                !segments
+                    .iter()
+                    .any(|(_, segment_from, segment_to)| *segment_from == from && *segment_to == to),
+                "overlay contains a synthetic edge from contour {contour_id} to contour {}",
+                contour_id + 1
+            );
+        }
+
+        // Handles are resolved by element location. Verify every handle used by
+        // an anchor stays within the same MoveTo..ClosePath element range.
+        let contour_ranges = [(0usize, 4usize), (5, 9), (10, 14)];
+        for (anchor_index, _) in path_anchor_points(&bez) {
+            let (contour_id, &(start, end)) = contour_ranges
+                .iter()
+                .enumerate()
+                .find(|(_, (start, end))| (*start..=*end).contains(&anchor_index))
+                .expect("anchor belongs to one contour");
+            let (in_handle, out_handle) = logical_handles(&bez, anchor_index);
+            for (handle_index, _) in [in_handle, out_handle].into_iter().flatten() {
+                assert!(
+                    (start..=end).contains(&handle_index),
+                    "anchor {anchor_index} in contour {contour_id} borrowed handle {handle_index} from another contour"
+                );
+            }
+        }
+
+        // Applying a node transform must not merge the contour lists either.
+        let view = CanvasView::default();
+        let transform = photonic_core::transform::Transform::translate(56.0, 14.0);
+        let screen_subpaths = bez_to_screen_subpaths_xf(&bez, &view, &transform);
+        assert_eq!(screen_subpaths.len(), 3);
+        assert!(screen_subpaths.iter().all(|(_, closed)| *closed));
     }
 
     /// Cosine of the angle between the In and Out handle directions at anchor
