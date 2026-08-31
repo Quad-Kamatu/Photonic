@@ -1313,36 +1313,16 @@ fn write_mcp_config_at(
 }
 
 fn write_private_claude_settings(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        options.mode(0o600);
-        let mut file = options.open(path)?;
-        // `mode` only applies to newly-created files. Tighten an existing file
-        // before writing a secret so a permissive prior mode has no exposure
-        // window while the new contents are being written.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(contents)?;
-        file.sync_all()
-    }
-
-    #[cfg(not(unix))]
-    {
-        // Windows user-profile files inherit the profile directory's ACL.
-        let mut file = options.open(path)?;
-        file.write_all(contents)?;
-        file.sync_all()
-    }
+    // Stage the complete private payload before replacing the live settings
+    // file, so a failed write or replacement leaves the existing file intact.
+    photonic_core::write_atomic_file_with_mode(path, contents, 0o600)
 }
 
 /// Return the path to Claude Code's `~/.claude.json`.
