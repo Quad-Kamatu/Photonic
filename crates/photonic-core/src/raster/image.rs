@@ -13,8 +13,7 @@ use std::io::Cursor;
 ///
 /// This keeps decoded project data bounded while still allowing the largest
 /// built-in 24×36 inch, 300-DPI print preset (77,760,000 pixels).
-pub(crate) const MAX_RASTER_PIXELS: usize = 100_000_000;
-const MAX_DECODE_BYTES: u64 = (MAX_RASTER_PIXELS as u64) * 4;
+pub(crate) const MAX_PERSISTED_RASTER_PIXELS: usize = 100_000_000;
 
 /// An 8-bit RGBA raster image with straight alpha.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +28,8 @@ pub struct RasterImage {
 pub const MAX_RASTER_DIMENSION: u32 = 16_384;
 /// Maximum number of RGBA pixels accepted by MCP raster operations.
 pub const MAX_RASTER_PIXELS: usize = 64 * 1024 * 1024;
+/// Maximum decoder allocation budget for one encoded raster import.
+pub const MAX_RASTER_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 
 impl RasterImage {
     /// A fully transparent image of the given size.
@@ -217,12 +218,19 @@ fn decode_encoded(bytes: &[u8]) -> Result<image::DynamicImage, String> {
         .map_err(|e| e.to_string())?;
     let (width, height) = reader.into_dimensions().map_err(|e| e.to_string())?;
     checked_raster_pixel_count(width, height)?;
+    if width > MAX_RASTER_DIMENSION || height > MAX_RASTER_DIMENSION {
+        return Err(format!(
+            "raster dimensions {width}x{height} exceed the maximum of {MAX_RASTER_DIMENSION}x{MAX_RASTER_DIMENSION}"
+        ));
+    }
 
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits.max_image_width = Some(MAX_RASTER_DIMENSION);
+    limits.max_image_height = Some(MAX_RASTER_DIMENSION);
+    limits.max_alloc = Some(MAX_RASTER_DECODED_BYTES);
     reader.limits(limits);
     reader.decode().map_err(|e| e.to_string())
 }
@@ -234,10 +242,10 @@ pub(crate) fn checked_raster_pixel_count(width: u32, height: u32) -> Result<usiz
     let pixels = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| "raster dimensions overflow pixel count".to_string())?;
-    if pixels > MAX_RASTER_PIXELS {
+    if pixels > MAX_PERSISTED_RASTER_PIXELS {
         return Err(format!(
             "raster dimensions {}x{} exceed maximum of {} pixels",
-            width, height, MAX_RASTER_PIXELS
+            width, height, MAX_PERSISTED_RASTER_PIXELS
         ));
     }
     Ok(pixels)
@@ -395,6 +403,27 @@ mod tests {
     }
 
     #[test]
+    fn encoded_image_rejects_dimensions_over_limit() {
+        let encoded = RasterImage::new(MAX_RASTER_DIMENSION + 1, 1).to_png();
+        let err = RasterImage::from_encoded(&encoded).unwrap_err();
+
+        assert!(err.to_ascii_lowercase().contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn encoded_image_rejects_decoded_bytes_over_limit() {
+        // A header-only PPM is enough to exercise ImageReader's allocation
+        // check: it rejects the advertised decoded size before reading pixels.
+        let width = MAX_RASTER_DIMENSION;
+        let height = (MAX_RASTER_DECODED_BYTES / 3 / u64::from(width) + 1) as u32;
+        assert!(height <= MAX_RASTER_DIMENSION);
+        let header = format!("P6\n{width} {height}\n255\n");
+
+        let err = RasterImage::from_encoded(header.as_bytes()).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("limit"), "{err}");
+    }
+
+    #[test]
     fn serde_roundtrip_via_png() {
         let mut img = RasterImage::filled(5, 5, [0, 128, 255, 255]);
         img.set_pixel(2, 2, [255, 0, 0, 128]);
@@ -419,7 +448,7 @@ mod tests {
     fn serde_rejects_oversized_dimensions_before_decoding() {
         let img = RasterImage::filled(1, 1, [1, 2, 3, 255]);
         let mut value = serde_json::to_value(&img).unwrap();
-        value["width"] = serde_json::json!((MAX_RASTER_PIXELS + 1) as u64);
+        value["width"] = serde_json::json!((MAX_PERSISTED_RASTER_PIXELS + 1) as u64);
 
         let err = serde_json::from_value::<RasterImage>(value).unwrap_err();
         assert!(err.to_string().contains("exceed maximum"));

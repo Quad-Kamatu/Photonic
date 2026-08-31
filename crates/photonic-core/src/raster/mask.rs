@@ -5,7 +5,9 @@
 //! give partial coverage (feathered edges, anti-aliasing), exactly like a
 //! Photoshop selection or layer mask.
 
-use super::image::{checked_raster_pixel_count, luma, RasterImage, MAX_RASTER_PIXELS};
+use super::image::{
+    checked_raster_pixel_count, luma, RasterImage, MAX_PERSISTED_RASTER_PIXELS,
+};
 use serde::{
     de::{self, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
@@ -46,18 +48,18 @@ where
             A: SeqAccess<'de>,
         {
             let size_hint = seq.size_hint().unwrap_or(0);
-            if size_hint > MAX_RASTER_PIXELS {
+            if size_hint > MAX_PERSISTED_RASTER_PIXELS {
                 return Err(de::Error::custom(format!(
                     "mask data exceeds maximum of {} pixels",
-                    MAX_RASTER_PIXELS
+                    MAX_PERSISTED_RASTER_PIXELS
                 )));
             }
             let mut data = Vec::with_capacity(size_hint);
             while let Some(value) = seq.next_element::<u8>()? {
-                if data.len() >= MAX_RASTER_PIXELS {
+                if data.len() >= MAX_PERSISTED_RASTER_PIXELS {
                     return Err(de::Error::custom(format!(
                         "mask data exceeds maximum of {} pixels",
-                        MAX_RASTER_PIXELS
+                        MAX_PERSISTED_RASTER_PIXELS
                     )));
                 }
                 data.push(value);
@@ -583,7 +585,7 @@ mod tests {
     #[test]
     fn serde_rejects_oversized_pixel_count() {
         let value = serde_json::json!({
-            "width": (MAX_RASTER_PIXELS + 1) as u64,
+            "width": (MAX_PERSISTED_RASTER_PIXELS + 1) as u64,
             "height": 1,
             "data": []
         });
