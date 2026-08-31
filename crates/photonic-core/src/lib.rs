@@ -41,7 +41,9 @@ pub use node::{
     PrimitiveKind, RasterNode, SceneNode, SceneNodeKind,
 };
 pub use path::PathData;
-pub use photon_file::{load_photon, save_photon, write_atomic_file, PHOTON_FORMAT_VERSION};
+pub use photon_file::{
+    load_photon, save_photon, write_atomic_file, write_atomic_file_with_mode, PHOTON_FORMAT_VERSION,
+};
 pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{
