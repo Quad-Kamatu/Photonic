@@ -97,7 +97,7 @@ impl PhotonicApp {
             let render_doc = if has_text {
                 let font_system = self
                     .mixed_scene_font_system
-                    .get_or_insert_with(glyphon::FontSystem::new);
+                    .get_or_insert_with(photonic_render::new_font_system);
                 outlined = photonic_render::outline_document_text(doc, font_system);
                 &outlined
             } else {

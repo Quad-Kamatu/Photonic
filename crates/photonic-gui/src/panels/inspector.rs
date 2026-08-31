@@ -19,6 +19,278 @@ pub(crate) fn draw_navigator_section(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     }
 }
 
+fn draw_font_picker(
+    ui: &mut Ui,
+    state: &mut crate::font_library::FontLibraryState,
+    node_id: NodeId,
+    current_family: &str,
+) -> Option<PanelAction> {
+    use crate::font_library::{CatalogStatus, FontLibraryTab};
+
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(current_family).strong());
+        if state.is_family_managed(current_family) {
+            ui.label(RichText::new("Photonic").small().weak());
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.tab, FontLibraryTab::Installed, "Installed");
+        ui.selectable_value(&mut state.tab, FontLibraryTab::Library, "Library");
+    });
+    ui.add(
+        egui::TextEdit::singleline(&mut state.search)
+            .hint_text("Search fonts, category, or language…")
+            .desired_width(f32::INFINITY),
+    );
+
+    match state.tab {
+        FontLibraryTab::Installed => {
+            let query = state.search.trim().to_lowercase();
+            let visible: Vec<String> = state
+                .installed_families
+                .iter()
+                .filter(|family| query.is_empty() || family.to_lowercase().contains(&query))
+                .take(150)
+                .cloned()
+                .collect();
+            egui::ScrollArea::vertical()
+                .id_salt("installed_font_list")
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for family in visible {
+                        let selected = family.eq_ignore_ascii_case(current_family);
+                        let managed = state.is_family_managed(&family);
+                        let label = if managed {
+                            format!("{family}  {}", ph::CHECK)
+                        } else {
+                            family.clone()
+                        };
+                        if ui
+                            .selectable_label(selected, label)
+                            .on_hover_text(if managed {
+                                "Installed through Photonic"
+                            } else {
+                                "Available from the operating system"
+                            })
+                            .clicked()
+                        {
+                            action = Some(PanelAction::SetFontFamily { node_id, family });
+                        }
+                    }
+                });
+            if state.installed_families.is_empty() {
+                ui.label(RichText::new("No installed font families were found.").weak());
+            }
+        }
+        FontLibraryTab::Library => {
+            state.ensure_catalog();
+            match &state.catalog_status {
+                CatalogStatus::NotLoaded | CatalogStatus::Loading => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading the open-source catalog…");
+                    });
+                }
+                CatalogStatus::Error(error) => {
+                    ui.colored_label(Color32::from_rgb(220, 90, 90), error);
+                    if ui.small_button("Retry").clicked() {
+                        state.retry_catalog();
+                    }
+                }
+                CatalogStatus::Ready => {
+                    let query = state.search.trim().to_lowercase();
+                    let visible: Vec<usize> = state
+                        .catalog
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, font)| {
+                            crate::font_library::is_supported_open_license(&font.license)
+                                && (query.is_empty()
+                                    || font.family.to_lowercase().contains(&query)
+                                    || font.category.to_lowercase().contains(&query)
+                                    || font
+                                        .subsets
+                                        .iter()
+                                        .any(|subset| subset.to_lowercase().contains(&query)))
+                        })
+                        .map(|(index, _)| index)
+                        .take(100)
+                        .collect();
+                    let mut choose = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("fontsource_font_list")
+                        .max_height(190.0)
+                        .show(ui, |ui| {
+                            for index in visible {
+                                let font = &state.catalog[index];
+                                let selected = state.selected_id.as_deref() == Some(&font.id);
+                                let installed = state.is_family_managed(&font.family);
+                                let suffix = if installed {
+                                    "installed".to_string()
+                                } else if font.category.is_empty() {
+                                    font.license.clone()
+                                } else {
+                                    font.category.clone()
+                                };
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        format!("{}  ·  {}", font.family, suffix),
+                                    )
+                                    .clicked()
+                                {
+                                    choose = Some(font.clone());
+                                }
+                            }
+                        });
+
+                    if let Some(font) = choose {
+                        state.selected_id = Some(font.id.clone());
+                        state.selected_subset = if font.def_subset.is_empty() {
+                            font.subsets
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "latin".into())
+                        } else {
+                            font.def_subset.clone()
+                        };
+                        state.start_preview(font.id, font.family, state.selected_subset.clone());
+                    }
+
+                    let selected = state
+                        .selected_id
+                        .as_ref()
+                        .and_then(|id| state.catalog.iter().find(|font| &font.id == id))
+                        .cloned();
+                    if let Some(font) = selected {
+                        ui.separator();
+                        ui.label(RichText::new(&font.family).strong());
+                        let kind = if font.variable { "variable" } else { "static" };
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {} · {}",
+                                font.category, kind, font.license
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                        if !font.weights.is_empty() {
+                            let weights = font
+                                .weights
+                                .iter()
+                                .map(u16::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            ui.label(RichText::new(format!("Weights: {weights}")).small());
+                        }
+                        if !font.subsets.is_empty() {
+                            if !font.subsets.contains(&state.selected_subset) {
+                                state.selected_subset = if font.def_subset.is_empty() {
+                                    font.subsets[0].clone()
+                                } else {
+                                    font.def_subset.clone()
+                                };
+                            }
+                            let prior_subset = state.selected_subset.clone();
+                            egui::ComboBox::from_id_salt("font_library_subset")
+                                .selected_text(&state.selected_subset)
+                                .show_ui(ui, |ui| {
+                                    for subset in &font.subsets {
+                                        ui.selectable_value(
+                                            &mut state.selected_subset,
+                                            subset.clone(),
+                                            subset,
+                                        );
+                                    }
+                                });
+                            if state.selected_subset != prior_subset {
+                                state.start_preview(
+                                    font.id.clone(),
+                                    font.family.clone(),
+                                    state.selected_subset.clone(),
+                                );
+                            }
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.preview_text)
+                                .hint_text("Preview phrase")
+                                .desired_width(f32::INFINITY),
+                        )
+                        .on_hover_text("Edit the live type specimen shown below");
+
+                        let preview_token = format!("{}:{}", font.id, state.selected_subset);
+                        if state.preview_loading_token.as_deref() == Some(&preview_token) {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Loading type specimen…");
+                            });
+                        } else if state.preview_ready_token.as_deref() == Some(&preview_token) {
+                            if let Some(font_key) = &state.preview_font_key {
+                                egui::Frame::group(ui.style())
+                                    .inner_margin(egui::Margin::same(8.0))
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new(&state.preview_text).font(
+                                            egui::FontId::new(
+                                                22.0,
+                                                egui::FontFamily::Name(font_key.clone().into()),
+                                            ),
+                                        ));
+                                    });
+                            }
+                        } else if let Some(error) = &state.preview_error {
+                            ui.label(RichText::new(format!("Preview unavailable: {error}")).weak());
+                        }
+
+                        let installing = state.installing_id.as_deref() == Some(&font.id);
+                        let another_installing = state.installing_id.is_some() && !installing;
+                        if state.is_subset_managed(&font.id, &state.selected_subset) {
+                            if ui.button("Apply to selected text").clicked() {
+                                action = Some(PanelAction::SetFontFamily {
+                                    node_id,
+                                    family: font.family,
+                                });
+                            }
+                        } else if installing {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Downloading and validating family…");
+                            });
+                        } else if another_installing {
+                            ui.add_enabled(false, egui::Button::new("Another font is installing…"));
+                        } else if ui
+                            .button(format!("{}  Add & Apply", ph::DOWNLOAD_SIMPLE))
+                            .on_hover_text(
+                                "Download every weight/style for this character set into Photonic",
+                            )
+                            .clicked()
+                        {
+                            action = Some(PanelAction::InstallFont {
+                                node_id,
+                                id: font.id,
+                                family: font.family,
+                                subset: state.selected_subset.clone(),
+                            });
+                        }
+                    } else {
+                        ui.label(RichText::new("Choose a family to see its details.").weak());
+                    }
+                    ui.label(
+                        RichText::new("Catalog and font files provided by Fontsource.")
+                            .small()
+                            .weak(),
+                    );
+                }
+            }
+        }
+    }
+    if state.is_busy() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    action
+}
+
 pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let doc = ctx.doc;
     let selected_node = ctx.selected_node;
@@ -42,6 +314,7 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let raster_mask_contiguous = &mut *ctx.raster_mask_contiguous;
     let raster_color_range_target = ctx.raster_color_range_target;
     let rmbg_model_cached = ctx.rmbg_model_cached;
+    let font_library = &mut *ctx.font_library;
     let q = ctx.q.as_str();
     let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
     let forced_open = ctx.forced_open;
@@ -1376,6 +1649,19 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         // ── Text Operations ────────────────────────────────────────────────
         if let SceneNodeKind::Text(tn) = &node.kind {
             let text_nid = node.id;
+            if matches("Font") {
+                egui::CollapsingHeader::new("Font")
+                    .default_open(true)
+                    .open(forced_open)
+                    .show(ui, |ui| {
+                        if let Some(requested) =
+                            draw_font_picker(ui, font_library, text_nid, &tn.font_family)
+                        {
+                            action = Some(requested);
+                        }
+                    });
+                ui.add_space(2.0);
+            }
             if matches("Text Operations") {
                 let mut line_h = tn.line_height;
                 let mut letter_sp = tn.letter_spacing;

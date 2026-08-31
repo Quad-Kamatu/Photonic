@@ -1144,7 +1144,7 @@ async fn create_checkin_nodes(
         return ToolResult::error("ModeSelector origin must be finite");
     }
     let card_padding = page.card_padding_responsive.resolve(viewport.0);
-    let mut font_system = FontSystem::new();
+    let mut font_system = photonic_render::new_font_system();
     let mut nodes = Vec::new();
     let mut children = vec![rect_node(
         "Kiosk blue background",
@@ -3984,7 +3984,7 @@ export function ModeSelector() { return (
             .split(',')
             .map(|value| value.parse().unwrap())
             .collect();
-        let mut font_system = FontSystem::new();
+        let mut font_system = photonic_render::new_font_system();
         let (label_width, label_height) = measure_text(&mut font_system, "Select Event", 16., 500);
         let inline_left = icon_box[0];
         let inline_right = label.transform.matrix[4] + label_width;

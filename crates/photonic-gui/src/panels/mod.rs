@@ -746,6 +746,15 @@ pub enum PanelAction {
     SetFontStyle { node_id: NodeId, style: String },
     /// Set the font weight (100–900) on a text node.
     SetFontWeight { node_id: NodeId, weight: u16 },
+    /// Set the font family of a text node to an already available face.
+    SetFontFamily { node_id: NodeId, family: String },
+    /// Download a Fontsource family into Photonic's local cache, then apply it.
+    InstallFont {
+        node_id: NodeId,
+        id: String,
+        family: String,
+        subset: String,
+    },
     /// Flow a text node inside a closed path area.
     SetTextArea {
         text_node_id: NodeId,
@@ -1009,6 +1018,7 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) selected_ids: &'a [NodeId],
     pub(crate) point_edit_node: Option<NodeId>,
     pub(crate) point_selected: &'a [usize],
+    pub(crate) font_library: &'a mut crate::font_library::FontLibraryState,
     pub(crate) prop_search: &'a mut String,
     pub(crate) shear_x: &'a mut f64,
     pub(crate) shear_y: &'a mut f64,

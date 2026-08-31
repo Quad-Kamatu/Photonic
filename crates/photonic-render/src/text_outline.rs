@@ -18,7 +18,45 @@ use photonic_core::{
     node::{FontStyle, NodeId, PathNode, SceneNodeKind, TextNode},
     path::PathData,
 };
+use std::path::PathBuf;
 use ttf_parser::{GlyphId, OutlineBuilder};
+
+/// Per-user directory containing fonts installed through Photonic's font
+/// library. Keeping these files separate from the operating-system font
+/// folders makes installs reversible and avoids requiring elevated access.
+pub fn photonic_font_cache_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("PHOTONIC_FONT_CACHE_DIR") {
+        return PathBuf::from(path);
+    }
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("LOCALAPPDATA").ok().map(PathBuf::from))
+        .or_else(|| std::env::var("APPDATA").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".cache"))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("Photonic").join("fonts")
+}
+
+/// Add every font managed by Photonic to an existing font system.
+pub fn load_photonic_fonts(font_system: &mut FontSystem) {
+    let dir = photonic_font_cache_dir();
+    if dir.is_dir() {
+        font_system.db_mut().load_fonts_dir(dir);
+    }
+}
+
+/// Construct the shared system-font view used throughout Photonic, including
+/// app-managed fonts downloaded through the font library.
+pub fn new_font_system() -> FontSystem {
+    let mut font_system = FontSystem::new();
+    load_photonic_fonts(&mut font_system);
+    font_system
+}
 
 // ─── Glyph outline builder ────────────────────────────────────────────────────
 

@@ -517,7 +517,7 @@ impl PhotonicRenderer {
         }
 
         // ── Glyphon text rendering ─────────────────────────────────────────────
-        let font_system = FontSystem::new();
+        let font_system = crate::new_font_system();
         let swash_cache = SwashCache::new();
         let text_glyph_cache = Cache::new(&device);
         let text_viewport = Viewport::new(&device, &text_glyph_cache);
@@ -647,6 +647,32 @@ impl PhotonicRenderer {
             .fold(0.0_f32, |a, h| a + h);
         let height = if height == 0.0 { line_height } else { height };
         (width as f64, height as f64)
+    }
+
+    /// Load a newly installed font into the live renderer without restarting.
+    pub fn load_font_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let before = self.font_system.db().len();
+        self.font_system
+            .db_mut()
+            .load_font_file(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if self.font_system.db().len() == before {
+            return Err(format!("{} contains no usable font faces", path.display()));
+        }
+        Ok(())
+    }
+
+    /// Sorted, de-duplicated family names visible to the live text renderer.
+    pub fn font_families(&self) -> Vec<String> {
+        let mut families: Vec<String> = self
+            .font_system
+            .db()
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+            .collect();
+        families.sort_by_key(|name| name.to_lowercase());
+        families.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        families
     }
 
     /// Convenience: full render loop without an egui overlay.

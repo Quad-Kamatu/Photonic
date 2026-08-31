@@ -1112,6 +1112,8 @@ pub struct PhotonicApp {
     mixed_scene_tex_cache: Option<MixedSceneTexCache>,
     /// Font database used to outline text into the ordered CPU composite.
     mixed_scene_font_system: Option<glyphon::FontSystem>,
+    /// Installed fonts plus the lazily-fetched Fontsource browser state.
+    font_library: crate::font_library::FontLibraryState,
 
     /// Lazily-loaded Photonic logo texture for the top toolbar (embedded PNG).
     logo_texture: Option<egui::TextureHandle>,
@@ -1600,6 +1602,7 @@ impl Default for PhotonicApp {
             logo_texture: None,
             mixed_scene_tex_cache: None,
             mixed_scene_font_system: None,
+            font_library: crate::font_library::FontLibraryState::default(),
             raster_brush_radius: 16.0,
             raster_brush_hardness: 0.8,
             raster_stroke_orig: None,
@@ -2151,6 +2154,7 @@ impl PhotonicApp {
             selected_ids: &selected_ids,
             point_edit_node: self.point_edit_node,
             point_selected: &self.point_selected,
+            font_library: &mut self.font_library,
             prop_search: &mut self.prop_search,
             shear_x: &mut self.shear_x,
             shear_y: &mut self.shear_y,
@@ -2235,6 +2239,110 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // Keep the font picker synchronized with the renderer's system-font
+        // database, poll its background catalog/download jobs, and hot-load a
+        // completed install into every live text path before drawing this frame.
+        self.font_library.sync_installed_families(renderer);
+        self.font_library.poll_catalog();
+        if let Some(result) = self.font_library.poll_preview() {
+            match result {
+                Ok(preview) => {
+                    let mut definitions =
+                        ctx.fonts(|fonts| fonts.lock().fonts.definitions().clone());
+                    if let Some(old_key) = self.font_library.preview_font_key.take() {
+                        definitions.font_data.remove(&old_key);
+                        definitions
+                            .families
+                            .remove(&egui::FontFamily::Name(old_key.into()));
+                    }
+                    let font_key = format!("photonic-preview-{}", preview.id);
+                    definitions
+                        .font_data
+                        .insert(font_key.clone(), egui::FontData::from_owned(preview.bytes));
+                    definitions.families.insert(
+                        egui::FontFamily::Name(font_key.clone().into()),
+                        vec![font_key.clone()],
+                    );
+                    ctx.set_fonts(definitions);
+                    self.font_library.set_preview_ready(preview.token, font_key);
+                    ctx.request_repaint();
+                }
+                Err(error) => self.font_library.preview_error = Some(error),
+            }
+        }
+        if let Some(result) = self.font_library.poll_install() {
+            match result {
+                Ok(installed) => {
+                    let mut load_error = None;
+                    for path in &installed.paths {
+                        if let Err(error) = renderer.load_font_file(path) {
+                            load_error = Some(error);
+                            break;
+                        }
+                        if let Some(font_system) = &mut self.mixed_scene_font_system {
+                            let before = font_system.db().len();
+                            if let Err(error) = font_system.db_mut().load_font_file(path) {
+                                load_error = Some(format!("{}: {error}", path.display()));
+                                break;
+                            }
+                            if font_system.db().len() == before {
+                                load_error = Some(format!(
+                                    "{} contains no usable font faces",
+                                    path.display()
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    self.font_library.refresh_managed_fonts();
+                    self.font_library
+                        .set_installed_families(renderer.font_families());
+                    self.mixed_scene_tex_cache = None;
+
+                    if let Some(error) = load_error {
+                        self.file_status =
+                            Some(format!("Font installed but could not load: {error}"));
+                    } else if let Some(old_node) = doc.nodes.get(&installed.node_id).cloned() {
+                        if matches!(old_node.kind, SceneNodeKind::Text(_)) {
+                            let mut new_node = old_node.clone();
+                            if let SceneNodeKind::Text(text) = &mut new_node.kind {
+                                text.font_family = installed.font.family.clone();
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: old_node,
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                            self.file_status = Some(format!(
+                                "Installed and applied {} ({}, {})",
+                                installed.font.family,
+                                installed.font.subset,
+                                installed.font.license
+                            ));
+                        } else {
+                            self.file_status = Some(format!(
+                                "Installed {} — the original text selection changed",
+                                installed.font.family
+                            ));
+                        }
+                    } else {
+                        self.file_status = Some(format!(
+                            "Installed {} — the original text object was removed",
+                            installed.font.family
+                        ));
+                    }
+                    ctx.request_repaint();
+                }
+                Err(error) => self.file_status = Some(format!("Font install failed: {error}")),
+            }
+        }
+        if self.font_library.is_busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
 
         // ── Quit-from-welcome shortcut ────────────────────────────────────────
         // The quit prompt only runs in the editor (past the welcome early-return).

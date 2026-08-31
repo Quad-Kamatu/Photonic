@@ -4058,6 +4058,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "ureq",
  "uuid",
  "wgpu",
  "winit",

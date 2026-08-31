@@ -6048,6 +6048,49 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::SetFontFamily { node_id, family } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        if matches!(node.kind, SceneNodeKind::Text(_)) {
+                            let already_selected = matches!(
+                                &node.kind,
+                                SceneNodeKind::Text(text) if text.font_family == family
+                            );
+                            if already_selected {
+                                continue 'actions;
+                            }
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Text(ref mut text) = new_node.kind {
+                                text.font_family = family;
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                            self.mixed_scene_tex_cache = None;
+                        }
+                    }
+                }
+
+                PanelAction::InstallFont {
+                    node_id,
+                    id,
+                    family,
+                    subset,
+                } => match self
+                    .font_library
+                    .start_install(node_id, id, family.clone(), subset)
+                {
+                    Ok(()) => {
+                        self.file_status = Some(format!("Downloading {family}…"));
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    Err(error) => self.file_status = Some(format!("Font install failed: {error}")),
+                },
+
                 PanelAction::SetTextPath {
                     text_node_id,
                     path_node_id,

@@ -3,6 +3,7 @@ pub mod color_convert;
 pub mod color_popup;
 pub mod commands;
 pub mod disk_search;
+pub mod font_library;
 pub mod global_search;
 pub mod hotbar;
 pub mod lightfall;
