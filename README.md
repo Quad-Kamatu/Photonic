@@ -30,7 +30,7 @@ cargo build --release
 ```sh
 cargo run --release
 # or open a saved document:
-cargo run --release -- path/to/file.photonic
+cargo run --release -- path/to/file.photon
 ```
 
 ### Running the MCP server (headless)
@@ -67,7 +67,7 @@ photonic/
 ├── docs/
 │   ├── architecture.md    # Crate design and internals
 │   ├── mcp-api.md         # MCP tool reference
-│   └── file-format.md     # .photonic file format
+│   └── file-format.md     # .photon file format
 └── ROADMAP.md             # Planned features
 ```
 
@@ -78,7 +78,7 @@ photonic/
 | [docs/architecture.md](docs/architecture.md) | Crate breakdown, data model, concurrency model |
 | [docs/raster-editing.md](docs/raster-editing.md) | Raster (pixel) editing subsystem — model, ops, MCP surface, phasing |
 | [docs/mcp-api.md](docs/mcp-api.md) | Every MCP tool with parameters and examples |
-| [docs/file-format.md](docs/file-format.md) | `.photonic` JSON schema reference |
+| [docs/file-format.md](docs/file-format.md) | `.photon` JSON schema reference |
 
 ## Crates at a Glance
 

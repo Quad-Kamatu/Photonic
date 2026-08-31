@@ -24,7 +24,7 @@ Insert a new anchor point at the midpoint of every segment in the selected path 
 
 Attach a non-printing text comment to a node or to the document as a whole.
 
-Annotations are stored in the `.photonic` file but are completely invisible in all export formats (SVG, PNG, ICO). They are not part of the undo/redo history.
+Annotations are stored in the `.photon` file but are completely invisible in all export formats (SVG, PNG, ICO). They are not part of the undo/redo history.
 
 Use cases:
 - AI agents recording *why* a design decision was made: "Chose this radius because the brief said 'approachable'."
@@ -3026,7 +3026,7 @@ Create a live property constraint binding a node property to an arithmetic expre
 
 ## `set_document_bleed`
 
-Set the print bleed and/or slug margins for the document. Bleed is the extra artwork bled past the trim edge (typically 3 mm) to prevent white borders after cutting. Slug is the additional area outside bleed reserved for printer marks and file info. Values persist in the .photonic file. Provide only the fields you want to change.
+Set the print bleed and/or slug margins for the document. Bleed is the extra artwork bled past the trim edge (typically 3 mm) to prevent white borders after cutting. Slug is the additional area outside bleed reserved for printer marks and file info. Values persist in the .photon file. Provide only the fields you want to change.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -3035,7 +3035,7 @@ Set the print bleed and/or slug margins for the document. Bleed is the extra art
 
 ## `set_document_color_mode`
 
-Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photonic file and is used as the default color space when exporting PDF without an explicit color_mode override.
+Set the document color mode to RGB or CMYK. CMYK is required for print-production PDF/X output. The mode persists in the .photon file and is used as the default color space when exporting PDF without an explicit color_mode override.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -3043,7 +3043,7 @@ Set the document color mode to RGB or CMYK. CMYK is required for print-productio
 
 ## `set_document_dpi`
 
-Set the document resolution (DPI) — the honored physical-size property on export: exported PDF/raster physical size = pixel size / dpi × 72 pt. A 1050×600 px document at 300 DPI exports at 252×144 pt (3.5×2 in); the same pixels at 72 DPI export at 1050×600 pt. Presets set this automatically (e.g. 300 for print). Default is 72 (px ≡ pt). Persists in the .photonic file.
+Set the document resolution (DPI) — the honored physical-size property on export: exported PDF/raster physical size = pixel size / dpi × 72 pt. A 1050×600 px document at 300 DPI exports at 252×144 pt (3.5×2 in); the same pixels at 72 DPI export at 1050×600 pt. Presets set this automatically (e.g. 300 for print). Default is 72 (px ≡ pt). Persists in the .photon file.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |

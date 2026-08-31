@@ -3,7 +3,7 @@
 Photonic began life as a **vector** editor (paths, booleans, gradients, text).
 This document specifies the **raster** subsystem that brings Photoshop-grade
 pixel editing into the same document, the same scene graph, the same MCP tool
-surface, and the same undo history — so a single `.photonic` file can hold a
+surface, and the same undo history — so a single `.photon` file can hold a
 retouched photograph *and* vector annotation on top of it.
 
 The north star: **a Photoshop user should be able to do their core work here**
@@ -160,7 +160,7 @@ pub struct RasterImage {
 }
 ```
 Serialized as `{ "width", "height", "png": "<base64>" }` — PNG-compressed via
-the `image` crate, base64 for JSON transport. Keeps `.photonic` files text and
+the `image` crate, base64 for JSON transport. Keeps `.photon` files text and
 diffable while staying compact.
 
 ### `Mask` (`raster/mask.rs`)

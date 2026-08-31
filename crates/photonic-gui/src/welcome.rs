@@ -17,7 +17,7 @@ use egui::{
     TextureHandle, TextureOptions, Vec2,
 };
 use egui_phosphor::regular as ph;
-use photonic_core::Document;
+use photonic_core::{Document, PHOTON_FILE_EXTENSION};
 use photonic_render::{canvas::CanvasView, compositor::composite_document};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1280,9 +1280,11 @@ impl WelcomeState {
         if self.disk_roots.is_empty() {
             ui.add_space(28.0);
             ui.label(
-                RichText::new("Add a folder or drive to search it for .photon files.")
-                    .color(TEXT_MUTED)
-                    .size(13.0),
+                RichText::new(format!(
+                    "Add a folder or drive to search it for .{PHOTON_FILE_EXTENSION} files."
+                ))
+                .color(TEXT_MUTED)
+                .size(13.0),
             );
             return;
         }
@@ -1298,7 +1300,7 @@ impl WelcomeState {
             let status = if self.disk.scanning {
                 format!("Scanning…  {} found", self.disk.files.len())
             } else {
-                format!("{} .photon files", self.disk.files.len())
+                format!("{} .{PHOTON_FILE_EXTENSION} files", self.disk.files.len())
             };
             ui.label(RichText::new(status).size(11.5).color(TEXT_MUTED));
             ui.add_space(10.0);
@@ -1340,9 +1342,9 @@ impl WelcomeState {
                 if files.is_empty() {
                     ui.add_space(14.0);
                     let msg = if scanning {
-                        "Scanning…"
+                        "Scanning…".to_string()
                     } else {
-                        "No .photon files found in these folders."
+                        format!("No .{PHOTON_FILE_EXTENSION} files found in these folders.")
                     };
                     ui.label(RichText::new(msg).color(TEXT_MUTED).size(12.0).italics());
                     return;

@@ -34,6 +34,9 @@ use crate::history::HistorySnapshot;
 /// `photon_history` payload is laid out.
 pub const PHOTON_FORMAT_VERSION: u32 = 1;
 
+/// Canonical extension for native Photonic documents.
+pub const PHOTON_FILE_EXTENSION: &str = "photon";
+
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Write bytes to `path` without exposing a partially written destination.
