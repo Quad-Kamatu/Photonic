@@ -1020,8 +1020,8 @@ Create a blank raster (pixel) layer of a given size — a transparent canvas to 
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `height` | integer | yes | Height in pixels (maximum 16384; width × height maximum 67108864) |
-| `width` | integer | yes | Width in pixels (maximum 16384; width × height maximum 67108864) |
+| `height` | integer | yes | Height in pixels |
+| `width` | integer | yes | Width in pixels |
 | `fill` | any | no | Optional fill color: hex string (#rrggbb / #rrggbbaa) or [r,g,b,a] (0-255). Default: transparent. |
 | `layer_id` | string | no |  |
 | `name` | string | no |  |
