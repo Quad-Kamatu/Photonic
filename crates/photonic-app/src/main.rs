@@ -1,20 +1,27 @@
 mod args;
+#[cfg(test)]
+#[allow(dead_code)]
+mod claude_client;
 mod cli;
 mod mcp_proxy;
 mod repl;
 mod script;
 
+const MCP_SECRET_ENV: &str = "PHOTONIC_MCP_SECRET";
+const MCP_SECRET_ENV_PLACEHOLDER: &str = "${PHOTONIC_MCP_SECRET}";
+
 use anyhow::Result;
 use args::Args;
 use clap::Parser;
 use egui_wgpu::ScreenDescriptor;
-use photonic_core::{document::Document, history::CommandHistory, AuditLog};
+use photonic_core::{document::Document, history::CommandHistory, AuditLog, PHOTON_FILE_EXTENSION};
 use photonic_gui::{NativeClipboardPaste, PhotonicApp};
 use photonic_mcp::server::AppState;
 use photonic_mcp::{McpServer, McpServerConfig, MCP_SECRET_HEADER};
 use photonic_render::PhotonicRenderer;
 use repl::LuaRepl;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -36,8 +43,30 @@ use winit::{
 fn native_project_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(PHOTON_FILE_EXTENSION))
         .then(|| path.to_path_buf())
+}
+
+fn read_svg_file(path: &std::path::Path) -> Result<String> {
+    let max_bytes = photonic_core::MAX_SVG_INPUT_BYTES as u64;
+    if std::fs::metadata(path)?.len() > max_bytes {
+        anyhow::bail!(
+            "SVG file exceeds the {}-byte import limit",
+            photonic_core::MAX_SVG_INPUT_BYTES
+        );
+    }
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > photonic_core::MAX_SVG_INPUT_BYTES {
+        anyhow::bail!(
+            "SVG file exceeds the {}-byte import limit",
+            photonic_core::MAX_SVG_INPUT_BYTES
+        );
+    }
+    String::from_utf8(bytes).map_err(Into::into)
 }
 
 /// Detect a paste shortcut before egui consumes the keyboard event. egui-winit
@@ -127,6 +156,7 @@ fn looks_like_svg_clipboard_text(text: &str) -> bool {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let mcp_secret = configured_mcp_secret(args.mcp_secret.clone());
 
     // ── CLI client mode: a subcommand was given ───────────────────────────────
     if let Some(command) = args.command {
@@ -134,7 +164,7 @@ fn main() -> Result<()> {
             .with(fmt::layer())
             .with(EnvFilter::new("warn"))
             .init();
-        return cli::run(&args.server, command);
+        return cli::run(&args.server, mcp_secret.as_deref(), command);
     }
 
     // ── Server / GUI mode: full logging ──────────────────────────────────────
@@ -203,7 +233,6 @@ fn main() -> Result<()> {
     // Loaded document plus any persistent history embedded in a `.photon` file
     // (so a double-clicked or CLI-opened project restores its undo history too).
     let (document, loaded_history) = if let Some(path) = &args.file {
-        let content = std::fs::read_to_string(path)?;
         // Detect format by extension: `.svg` is imported, everything else is
         // treated as a Photonic file (`.photon`). Previously every file argument
         // was parsed as JSON, so opening an SVG via the CLI/file argument failed.
@@ -211,6 +240,11 @@ fn main() -> Result<()> {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        let content = if is_svg {
+            read_svg_file(path)?
+        } else {
+            std::fs::read_to_string(path)?
+        };
         if is_svg && !content.trim_start().starts_with('{') {
             let doc = photonic_core::import_svg(&content)
                 .map_err(|e| anyhow::anyhow!("failed to import SVG '{}': {e}", path.display()))?;
@@ -250,7 +284,7 @@ fn main() -> Result<()> {
 
     let mcp_config = McpServerConfig {
         port: args.mcp_port,
-        secret: args.mcp_secret,
+        secret: mcp_secret,
     };
 
     // ── Headless mode ─────────────────────────────────────────────────────────
@@ -1085,7 +1119,8 @@ fn register_file_association() {
     };
 
     // .photon → ProgID
-    if let Ok((ext, _)) = classes.create_subkey(".photon") {
+    let extension_key = format!(".{PHOTON_FILE_EXTENSION}");
+    if let Ok((ext, _)) = classes.create_subkey(&extension_key) {
         let _ = ext.set_value("", &"PhotonicDocument");
     }
 
@@ -1114,7 +1149,10 @@ fn register_file_association() {
         );
     }
 
-    tracing::info!("file assoc: .photon registered → PhotonicDocument");
+    tracing::info!(
+        "file assoc: .{} registered → PhotonicDocument",
+        PHOTON_FILE_EXTENSION
+    );
 }
 
 #[cfg(not(windows))]
@@ -1181,12 +1219,28 @@ Skip intermediate screenshots unless you need visual feedback to proceed."
         .to_string()
 }
 
+fn configured_mcp_secret(explicit: Option<String>) -> Option<String> {
+    let secret = match explicit {
+        Some(secret) if secret == MCP_SECRET_ENV_PLACEHOLDER => std::env::var(MCP_SECRET_ENV).ok(),
+        Some(secret) => Some(secret),
+        None => std::env::var(MCP_SECRET_ENV).ok(),
+    }?;
+
+    (secret != MCP_SECRET_ENV_PLACEHOLDER).then_some(secret)
+}
+
 /// Register the Photonic MCP server in the user's Claude `~/.claude.json` so it
 /// is always available when `claude` runs.
 ///
 /// Uses the HTTP transport — Claude Code connects directly to the already-running
 /// Photonic MCP HTTP server on the configured port. No proxy subprocess needed.
 fn write_mcp_config(port: u16, secret: Option<&str>) {
+    let Some(secret) = secret.filter(|secret| !secret.trim().is_empty()) else {
+        tracing::warn!(
+            "Skipping Claude MCP registration because no non-empty MCP secret is configured"
+        );
+        return;
+    };
     let server_entry = mcp_server_entry(port, secret);
 
     let Some(path) = claude_settings_path() else {
@@ -1202,15 +1256,12 @@ fn write_mcp_config(port: u16, secret: Option<&str>) {
     }
 }
 
-fn mcp_server_entry(port: u16, secret: Option<&str>) -> serde_json::Value {
-    let mut server_entry = serde_json::json!({
+fn mcp_server_entry(port: u16, secret: &str) -> serde_json::Value {
+    serde_json::json!({
         "type": "http",
-        "url": format!("http://127.0.0.1:{port}/mcp")
-    });
-    if let Some(secret) = secret {
-        server_entry["headers"] = serde_json::json!({ MCP_SECRET_HEADER: secret });
-    }
-    server_entry
+        "url": format!("http://127.0.0.1:{port}/mcp"),
+        "headers": { MCP_SECRET_HEADER: secret }
+    })
 }
 
 /// Add Photonic's MCP entry to one Claude configuration file.
@@ -1262,36 +1313,16 @@ fn write_mcp_config_at(
 }
 
 fn write_private_claude_settings(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        options.mode(0o600);
-        let mut file = options.open(path)?;
-        // `mode` only applies to newly-created files. Tighten an existing file
-        // before writing a secret so a permissive prior mode has no exposure
-        // window while the new contents are being written.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(contents)?;
-        file.sync_all()
-    }
-
-    #[cfg(not(unix))]
-    {
-        // Windows user-profile files inherit the profile directory's ACL.
-        let mut file = options.open(path)?;
-        file.write_all(contents)?;
-        file.sync_all()
-    }
+    // Stage the complete private payload before replacing the live settings
+    // file, so a failed write or replacement leaves the existing file intact.
+    photonic_core::write_atomic_file_with_mode(path, contents, 0o600)
 }
 
 /// Return the path to Claude Code's `~/.claude.json`.
@@ -1553,7 +1584,7 @@ mod mcp_config_tests {
 
     #[test]
     fn write_mcp_config_uses_the_configured_port() {
-        let entry = mcp_server_entry(9000, Some("top-secret"));
+        let entry = mcp_server_entry(9000, "top-secret");
         assert_eq!(entry["url"], "http://127.0.0.1:9000/mcp");
         assert_eq!(entry["headers"]["x-mcp-secret"], "top-secret");
     }
@@ -1565,8 +1596,8 @@ mod mcp_config_tests {
         let original = b"{ not valid JSON\n";
         fs::write(&path, original).expect("write malformed config");
 
-        let error =
-            write_mcp_config_at(&path, mcp_server_entry(7842, None)).expect_err("malformed config");
+        let error = write_mcp_config_at(&path, mcp_server_entry(7842, "test-secret"))
+            .expect_err("malformed config");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read(&path).expect("read config"), original);
@@ -1583,7 +1614,7 @@ mod mcp_config_tests {
         });
         fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
 
-        let entry = mcp_server_entry(9123, Some("test-secret"));
+        let entry = mcp_server_entry(9123, "test-secret");
         write_mcp_config_at(&path, entry.clone()).expect("update valid config");
 
         let updated: serde_json::Value =
@@ -1604,7 +1635,7 @@ mod mcp_config_tests {
         let original = br#"{"mcpServers":[]}"#;
         fs::write(&path, original).expect("write malformed config");
 
-        let error = write_mcp_config_at(&path, mcp_server_entry(7842, None))
+        let error = write_mcp_config_at(&path, mcp_server_entry(7842, "test-secret"))
             .expect_err("malformed structure");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -1639,5 +1670,27 @@ mod mcp_config_tests {
         assert_eq!(std::fs::read(&path).unwrap(), br#"{"secret":"private"}"#);
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod file_lifecycle_tests {
+    use super::native_project_path;
+    use photonic_core::PHOTON_FILE_EXTENSION;
+    use std::path::Path;
+
+    #[test]
+    fn native_project_path_matches_the_canonical_extension() {
+        assert_eq!(PHOTON_FILE_EXTENSION, "photon");
+        assert_eq!(
+            native_project_path(Path::new("project.photon")),
+            Some(Path::new("project.photon").to_path_buf())
+        );
+        assert_eq!(
+            native_project_path(Path::new("PROJECT.PHOTON")),
+            Some(Path::new("PROJECT.PHOTON").to_path_buf())
+        );
+        assert_eq!(native_project_path(Path::new("project.photonic")), None);
+        assert_eq!(native_project_path(Path::new("artwork.svg")), None);
     }
 }

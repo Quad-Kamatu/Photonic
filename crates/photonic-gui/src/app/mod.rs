@@ -33,6 +33,7 @@ use photonic_core::{
     node::{GroupNode, NodeId, PathNode},
     ops::artboard_ops,
     Color, Document, Fill, Layer, PathData, SceneNode, SceneNodeKind, Selection, Stroke,
+    PHOTON_FILE_EXTENSION,
 };
 use photonic_render::{CanvasView, ExportBackground, ExportOptions, PhotonicRenderer};
 pub(crate) use rulers::GuideEditPopup;
@@ -1764,7 +1765,11 @@ fn load_document(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let content = if ext == "svg" {
+        crate::read_svg_file(path)?
+    } else {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())?
+    };
     if ext == "svg" && !content.trim_start().starts_with('{') {
         photonic_core::import_svg(&content)
             .map(|doc| (doc, None))
@@ -1779,7 +1784,7 @@ fn load_document(
 fn native_project_path(path: &Path) -> Option<std::path::PathBuf> {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("photon"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(PHOTON_FILE_EXTENSION))
         .then(|| path.to_path_buf())
 }
 
@@ -1798,6 +1803,7 @@ mod file_lifecycle_tests {
             native_project_path(Path::new("PROJECT.PHOTON")),
             Some(Path::new("PROJECT.PHOTON").to_path_buf())
         );
+        assert_eq!(native_project_path(Path::new("project.photonic")), None);
         assert_eq!(native_project_path(Path::new("artwork.svg")), None);
         assert_eq!(native_project_path(Path::new("photo.png")), None);
     }
@@ -2175,7 +2181,7 @@ impl PhotonicApp {
                         .flatten()
                         .flatten()
                         .map(|e| e.path())
-                        .filter(|p| p.extension().is_some_and(|x| x == "photon"))
+                        .filter(|p| native_project_path(p).is_some())
                         .collect()
                 })
                 .unwrap_or_default();
@@ -2597,11 +2603,11 @@ impl PhotonicApp {
                     WelcomeAction::OpenBrowse => {
                         if let Some(path) = run_file_dialog(|| {
                             rfd::FileDialog::new()
-                                .add_filter("Photonic", &["photon"])
+                                .add_filter("Photonic", &[PHOTON_FILE_EXTENSION])
                                 .add_filter("SVG", &["svg"])
                                 .add_filter("Images", &IMAGE_EXTENSIONS)
                                 .add_filter("All supported", &{
-                                    let mut all = vec!["photon", "svg"];
+                                    let mut all = vec![PHOTON_FILE_EXTENSION, "svg"];
                                     all.extend(IMAGE_EXTENSIONS);
                                     all
                                 })

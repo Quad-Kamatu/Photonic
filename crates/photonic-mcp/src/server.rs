@@ -20,7 +20,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
 
-/// Header used to authenticate requests when `McpServerConfig::secret` is set.
+/// Header used to authenticate every request to the MCP endpoint.
 pub const MCP_SECRET_HEADER: &str = "x-mcp-secret";
 
 /// Maximum encoded JSON-RPC request size accepted by the MCP endpoint.
@@ -30,7 +30,10 @@ const MCP_REQUEST_BODY_LIMIT: usize = 2 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct McpServerConfig {
     pub port: u16,
-    /// Shared secret expected in the [`MCP_SECRET_HEADER`] header, when set.
+    /// Shared secret expected in the [`MCP_SECRET_HEADER`] header.
+    ///
+    /// The HTTP server refuses to start, and the router refuses to dispatch,
+    /// when this is absent or contains only whitespace.
     pub secret: Option<String>,
 }
 
@@ -124,6 +127,12 @@ impl McpServer {
 
     /// Start listening. This blocks the current task.
     pub async fn run(self) -> anyhow::Result<()> {
+        if usable_secret(self.state.config.secret.as_deref()).is_none() {
+            anyhow::bail!(
+                "MCP server requires a non-empty shared secret; pass --mcp-secret or set PHOTONIC_MCP_SECRET"
+            );
+        }
+
         let port = self.state.config.port;
 
         // Background task: flush debounced MCP checkpoint every 10 s.
@@ -175,14 +184,20 @@ async fn require_authentication(
 }
 
 fn is_authorized(headers: &HeaderMap, secret: Option<&str>) -> bool {
-    let Some(secret) = secret else {
-        return true;
+    let Some(secret) = usable_secret(secret) else {
+        return false;
     };
 
     headers
         .get(MCP_SECRET_HEADER)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|provided| bool::from(secret.as_bytes().ct_eq(provided.as_bytes())))
+        .is_some_and(|provided| {
+            !provided.is_empty() && bool::from(secret.as_bytes().ct_eq(provided.as_bytes()))
+        })
+}
+
+fn usable_secret(secret: Option<&str>) -> Option<&str> {
+    secret.filter(|secret| !secret.trim().is_empty())
 }
 
 /// Main MCP JSON-RPC handler.
@@ -371,27 +386,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_secret_preserves_local_development_behavior() {
+    async fn missing_secret_rejects_before_dispatch() {
         let base =
             std::env::temp_dir().join(format!("photonic-mcp-no-auth-{}", uuid::Uuid::new_v4()));
-        let path = base.join("allowed.photon");
+        let path = base.join("rejected.photon");
         let app = build_router(test_state(None));
 
         let response = app.oneshot(save_request(&path, None)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(path.exists());
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!path.exists(), "missing server secret must not dispatch");
 
-        std::fs::remove_dir_all(base).unwrap();
+        assert!(!is_authorized(&HeaderMap::new(), Some("")));
+        assert!(!is_authorized(&HeaderMap::new(), Some("   ")));
+    }
+
+    #[tokio::test]
+    async fn server_refuses_to_start_without_a_secret() {
+        let (capture_tx, _capture_rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(false));
+        let server = McpServer::new(
+            Arc::new(Mutex::new(Document::new("auth test", 200.0, 100.0))),
+            Arc::new(Mutex::new(CommandHistory::new(100))),
+            capture_tx,
+            McpServerConfig::default(),
+            Arc::clone(&running),
+            Arc::new(StdMutex::new(AuditLog::new())),
+        );
+
+        let error = server
+            .run()
+            .await
+            .expect_err("missing secret must fail closed");
+        assert!(error.to_string().contains("non-empty shared secret"));
+        assert!(!running.load(Ordering::Relaxed));
     }
 
     async fn post_json(request: Value) -> (StatusCode, Vec<u8>) {
-        let response = build_router(test_state(None))
-            .oneshot(
-                Request::post("/mcp")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(request.to_string()))
-                    .unwrap(),
-            )
+        let request = Request::post("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(MCP_SECRET_HEADER, "correct-secret")
+            .body(Body::from(request.to_string()))
+            .unwrap();
+        let response = build_router(test_state(Some("correct-secret")))
+            .oneshot(request)
             .await
             .unwrap();
         let status = response.status();
@@ -442,12 +479,13 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_endpoint_does_not_enable_cross_origin_requests() {
-        let app = build_router(test_state(None));
+        let app = build_router(test_state(Some("correct-secret")));
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::OPTIONS)
                     .uri("/mcp")
+                    .header(MCP_SECRET_HEADER, "correct-secret")
                     .header(header::ORIGIN, "https://evil.example")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .header(

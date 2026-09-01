@@ -24,7 +24,9 @@ pub mod units;
 
 // Re-export the most commonly used types at the crate root
 pub use annotation::{Annotation, AnnotationId};
-pub use audit::{audit_timestamp, AuditEntry, AuditLog, MAX_AUDIT_ARGUMENT_BYTES};
+pub use audit::{
+    audit_timestamp, AuditEntry, AuditLog, MAX_AUDIT_ARGUMENT_BYTES, MAX_AUDIT_EXPORT_BYTES,
+};
 pub use color::Color;
 pub use diagnostics::{crash_dir, CrashReport};
 pub use document::{
@@ -34,14 +36,20 @@ pub use document::{
     SpotColor, Symbol, WidthProfile, Workspace,
 };
 pub use history::{CheckpointInfo, Command, CommandHistory, HistorySnapshot};
-pub use import::{import_svg, ImportError};
+pub use import::{
+    import_svg, ImportError, ImportLimit, MAX_SVG_CSS_BYTES, MAX_SVG_DEPTH, MAX_SVG_ELEMENTS,
+    MAX_SVG_INPUT_BYTES, MAX_SVG_PATH_POINTS, MAX_SVG_TEXT_BYTES,
+};
 pub use layer::{BlendMode, Layer, LayerId};
 pub use node::{
     AssetExportSpec, DropShadow, Feather, FontStyle, GaussianGlow, GlowEffect, NodeId, ObjectBlur,
     PrimitiveKind, RasterNode, SceneNode, SceneNodeKind,
 };
 pub use path::PathData;
-pub use photon_file::{load_photon, save_photon, write_atomic_file, PHOTON_FORMAT_VERSION};
+pub use photon_file::{
+    load_photon, save_photon, write_atomic_file, write_atomic_file_with_mode,
+    PHOTON_FILE_EXTENSION, PHOTON_FORMAT_VERSION,
+};
 pub use raster::{adjust::AdjustmentSpec, image::RasterImage, mask::Mask};
 pub use selection::Selection;
 pub use style::{

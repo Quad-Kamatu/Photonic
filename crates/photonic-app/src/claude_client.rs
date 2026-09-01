@@ -5,6 +5,7 @@
 //! configured local MCP server and loop until Claude produces a final text
 //! reply.
 
+use photonic_mcp::MCP_SECRET_HEADER;
 use serde_json::{json, Value};
 
 const ANTHROPIC_API: &str = "https://api.anthropic.com/v1/messages";
@@ -27,16 +28,19 @@ After creating or modifying shapes, briefly describe what you did.";
 ///
 /// `history` is a slice of `(is_user, text)` pairs in chronological order.
 /// `mcp_port` is the port used by Photonic's local MCP server.
+/// `mcp_secret` is the shared secret sent with every MCP request.
 /// Returns the final assistant text, or an `Err` string to show in the chat.
 pub fn send_message(
     api_key: &str,
     history: &[(bool, String)],
     user_message: &str,
     mcp_port: u16,
+    mcp_secret: Option<&str>,
 ) -> Result<String, String> {
     if api_key.trim().is_empty() {
         return Err("No API key — enter your Anthropic API key in the Claude tab.".into());
     }
+    let mcp_secret = require_secret(mcp_secret)?;
 
     // Build the messages array from chat history + new user message.
     let mut messages: Vec<Value> = history
@@ -51,7 +55,7 @@ pub fn send_message(
     messages.push(json!({ "role": "user", "content": user_message }));
 
     let endpoint = mcp_url(mcp_port);
-    let tools = fetch_mcp_tools(&endpoint)?;
+    let tools = fetch_mcp_tools(&endpoint, mcp_secret)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -119,7 +123,7 @@ pub fn send_message(
             let name = tool_use["name"].as_str().unwrap_or("");
             let input = &tool_use["input"];
 
-            let result = call_mcp_tool(&endpoint, name, input);
+            let result = call_mcp_tool(&endpoint, mcp_secret, name, input);
             let (content_text, is_error) = match result {
                 Ok(t) => (t, false),
                 Err(e) => (format!("Tool error: {e}"), true),
@@ -141,7 +145,12 @@ pub fn send_message(
 
 // ─── MCP tool execution ───────────────────────────────────────────────────────
 
-fn call_mcp_tool(endpoint: &str, name: &str, input: &Value) -> Result<String, String> {
+fn call_mcp_tool(
+    endpoint: &str,
+    secret: &str,
+    name: &str,
+    input: &Value,
+) -> Result<String, String> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -156,6 +165,7 @@ fn call_mcp_tool(endpoint: &str, name: &str, input: &Value) -> Result<String, St
 
     let resp = client
         .post(endpoint)
+        .header(MCP_SECRET_HEADER, secret)
         .header("content-type", "application/json")
         .json(&body)
         .send()
@@ -189,7 +199,7 @@ fn call_mcp_tool(endpoint: &str, name: &str, input: &Value) -> Result<String, St
 /// Fetch the tool list from the running MCP server and adapt it for the
 /// Anthropic API.  MCP uses camelCase `inputSchema`; Anthropic requires
 /// snake_case `input_schema` — we rename the key here.
-fn fetch_mcp_tools(endpoint: &str) -> Result<Value, String> {
+fn fetch_mcp_tools(endpoint: &str, secret: &str) -> Result<Value, String> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -204,6 +214,7 @@ fn fetch_mcp_tools(endpoint: &str) -> Result<Value, String> {
 
     let resp = client
         .post(endpoint)
+        .header(MCP_SECRET_HEADER, secret)
         .header("content-type", "application/json")
         .json(&body)
         .send()
@@ -240,6 +251,16 @@ fn mcp_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/mcp")
 }
 
+fn require_secret(secret: Option<&str>) -> Result<&str, String> {
+    let Some(secret) = secret.filter(|secret| !secret.trim().is_empty()) else {
+        return Err("MCP authentication requires --mcp-secret or PHOTONIC_MCP_SECRET".to_string());
+    };
+    if secret.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
+        return Err("MCP secret cannot contain CR or LF characters".to_string());
+    }
+    Ok(secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{call_mcp_tool, fetch_mcp_tools, mcp_url};
@@ -258,7 +279,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
-            let mut request_lines = Vec::new();
+            let mut requests = Vec::new();
             for response_body in [
                 r#"{"result":{"tools":[]}}"#,
                 r#"{"result":{"content":[{"type":"text","text":"ok"}]}}"#,
@@ -267,16 +288,18 @@ mod tests {
                 let mut reader = BufReader::new(stream);
                 let mut request_line = String::new();
                 reader.read_line(&mut request_line).unwrap();
-                request_lines.push(request_line);
 
                 let mut header = String::new();
+                let mut request = request_line;
                 loop {
                     header.clear();
                     reader.read_line(&mut header).unwrap();
                     if header == "\r\n" {
                         break;
                     }
+                    request.push_str(&header);
                 }
+                requests.push(request);
 
                 let mut stream = reader.into_inner();
                 write!(
@@ -287,19 +310,22 @@ mod tests {
                 )
                 .unwrap();
             }
-            request_lines
+            requests
         });
 
         let endpoint = mcp_url(port);
-        let tools = fetch_mcp_tools(&endpoint);
-        let tool_result = call_mcp_tool(&endpoint, "noop", &json!({}));
-        let request_lines = server.join().unwrap();
+        let tools = fetch_mcp_tools(&endpoint, "test-secret");
+        let tool_result = call_mcp_tool(&endpoint, "test-secret", "noop", &json!({}));
+        let requests = server.join().unwrap();
 
         assert_eq!(tools.unwrap(), json!([]));
         assert_eq!(tool_result.unwrap(), "ok");
         assert_eq!(
-            request_lines,
-            vec!["POST /mcp HTTP/1.1\r\n", "POST /mcp HTTP/1.1\r\n"]
+            requests
+                .iter()
+                .map(|request| request.contains("x-mcp-secret: test-secret\r\n"))
+                .collect::<Vec<_>>(),
+            vec![true, true]
         );
     }
 }
