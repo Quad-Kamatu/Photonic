@@ -2208,6 +2208,81 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn create_shape_rejects_too_few_polygon_and_star_sides_without_mutation() {
+        for shape_type in ["polygon", "star"] {
+            for sides in [0, 1, 2] {
+                let state = test_state();
+                let before_document = serde_json::to_value(&*state.document.lock().await).unwrap();
+                let before_history = state.history.lock().await.current_node();
+
+                let result = dispatch_tool(
+                    &state,
+                    "create_shape",
+                    json!({
+                        "shape_type": shape_type,
+                        "x": 0.0,
+                        "y": 0.0,
+                        "width": 10.0,
+                        "height": 10.0,
+                        "sides": sides
+                    }),
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(
+                    result.is_error,
+                    Some(true),
+                    "{shape_type} with {sides} sides should be rejected"
+                );
+                assert_eq!(
+                    serde_json::to_value(&*state.document.lock().await).unwrap(),
+                    before_document,
+                    "rejected {shape_type} request changed the document"
+                );
+                let history = state.history.lock().await;
+                assert_eq!(
+                    history.current_node(),
+                    before_history,
+                    "rejected {shape_type} request changed history"
+                );
+                assert_eq!(history.undo_depth(), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_shape_accepts_minimum_and_default_polygon_and_star_sides() {
+        for (shape_type, sides) in [
+            ("polygon", Some(3)),
+            ("star", Some(3)),
+            ("polygon", None),
+            ("star", None),
+        ] {
+            let state = test_state();
+            let mut args = json!({
+                "shape_type": shape_type,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 10.0,
+                "height": 10.0
+            });
+            if let Some(sides) = sides {
+                args["sides"] = json!(sides);
+            }
+
+            let result = dispatch_tool(&state, "create_shape", args).await.unwrap();
+            assert_ne!(
+                result.is_error,
+                Some(true),
+                "{shape_type} with {sides:?} sides should succeed"
+            );
+            assert_eq!(state.document.lock().await.nodes.len(), 1);
+            assert_eq!(state.history.lock().await.undo_depth(), 1);
+        }
+    }
+
     async fn undo(state: &AppState) {
         let result = dispatch_tool(state, "undo", json!({})).await.unwrap();
         assert_ne!(result.is_error, Some(true));
@@ -2387,6 +2462,296 @@ mod tests {
         assert!(!entry.is_error);
     }
 
+    async fn add_array_source(state: &AppState) -> uuid::Uuid {
+        let mut doc = state.document.lock().await;
+        let layer_id = doc.active_layer_id.expect("default layer");
+        let source = SceneNode::new(
+            "Array source",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+        let source_id = source.id;
+        doc.add_node(source, Some(layer_id));
+        source_id
+    }
+
+    #[tokio::test]
+    async fn create_array_rejects_grid_product_overflow_and_over_cap() {
+        let state = test_state();
+        let source_id = add_array_source(&state).await;
+
+        let cases = [
+            (
+                "overflow",
+                json!({
+                    "node_id": source_id,
+                    "mode": "grid",
+                    "rows": usize::MAX,
+                    "cols": 2
+                }),
+            ),
+            (
+                "over cap",
+                json!({
+                    "node_id": source_id,
+                    "mode": "grid",
+                    "rows": MAX_ARRAY_GRID_CELLS + 1,
+                    "cols": 1
+                }),
+            ),
+        ];
+
+        for (label, args) in cases {
+            let result = dispatch_tool(&state, "create_array", args)
+                .await
+                .unwrap_or_else(|error| panic!("{label}: dispatch failed: {error}"));
+            assert_eq!(
+                result.is_error,
+                Some(true),
+                "{label}: expected ToolResult error"
+            );
+            assert_eq!(
+                state.document.lock().await.nodes.len(),
+                1,
+                "{label}: mutated document"
+            );
+            assert_eq!(
+                state.history.lock().await.undo_depth(),
+                0,
+                "{label}: created history"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_array_grid_and_radial_keep_copy_counts_and_single_undo_steps() {
+        let state = test_state();
+        let source_id = add_array_source(&state).await;
+
+        let grid = dispatch_tool(
+            &state,
+            "create_array",
+            json!({ "node_id": source_id, "mode": "grid" }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(grid.is_error, Some(true));
+        assert_eq!(
+            structured_data(&grid)["node_ids"].as_array().unwrap().len(),
+            3
+        );
+        assert_eq!(state.document.lock().await.nodes.len(), 4);
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+
+        undo(&state).await;
+        assert_eq!(state.document.lock().await.nodes.len(), 1);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+
+        let radial = dispatch_tool(
+            &state,
+            "create_array",
+            json!({ "node_id": source_id, "mode": "radial", "count": 4 }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(radial.is_error, Some(true));
+        assert_eq!(
+            structured_data(&radial)["node_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(state.document.lock().await.nodes.len(), 4);
+        assert_eq!(state.history.lock().await.undo_depth(), 1);
+
+        undo(&state).await;
+        assert_eq!(state.document.lock().await.nodes.len(), 1);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+    }
+
+    #[tokio::test]
+    async fn procedural_generation_rejects_over_budget_without_document_mutation() {
+        let cases = [
+            "scatter_count",
+            "split_count",
+            "split_product",
+            "spiral_count",
+            "spiral_product",
+            "flare_ray_count",
+            "flare_ring_count",
+            "flare_product",
+        ];
+
+        for case in cases {
+            let state = test_state();
+            let (tool, args) = match case {
+                "scatter_count" => {
+                    let source_id = add_array_source(&state).await;
+                    (
+                        "scatter_copies",
+                        json!({
+                            "node_id": source_id,
+                            "count": MAX_GENERATED_WORK + 1,
+                            "x": 0.0,
+                            "y": 0.0,
+                            "width": 10.0,
+                            "height": 10.0
+                        }),
+                    )
+                }
+                "split_count" => {
+                    let source_id = add_array_source(&state).await;
+                    (
+                        "split_into_grid",
+                        json!({
+                            "node_id": source_id,
+                            "rows": MAX_GENERATED_WORK + 1,
+                            "cols": 1
+                        }),
+                    )
+                }
+                "split_product" => {
+                    let source_id = add_array_source(&state).await;
+                    (
+                        "split_into_grid",
+                        json!({ "node_id": source_id, "rows": 101, "cols": 100 }),
+                    )
+                }
+                "spiral_count" => (
+                    "create_spiral",
+                    json!({
+                        "x": 0.0,
+                        "y": 0.0,
+                        "outer_radius": 100.0,
+                        "turns": 1.0,
+                        "segments_per_turn": MAX_GENERATED_WORK + 1
+                    }),
+                ),
+                "spiral_product" => (
+                    "create_spiral",
+                    json!({
+                        "x": 0.0,
+                        "y": 0.0,
+                        "outer_radius": 100.0,
+                        "turns": 3.0,
+                        "segments_per_turn": 4_000
+                    }),
+                ),
+                "flare_ray_count" => (
+                    "create_flare",
+                    json!({ "cx": 0.0, "cy": 0.0, "ray_count": MAX_GENERATED_WORK + 1 }),
+                ),
+                "flare_ring_count" => (
+                    "create_flare",
+                    json!({ "cx": 0.0, "cy": 0.0, "ring_count": MAX_GENERATED_WORK + 1 }),
+                ),
+                "flare_product" => (
+                    "create_flare",
+                    json!({
+                        "cx": 0.0,
+                        "cy": 0.0,
+                        "ray_count": 5_000,
+                        "ring_count": 5_000
+                    }),
+                ),
+                _ => unreachable!("unknown test case"),
+            };
+            let before = serde_json::to_value(&*state.document.lock().await).unwrap();
+            let result = dispatch_tool(&state, tool, args)
+                .await
+                .unwrap_or_else(|error| panic!("{case}: dispatch failed: {error}"));
+
+            assert_eq!(result.is_error, Some(true), "{case}: expected rejection");
+            assert_eq!(
+                serde_json::to_value(&*state.document.lock().await).unwrap(),
+                before,
+                "{case}: mutated document"
+            );
+            assert_eq!(
+                state.history.lock().await.undo_depth(),
+                0,
+                "{case}: created history"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn split_into_grid_rejects_overflow_before_document_lookup() {
+        let state = test_state();
+        let source_id = add_array_source(&state).await;
+        let result = dispatch_tool(
+            &state,
+            "split_into_grid",
+            json!({
+                "node_id": source_id,
+                "rows": usize::MAX,
+                "cols": 2
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(state.document.lock().await.nodes.len(), 1);
+        assert_eq!(state.history.lock().await.undo_depth(), 0);
+    }
+
+    #[tokio::test]
+    async fn procedural_generation_accepts_representative_valid_counts() {
+        let state = test_state();
+        let source_id = add_array_source(&state).await;
+
+        let scatter = dispatch_tool(
+            &state,
+            "scatter_copies",
+            json!({
+                "node_id": source_id,
+                "count": 2,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 10.0,
+                "height": 10.0
+            }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(scatter.is_error, Some(true));
+
+        let spiral = dispatch_tool(
+            &state,
+            "create_spiral",
+            json!({
+                "x": 20.0,
+                "y": 20.0,
+                "outer_radius": 10.0,
+                "turns": 1.0,
+                "segments_per_turn": 4
+            }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(spiral.is_error, Some(true));
+
+        let flare = dispatch_tool(
+            &state,
+            "create_flare",
+            json!({ "cx": 30.0, "cy": 30.0, "ray_count": 2, "ring_count": 0 }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(flare.is_error, Some(true));
+
+        let split = dispatch_tool(
+            &state,
+            "split_into_grid",
+            json!({ "node_id": source_id, "rows": 2, "cols": 2, "keep_original": true }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(split.is_error, Some(true));
+    }
+
     async fn swatch_state(with_matching_node: bool) -> AppState {
         let state = test_state();
         let mut doc = state.document.lock().await;
@@ -2533,6 +2898,111 @@ mod tests {
             serde_json::to_value(&*state.document.lock().await).unwrap(),
             after
         );
+    }
+
+    #[tokio::test]
+    async fn apply_document_template_preserves_guide_metadata_and_geometry() {
+        let state = test_state();
+        let mut standard = Guide::new(GuideOrientation::Horizontal, 24.5);
+        standard.color = Some([0.2, 0.4, 0.8, 0.9]);
+        standard.locked = true;
+
+        let mut angled = Guide::new(GuideOrientation::Vertical, -100.0);
+        angled.color = Some([0.9, 0.3, 0.1, 0.75]);
+        angled.locked = true;
+        angled.angle_degrees = Some(37.5);
+        angled.position_x = 123.25;
+        angled.position_y = 45.75;
+
+        let template_guides = vec![standard.clone(), angled.clone()];
+        let mut template = Document::new("guide template", 640.0, 480.0);
+        template.guides = template_guides.clone();
+
+        let result = dispatch_tool(
+            &state,
+            "apply_document_template",
+            json!({ "template_json": template.to_json().unwrap() }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+
+        let doc = state.document.lock().await;
+        assert_eq!(doc.guides.len(), template_guides.len());
+        for (applied, source) in doc.guides.iter().zip(template_guides.iter()) {
+            assert_ne!(applied.id, source.id);
+            assert_eq!(applied.orientation, source.orientation);
+            assert_eq!(applied.position, source.position);
+            assert_eq!(applied.color, source.color);
+            assert_eq!(applied.locked, source.locked);
+            assert_eq!(applied.angle_degrees, source.angle_degrees);
+            assert_eq!(applied.position_x, source.position_x);
+            assert_eq!(applied.position_y, source.position_y);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_document_template_deduplicates_standard_and_angled_guides_separately() {
+        let state = test_state();
+        let mut existing_standard = Guide::new(GuideOrientation::Horizontal, 12.0);
+        existing_standard.color = Some([0.1, 0.2, 0.3, 1.0]);
+
+        let mut existing_angled = Guide::new(GuideOrientation::Vertical, -50.0);
+        existing_angled.angle_degrees = Some(30.0);
+        existing_angled.position_x = 40.0;
+        existing_angled.position_y = 50.0;
+
+        {
+            let mut doc = state.document.lock().await;
+            doc.guides.extend([existing_standard, existing_angled]);
+        }
+
+        let mut duplicate_standard = Guide::new(GuideOrientation::Horizontal, 12.25);
+        duplicate_standard.color = Some([0.9, 0.9, 0.9, 1.0]);
+
+        let mut duplicate_angled = Guide::new(GuideOrientation::Vertical, 999.0);
+        duplicate_angled.angle_degrees = Some(30.25);
+        duplicate_angled.position_x = 40.25;
+        duplicate_angled.position_y = 50.25;
+
+        // This line intentionally shares the standard guide's orientation and
+        // position, but its angle/origin make it a distinct angled guide.
+        let mut distinct_angled = Guide::new(GuideOrientation::Horizontal, 12.25);
+        distinct_angled.angle_degrees = Some(45.0);
+        distinct_angled.position_x = 80.0;
+        distinct_angled.position_y = 90.0;
+
+        let distinct_standard = Guide::new(GuideOrientation::Vertical, 37.0);
+        let template_guides = vec![
+            duplicate_standard,
+            duplicate_angled,
+            distinct_angled.clone(),
+            distinct_standard.clone(),
+        ];
+        let mut template = Document::new("guide template", 640.0, 480.0);
+        template.guides = template_guides;
+
+        let result = dispatch_tool(
+            &state,
+            "apply_document_template",
+            json!({ "template_json": template.to_json().unwrap() }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true));
+
+        let doc = state.document.lock().await;
+        assert_eq!(doc.guides.len(), 4);
+        assert!(doc.guides.iter().any(|guide| {
+            guide.angle_degrees == distinct_angled.angle_degrees
+                && guide.position_x == distinct_angled.position_x
+                && guide.position_y == distinct_angled.position_y
+        }));
+        assert!(doc.guides.iter().any(|guide| {
+            guide.angle_degrees.is_none()
+                && guide.orientation == distinct_standard.orientation
+                && guide.position == distinct_standard.position
+        }));
     }
 
     #[tokio::test]
