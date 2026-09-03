@@ -3,10 +3,12 @@
 //! Network and disk work stays off the UI thread. Downloads are constrained to
 //! Fontsource's jsDelivr namespace, size-limited, parsed as fonts before they are
 //! persisted, and finalized with a recoverable directory replacement so an
-//! interrupted install keeps the previous cache usable.
+//! interrupted install keeps the previous cache usable. See
+//! `docs/font-library-provenance.md` for the upstream trust and cache policy.
 
 use photonic_core::node::NodeId;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -54,6 +56,8 @@ struct FontDetails {
     #[serde(default)]
     source: String,
     #[serde(default)]
+    npm_version: String,
+    #[serde(default)]
     variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, VariantFile>>>,
 }
 
@@ -75,6 +79,12 @@ pub struct InstalledFont {
     pub license: String,
     pub source: String,
     pub files: Vec<String>,
+    /// Exact Fontsource package version used for this install.
+    #[serde(default)]
+    pub fontsource_version: String,
+    /// SHA-256 digest for each file in `files`, keyed by its relative filename.
+    #[serde(default)]
+    pub artifact_sha256: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -371,7 +381,21 @@ fn font_bytes_are_usable(bytes: &[u8]) -> bool {
     !database.load_font_source(source).is_empty()
 }
 
-fn font_file_is_usable(path: &Path) -> bool {
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn font_file_is_usable(path: &Path, expected_sha256: &str) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };
@@ -381,15 +405,18 @@ fn font_file_is_usable(path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
-    font_bytes_are_usable(&bytes)
+    font_bytes_are_usable(&bytes) && sha256_hex(&bytes) == expected_sha256
 }
 
 fn font_cache_is_usable(font: &InstalledFont, base: &Path) -> bool {
     !font.files.is_empty()
-        && font
-            .files
-            .iter()
-            .all(|file| font_file_is_usable(&base.join(file)))
+        && font.files.len() == font.artifact_sha256.len()
+        && font.files.iter().all(|file| {
+            let Some(expected_sha256) = font.artifact_sha256.get(file) else {
+                return false;
+            };
+            font_file_is_usable(&base.join(file), expected_sha256)
+        })
 }
 
 fn download_font(url: &str) -> Result<Vec<u8>, String> {
@@ -673,6 +700,7 @@ fn install_font(request: InstallRequest, base: &Path) -> Result<FontInstallResul
 
     let result = (|| {
         let mut files = Vec::with_capacity(plan.len());
+        let mut artifact_sha256 = BTreeMap::new();
         let mut total_bytes = 0usize;
         for (index, (weight, style, url)) in plan.iter().enumerate() {
             let bytes = download_font(url)?;
@@ -686,6 +714,7 @@ fn install_font(request: InstallRequest, base: &Path) -> Result<FontInstallResul
                 safe_component(style)
             );
             let path = staging.join(&filename);
+            artifact_sha256.insert(filename.clone(), sha256_hex(&bytes));
             std::fs::write(&path, bytes)
                 .map_err(|error| format!("writing {}: {error}", path.display()))?;
             files.push(filename);
@@ -698,6 +727,8 @@ fn install_font(request: InstallRequest, base: &Path) -> Result<FontInstallResul
             license: details.license,
             source: details.source,
             files,
+            fontsource_version: details.npm_version,
+            artifact_sha256,
         };
         let manifest = serde_json::to_vec_pretty(&font)
             .map_err(|error| format!("serializing font manifest: {error}"))?;
@@ -732,8 +763,8 @@ fn download_plan(
     for (weight, styles) in &details.variants {
         for (style, subsets) in styles {
             if let Some(file) = subsets.get(subset) {
-                validate_font_url(&file.url.ttf)?;
-                plan.push((weight.clone(), style.clone(), file.url.ttf.clone()));
+                let url = pin_font_url(&file.url.ttf, &details.id, &details.npm_version)?;
+                plan.push((weight.clone(), style.clone(), url));
             }
         }
     }
@@ -749,10 +780,43 @@ fn validate_font_url(url: &str) -> Result<(), String> {
     let Some(path) = url.strip_prefix(FONT_CDN_PREFIX) else {
         return Err("font download URL was outside the trusted Fontsource CDN".into());
     };
-    if path.is_empty() || path.contains("..") || path.contains('\\') || path.contains('#') {
+    if path.is_empty()
+        || path.contains("..")
+        || path.contains('\\')
+        || path.contains('#')
+        || path.contains('?')
+    {
         return Err("font download URL contained an unsafe path".into());
     }
     Ok(())
+}
+
+fn validate_fontsource_version(version: &str) -> Result<(), String> {
+    if version.is_empty() || version.len() > 64 || semver::Version::parse(version).is_err() {
+        return Err("font metadata did not contain an exact Fontsource semver".into());
+    }
+    Ok(())
+}
+
+fn pin_font_url(url: &str, expected_id: &str, version: &str) -> Result<String, String> {
+    validate_slug(expected_id)?;
+    validate_fontsource_version(version)?;
+    let Some(path) = url.strip_prefix(FONT_CDN_PREFIX) else {
+        return Err("font download URL was outside the trusted Fontsource CDN".into());
+    };
+    let (package, filename) = path
+        .split_once('/')
+        .ok_or_else(|| "font download URL did not contain a font filename".to_string())?;
+    if package != format!("{expected_id}@latest")
+        || filename.is_empty()
+        || filename.contains('/')
+        || !filename.ends_with(".ttf")
+    {
+        return Err("font download URL did not match the selected Fontsource package".into());
+    }
+    let pinned = format!("{FONT_CDN_PREFIX}{expected_id}@{version}/{filename}");
+    validate_font_url(&pinned)?;
+    Ok(pinned)
 }
 
 fn validate_slug(value: &str) -> Result<(), String> {
@@ -802,12 +866,18 @@ fn manifest_is_safe(
         && validate_slug(&font.id).is_ok()
         && validate_slug(&font.subset).is_ok()
         && is_supported_open_license(&font.license)
+        && validate_fontsource_version(&font.fontsource_version).is_ok()
         && !font.files.is_empty()
+        && font.files.len() == font.artifact_sha256.len()
         && font.files.iter().all(|file| {
             let path = Path::new(file);
             path.components().count() == 1
                 && path.extension().and_then(|ext| ext.to_str()) == Some("ttf")
                 && !file.chars().any(char::is_control)
+                && font
+                    .artifact_sha256
+                    .get(file)
+                    .is_some_and(|digest| is_sha256(digest))
         })
 }
 
@@ -846,7 +916,7 @@ mod tests {
     use super::*;
 
     const DETAILS: &str = r#"{
-      "id":"test-sans","family":"Test Sans","defSubset":"latin","license":"OFL-1.1",
+      "id":"test-sans","family":"Test Sans","defSubset":"latin","license":"OFL-1.1","npmVersion":"5.3.0",
       "source":"https://example.invalid/source","variants":{
         "400":{"normal":{"latin":{"url":{"ttf":"https://cdn.jsdelivr.net/fontsource/fonts/test-sans@latest/latin-400-normal.ttf"}}}},
         "700":{"italic":{"latin":{"url":{"ttf":"https://cdn.jsdelivr.net/fontsource/fonts/test-sans@latest/latin-700-italic.ttf"}}}}
@@ -864,15 +934,45 @@ mod tests {
             .flatten()
     }
 
-    fn test_manifest(family: &str, files: &[&str]) -> InstalledFont {
+    fn test_manifest(family: &str, files: &[&str], bytes: &[u8]) -> InstalledFont {
+        let files: Vec<String> = files.iter().map(|file| (*file).into()).collect();
         InstalledFont {
             id: "test-font".into(),
             family: family.into(),
             subset: "latin".into(),
             license: "OFL-1.1".into(),
             source: "https://example.invalid".into(),
-            files: files.iter().map(|file| (*file).into()).collect(),
+            artifact_sha256: files
+                .iter()
+                .map(|file| (file.clone(), sha256_hex(bytes)))
+                .collect(),
+            files,
+            fontsource_version: "5.3.0".into(),
         }
+    }
+
+    fn set_file_digest(font: &mut InstalledFont, file: &str, bytes: &[u8]) {
+        font.artifact_sha256
+            .insert(file.to_owned(), sha256_hex(bytes));
+    }
+
+    fn changed_valid_font_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut changed = bytes.to_vec();
+        let table_count = u16::from_be_bytes([changed[4], changed[5]]) as usize;
+        for index in 0..table_count {
+            let entry = 12 + index * 16;
+            if &changed[entry..entry + 4] == b"head" {
+                let offset = u32::from_be_bytes([
+                    changed[entry + 8],
+                    changed[entry + 9],
+                    changed[entry + 10],
+                    changed[entry + 11],
+                ]) as usize;
+                changed[offset + 8] ^= 1;
+                return changed;
+            }
+        }
+        panic!("system font did not contain a head table")
     }
 
     fn write_test_install(path: &Path, font: &InstalledFont, bytes: &[u8]) {
@@ -903,6 +1003,14 @@ mod tests {
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].0, "400");
         assert_eq!(plan[1].1, "italic");
+        assert_eq!(
+            plan[0].2,
+            "https://cdn.jsdelivr.net/fontsource/fonts/test-sans@5.3.0/latin-400-normal.ttf"
+        );
+        assert_eq!(
+            plan[1].2,
+            "https://cdn.jsdelivr.net/fontsource/fonts/test-sans@5.3.0/latin-700-italic.ttf"
+        );
     }
 
     #[test]
@@ -916,6 +1024,16 @@ mod tests {
             "https://cdn.jsdelivr.net/fontsource/fonts/abel@latest/latin-400-normal.ttf"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_or_non_semver_fontsource_versions() {
+        let mut details: FontDetails = serde_json::from_str(DETAILS).unwrap();
+        details.npm_version.clear();
+        assert!(download_plan(&details, "latin").is_err());
+
+        details.npm_version = "latest".into();
+        assert!(download_plan(&details, "latin").is_err());
     }
 
     #[test]
@@ -945,8 +1063,8 @@ mod tests {
         let final_dir = root.join("test-font").join("latin");
         let staging_root = root.join(".photonic-font-staging");
         let staging = staging_root.join(".test-font-latin.part");
-        let old = test_manifest("Old Font", &["old.ttf"]);
-        let new = test_manifest("New Font", &["new.ttf"]);
+        let old = test_manifest("Old Font", &["old.ttf"], b"old font bytes");
+        let new = test_manifest("New Font", &["new.ttf"], b"new font bytes");
         let old_manifest = serde_json::to_vec_pretty(&old).unwrap();
 
         write_test_install(&final_dir, &old, b"old font bytes");
@@ -992,8 +1110,8 @@ mod tests {
         let final_dir = root.join("test-font").join("latin");
         let staging_root = root.join(".photonic-font-staging");
         let staging = staging_root.join(".test-font-latin.part");
-        let old = test_manifest("Old Font", &["old.ttf"]);
-        let new = test_manifest("New Font", &["new.ttf"]);
+        let old = test_manifest("Old Font", &["old.ttf"], &font_bytes);
+        let new = test_manifest("New Font", &["new.ttf"], &font_bytes);
 
         write_test_install(&final_dir, &old, &font_bytes);
         write_test_install(&staging, &new, &font_bytes);
@@ -1020,7 +1138,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let final_dir = root.join("test-font").join("latin");
-        let old = test_manifest("Old Font", &["old.ttf"]);
+        let old = test_manifest("Old Font", &["old.ttf"], &font_bytes);
         write_test_install(&final_dir, &old, &font_bytes);
         let backup = replacement_backup_path(&final_dir).unwrap();
         std::fs::rename(&final_dir, &backup).unwrap();
@@ -1055,11 +1173,15 @@ mod tests {
             license: "OFL-1.1".into(),
             source: "https://example.invalid".into(),
             files: files.into_iter().map(str::to_owned).collect(),
+            fontsource_version: "5.3.0".into(),
+            artifact_sha256: BTreeMap::new(),
         };
 
         let valid_bytes = usable_system_font_bytes();
         if let Some(bytes) = valid_bytes.as_ref() {
-            let valid = make_manifest("valid-font", "Valid Font", vec!["000-400-normal.ttf"]);
+            let mut valid = make_manifest("valid-font", "Valid Font", vec!["000-400-normal.ttf"]);
+            let valid_file = valid.files[0].clone();
+            set_file_digest(&mut valid, &valid_file, bytes);
             let dir = write_manifest(&root, &valid);
             std::fs::write(dir.join(&valid.files[0]), bytes).unwrap();
         }
@@ -1085,6 +1207,11 @@ mod tests {
                 "Partial Font",
                 vec!["000-400-normal.ttf", "001-700-normal.ttf"],
             );
+            let first_file = partial.files[0].clone();
+            let second_file = partial.files[1].clone();
+            let mut partial = partial;
+            set_file_digest(&mut partial, &first_file, bytes);
+            set_file_digest(&mut partial, &second_file, &[0_u8; 512]);
             let dir = write_manifest(&root, &partial);
             std::fs::write(dir.join(&partial.files[0]), bytes).unwrap();
             std::fs::write(dir.join(&partial.files[1]), [0_u8; 512]).unwrap();
@@ -1102,6 +1229,51 @@ mod tests {
             assert!(found.is_empty());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_valid_font_bytes_are_not_reused_from_a_managed_cache() {
+        let Some(original_bytes) = usable_system_font_bytes() else {
+            return;
+        };
+        let changed_bytes = changed_valid_font_bytes(&original_bytes);
+        assert_ne!(original_bytes, changed_bytes);
+        assert!(font_bytes_are_usable(&changed_bytes));
+
+        let root = std::env::temp_dir().join(format!(
+            "photonic-font-digest-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let final_dir = root.join("test-font").join("latin");
+        let manifest = test_manifest("Test Font", &["face.ttf"], &original_bytes);
+        write_test_install(&final_dir, &manifest, &changed_bytes);
+
+        assert!(scan_installed_fonts(&root).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_manifests_without_provenance_are_not_managed() {
+        let Some(bytes) = usable_system_font_bytes() else {
+            return;
+        };
+        let mut manifest = test_manifest("Test Font", &["face.ttf"], &bytes);
+        manifest.fontsource_version.clear();
+        assert!(!manifest_is_safe(
+            &manifest,
+            "test-font",
+            "Test Font",
+            "latin"
+        ));
+
+        manifest.fontsource_version = "5.3.0".into();
+        manifest.artifact_sha256.clear();
+        assert!(!manifest_is_safe(
+            &manifest,
+            "test-font",
+            "Test Font",
+            "latin"
+        ));
     }
 
     #[test]
