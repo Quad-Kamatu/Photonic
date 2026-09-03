@@ -1,3 +1,4 @@
+mod area_trace;
 mod dialogs;
 mod geometry;
 mod hotbar_ui;
@@ -154,6 +155,39 @@ struct HotbarCacheState {
     single_is_fillable_path: bool,
     mode: HotbarMode,
     items: Vec<HotbarItem>,
+}
+
+/// One in-progress Pen anchor in canvas space. A click leaves both handles
+/// retracted (a corner); click-drag stores a symmetric direction line so the
+/// incoming and outgoing cubic segments meet smoothly at the anchor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PenAnchor {
+    position: Point,
+    in_handle: Option<Point>,
+    out_handle: Option<Point>,
+}
+
+impl PenAnchor {
+    fn corner(x: f64, y: f64) -> Self {
+        Self {
+            position: Point::new(x, y),
+            in_handle: None,
+            out_handle: None,
+        }
+    }
+
+    /// Pull the outgoing handle to `point` and mirror the incoming handle by
+    /// the same distance. Returning to the anchor retracts both sides again.
+    fn pull_handle_to(&mut self, point: Point) {
+        let delta = point - self.position;
+        if delta.hypot() <= 1e-6 {
+            self.in_handle = None;
+            self.out_handle = None;
+        } else {
+            self.out_handle = Some(point);
+            self.in_handle = Some(self.position - delta);
+        }
+    }
 }
 
 // ─── Eyedropper ───────────────────────────────────────────────────────────────
@@ -685,9 +719,9 @@ pub struct DiffOverlayState {
     pub overlay_active: bool,
 }
 
-/// A cached egui texture for a raster node, with the content hash it was built
-/// from so it can be invalidated when the pixels or mask change.
-struct RasterTexCache {
+/// Cached live-canvas composite for documents containing both raster and vector
+/// objects. Rendering those objects into one ordered image preserves z-order.
+struct MixedSceneTexCache {
     handle: egui::TextureHandle,
     hash: u64,
 }
@@ -783,8 +817,13 @@ pub struct PhotonicApp {
     /// Canvas-space position where the current drag began (shape creation).
     drag_start_canvas: Option<(f64, f64)>,
 
-    /// Accumulated anchor points for the in-progress pen path (canvas space).
-    pen_points: Vec<(f64, f64)>,
+    /// Accumulated anchors and direction handles for the in-progress Pen path.
+    pen_anchors: Vec<PenAnchor>,
+    /// Anchors removed by Pen-local Undo, available to Redo until the next new
+    /// placement or the in-progress path is finished/cancelled.
+    pen_redo_anchors: Vec<PenAnchor>,
+    /// Anchor currently receiving symmetric handles from a primary drag.
+    pen_drag_anchor: Option<usize>,
 
     /// Whether we are currently dragging a selected node to move it.
     moving: bool,
@@ -1070,9 +1109,12 @@ pub struct PhotonicApp {
     /// reuses one GPU device instead of spinning one up every frame.
     preview_renderer: Option<photonic_render::HeadlessRenderer>,
 
-    /// Cache of uploaded egui textures for raster nodes, keyed by node id.
-    /// Re-uploaded only when the pixel/mask content hash changes.
-    raster_tex_cache: std::collections::HashMap<photonic_core::node::NodeId, RasterTexCache>,
+    /// Ordered live composite used whenever the document contains raster data.
+    mixed_scene_tex_cache: Option<MixedSceneTexCache>,
+    /// Font database used to outline text into the ordered CPU composite.
+    mixed_scene_font_system: Option<glyphon::FontSystem>,
+    /// Installed fonts plus the lazily-fetched Fontsource browser state.
+    font_library: crate::font_library::FontLibraryState,
 
     /// Lazily-loaded Photonic logo texture for the top toolbar (embedded PNG).
     logo_texture: Option<egui::TextureHandle>,
@@ -1086,6 +1128,25 @@ pub struct PhotonicApp {
     raster_stroke_orig: Option<(photonic_core::node::NodeId, photonic_core::node::SceneNode)>,
     /// Local-space points accumulated during the current drag.
     raster_stroke_pts: Vec<(f32, f32)>,
+
+    // ── Area Trace tool ─────────────────────────────────────────────────────
+    /// Maximum colors in the generated vector palette.
+    pub area_trace_colors: u32,
+    /// Sampling density as a fraction of source pixels.
+    pub area_trace_detail: f32,
+    /// Curve cleanup tolerance in document pixels.
+    pub area_trace_smoothing: f32,
+    /// Smallest retained contour in sampled pixels.
+    pub area_trace_min_area: u32,
+    /// Omit near-white palette regions from the generated vectors.
+    pub area_trace_ignore_white: bool,
+    /// Canvas-space origin and source raster for the active trace drag.
+    area_trace_start: Option<Point>,
+    area_trace_source: Option<NodeId>,
+    /// Retained region, sampled pixels, and transient vector nodes for the live
+    /// adjustment workflow. Preview nodes live in the document only until the
+    /// user applies or cancels; they are never added to history directly.
+    area_trace_session: Option<area_trace::AreaTraceSession>,
 
     // ── Raster masking (color range / remove background) ──────────────────────
     /// Fuzziness (0..1) for the color-range / magic-wand mask-out.
@@ -1378,7 +1439,9 @@ impl Default for PhotonicApp {
             selected_layer_ids: Vec::new(),
             selected_id: None,
             drag_start_canvas: None,
-            pen_points: Vec::new(),
+            pen_anchors: Vec::new(),
+            pen_redo_anchors: Vec::new(),
+            pen_drag_anchor: None,
             moving: false,
             move_drag_origins: Vec::new(),
             move_snap_origins: Vec::new(),
@@ -1538,11 +1601,21 @@ impl Default for PhotonicApp {
 
             eyedropper: EyedropperState::default(),
             logo_texture: None,
-            raster_tex_cache: std::collections::HashMap::new(),
+            mixed_scene_tex_cache: None,
+            mixed_scene_font_system: None,
+            font_library: crate::font_library::FontLibraryState::default(),
             raster_brush_radius: 16.0,
             raster_brush_hardness: 0.8,
             raster_stroke_orig: None,
             raster_stroke_pts: Vec::new(),
+            area_trace_colors: 8,
+            area_trace_detail: 0.75,
+            area_trace_smoothing: 1.5,
+            area_trace_min_area: 4,
+            area_trace_ignore_white: true,
+            area_trace_start: None,
+            area_trace_source: None,
+            area_trace_session: None,
             raster_mask_tolerance: 0.25,
             raster_mask_contiguous: false,
             raster_color_range: None,
@@ -1992,6 +2065,7 @@ impl PhotonicApp {
         let open_drawer = prefs.open_drawer;
         let mut s = Self::default();
         s.prefs = prefs;
+        s.font_library.recent_families = s.prefs.recent_font_families.clone();
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
         s.open_drawer = open_drawer;
@@ -2022,6 +2096,7 @@ impl PhotonicApp {
             ..Self::default()
         };
         s.prefs = prefs;
+        s.font_library.recent_families = s.prefs.recent_font_families.clone();
         s.fill_color = fill_color;
         s.lua_console.visible = console_visible;
         s.open_drawer = open_drawer;
@@ -2065,6 +2140,11 @@ impl PhotonicApp {
             .as_ref()
             .filter(|s| Some(s.node_id) == self.selected_id)
             .map(|s| s.target);
+        let area_trace_preview_active = self.area_trace_session.is_some();
+        let area_trace_preview_ready = self
+            .area_trace_session
+            .as_ref()
+            .is_some_and(|session| session.preview_root.is_some());
         let mut ctx = panels::PropPanelCtx {
             doc,
             active_tool: self.active_tool,
@@ -2082,6 +2162,9 @@ impl PhotonicApp {
             selected_ids: &selected_ids,
             point_edit_node: self.point_edit_node,
             point_selected: &self.point_selected,
+            font_library: &mut self.font_library,
+            typography_defaults: &mut self.prefs.typography_defaults,
+            typography_only: false,
             prop_search: &mut self.prop_search,
             shear_x: &mut self.shear_x,
             shear_y: &mut self.shear_y,
@@ -2099,6 +2182,13 @@ impl PhotonicApp {
             magic_wand_attribute: &mut self.magic_wand_attribute,
             magic_wand_tolerance: &mut self.magic_wand_tolerance,
             eraser_radius: &mut self.eraser_radius,
+            area_trace_colors: &mut self.area_trace_colors,
+            area_trace_detail: &mut self.area_trace_detail,
+            area_trace_smoothing: &mut self.area_trace_smoothing,
+            area_trace_min_area: &mut self.area_trace_min_area,
+            area_trace_ignore_white: &mut self.area_trace_ignore_white,
+            area_trace_preview_active,
+            area_trace_preview_ready,
             prop_spread: &mut self.prop_spread,
             prop_falloff_k: &mut self.prop_falloff_k,
             raster_mask_tolerance: &mut self.raster_mask_tolerance,
@@ -2159,6 +2249,129 @@ impl PhotonicApp {
         history: &mut CommandHistory,
     ) -> bool {
         let mut doc_modified = false;
+
+        // Keep the font picker synchronized with the renderer's system-font
+        // database, poll its background catalog/download jobs, and hot-load a
+        // completed install into every live text path before drawing this frame.
+        self.font_library.sync_installed_families(renderer);
+        self.font_library.poll_catalog();
+        if let Some(result) = self.font_library.poll_preview() {
+            match result {
+                Ok(preview) => {
+                    let mut definitions =
+                        ctx.fonts(|fonts| fonts.lock().fonts.definitions().clone());
+                    if let Some(old_key) = self.font_library.preview_font_key.take() {
+                        definitions.font_data.remove(&old_key);
+                        definitions
+                            .families
+                            .remove(&egui::FontFamily::Name(old_key.into()));
+                    }
+                    let font_key = format!("photonic-preview-{}", preview.id);
+                    definitions
+                        .font_data
+                        .insert(font_key.clone(), egui::FontData::from_owned(preview.bytes));
+                    definitions.families.insert(
+                        egui::FontFamily::Name(font_key.clone().into()),
+                        vec![font_key.clone()],
+                    );
+                    ctx.set_fonts(definitions);
+                    self.font_library.set_preview_ready(preview.token, font_key);
+                    ctx.request_repaint();
+                }
+                Err(error) => self.font_library.preview_error = Some(error),
+            }
+        }
+        if let Some(result) = self.font_library.poll_install() {
+            match result {
+                Ok(installed) => {
+                    let mut load_error = None;
+                    for path in &installed.paths {
+                        if let Err(error) = renderer.load_font_file(path) {
+                            load_error = Some(error);
+                            break;
+                        }
+                        if let Some(font_system) = &mut self.mixed_scene_font_system {
+                            let before = font_system.db().len();
+                            if let Err(error) = font_system.db_mut().load_font_file(path) {
+                                load_error = Some(format!("{}: {error}", path.display()));
+                                break;
+                            }
+                            if font_system.db().len() == before {
+                                load_error = Some(format!(
+                                    "{} contains no usable font faces",
+                                    path.display()
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    self.font_library.refresh_managed_fonts();
+                    self.font_library
+                        .set_installed_families(renderer.font_families());
+                    self.mixed_scene_tex_cache = None;
+
+                    if let Some(error) = load_error {
+                        self.file_status =
+                            Some(format!("Font installed but could not load: {error}"));
+                    } else {
+                        self.font_library
+                            .record_recent_family(&installed.font.family);
+                        self.font_library.picker_open = false;
+                        self.prefs.recent_font_families = self.font_library.recent_families.clone();
+                        self.prefs.save();
+                        if let Some(node_id) = installed.node_id {
+                            if let Some(old_node) = doc.nodes.get(&node_id).cloned() {
+                                if matches!(old_node.kind, SceneNodeKind::Text(_)) {
+                                    let mut new_node = old_node.clone();
+                                    if let SceneNodeKind::Text(text) = &mut new_node.kind {
+                                        text.font_family = installed.font.family.clone();
+                                    }
+                                    history.execute(
+                                        Command::UpdateNode {
+                                            old: old_node,
+                                            new: new_node,
+                                        },
+                                        doc,
+                                    );
+                                    doc_modified = true;
+                                    self.file_status = Some(format!(
+                                        "Installed and applied {} ({}, {})",
+                                        installed.font.family,
+                                        installed.font.subset,
+                                        installed.font.license
+                                    ));
+                                } else {
+                                    self.file_status = Some(format!(
+                                        "Installed {} — the original text selection changed",
+                                        installed.font.family
+                                    ));
+                                }
+                            } else {
+                                self.file_status = Some(format!(
+                                    "Installed {} — the original text object was removed",
+                                    installed.font.family
+                                ));
+                            }
+                        } else {
+                            self.prefs.typography_defaults.font_family =
+                                installed.font.family.clone();
+                            self.prefs.save();
+                            self.file_status = Some(format!(
+                                "Installed {} and set it as the new-text default ({}, {})",
+                                installed.font.family,
+                                installed.font.subset,
+                                installed.font.license
+                            ));
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Err(error) => self.file_status = Some(format!("Font install failed: {error}")),
+            }
+        }
+        if self.font_library.is_busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
 
         // ── Quit-from-welcome shortcut ────────────────────────────────────────
         // The quit prompt only runs in the editor (past the welcome early-return).
@@ -2245,6 +2458,28 @@ impl PhotonicApp {
         // candidate to migrate into `DirectSelectTool::on_activate`).
         if self.active_tool != self.last_tool {
             let (prev, cur) = (self.last_tool, self.active_tool);
+            if matches!(prev, Tool::Pen | Tool::CurvaturePen) {
+                self.clear_pen_path();
+            }
+            if prev == Tool::AreaTrace {
+                self.area_trace_start = None;
+                self.area_trace_source = None;
+                self.cancel_area_trace_preview(doc, false);
+            }
+            if cur == Tool::AreaTrace {
+                // Surface the small slider panel immediately; the trace tool is
+                // intended to be usable without hunting through drawers.
+                self.open_drawer = Some(DrawerGroup::Inspector);
+                self.last_drawer_group = DrawerGroup::Inspector;
+                self.prefs.open_drawer = self.open_drawer;
+                self.prop_search.clear();
+            }
+            if cur == Tool::Text {
+                self.open_drawer = Some(DrawerGroup::Typography);
+                self.last_drawer_group = DrawerGroup::Typography;
+                self.prefs.open_drawer = self.open_drawer;
+                self.prop_search.clear();
+            }
             crate::tools::tool_for(prev).on_deactivate(self);
             crate::tools::tool_for(cur).on_activate(self);
         }
@@ -2723,6 +2958,18 @@ impl PhotonicApp {
         self.draw_object_options_dialog(ctx, doc, history);
 
         // ── Top toolbar ──────────────────────────────────────────────────────
+        let selected_text_quick = self.selected_id.and_then(|node_id| {
+            doc.nodes.get(&node_id).and_then(|node| match &node.kind {
+                SceneNodeKind::Text(text) => Some((
+                    node_id,
+                    text.font_family.clone(),
+                    text.font_size,
+                    text.font_weight,
+                    text.font_style,
+                )),
+                _ => None,
+            })
+        });
         let toolbar_resp = egui::TopBottomPanel::top("toolbar")
             .frame(
                 egui::Frame::side_top_panel(&ctx.style())
@@ -2770,6 +3017,91 @@ impl PhotonicApp {
                             Some(DrawerKind::Tools)
                         };
                         self.selected_drawer_option = None;
+                    }
+
+                    // First-class Typography entry point. Unlike the generic
+                    // Inspector, this is always available: with text selected it
+                    // edits that object; otherwise it edits new-text defaults.
+                    let typography_active = self.open_drawer == Some(DrawerGroup::Typography);
+                    if ui
+                        .selectable_label(typography_active, "Typography")
+                        .clicked()
+                    {
+                        self.open_drawer = if typography_active {
+                            None
+                        } else {
+                            Some(DrawerGroup::Typography)
+                        };
+                        if self.open_drawer.is_some() {
+                            self.last_drawer_group = DrawerGroup::Typography;
+                        }
+                        self.prefs.open_drawer = self.open_drawer;
+                        self.prop_search.clear();
+                        self.prefs.save();
+                    }
+
+                    // High-frequency type controls stay visible beside the entry
+                    // point whenever a text object is selected.
+                    if let Some((node_id, family, font_size, font_weight, font_style)) =
+                        selected_text_quick.as_ref()
+                    {
+                        ui.separator();
+                        let family_label = if family.chars().count() > 18 {
+                            format!("{}…", family.chars().take(17).collect::<String>())
+                        } else {
+                            family.clone()
+                        };
+                        if ui
+                            .small_button(format!("{} {}", ph::TEXT_T, family_label))
+                            .on_hover_text("Open the font family picker")
+                            .clicked()
+                        {
+                            self.open_drawer = Some(DrawerGroup::Typography);
+                            self.last_drawer_group = DrawerGroup::Typography;
+                            self.prefs.open_drawer = self.open_drawer;
+                            self.prop_search.clear();
+                            self.prefs.save();
+                        }
+                        let mut size = *font_size;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut size)
+                                    .speed(0.5)
+                                    .range(1.0..=1000.0)
+                                    .suffix(" px"),
+                            )
+                            .on_hover_text("Font size")
+                            .changed()
+                        {
+                            self.pending_panel_actions
+                                .push(PanelAction::SetTextEssentials {
+                                    node_id: *node_id,
+                                    font_size: Some(size),
+                                    align: None,
+                                });
+                        }
+                        let bold = *font_weight >= 700;
+                        if ui
+                            .add(egui::Button::new(RichText::new("B").strong()).selected(bold))
+                            .on_hover_text("Bold")
+                            .clicked()
+                        {
+                            self.pending_panel_actions.push(PanelAction::SetFontWeight {
+                                node_id: *node_id,
+                                weight: if bold { 400 } else { 700 },
+                            });
+                        }
+                        let italic = *font_style == photonic_core::node::FontStyle::Italic;
+                        if ui
+                            .add(egui::Button::new(RichText::new("I").italics()).selected(italic))
+                            .on_hover_text("Italic")
+                            .clicked()
+                        {
+                            self.pending_panel_actions.push(PanelAction::SetFontStyle {
+                                node_id: *node_id,
+                                style: if italic { "normal" } else { "italic" }.into(),
+                            });
+                        }
                     }
 
                     // Audit log toggle
@@ -3133,7 +3465,7 @@ impl PhotonicApp {
                         if let Some(tool) =
                             panels::draw_tools_panel(ui, self.active_tool, &self.prefs.pinned_tools)
                         {
-                            self.pen_points.clear();
+                            self.clear_pen_path();
                             self.pencil_points.clear();
                             self.lasso_points.clear();
                             self.isolated_group = None;
@@ -3343,6 +3675,14 @@ impl PhotonicApp {
                 let rect = ui.available_rect_before_wrap();
                 self.last_canvas_rect = Some(rect);
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                // A previously focused search/property field otherwise keeps
+                // `wants_keyboard_input()` true indefinitely. Clicking back on
+                // the canvas returns keyboard shortcuts to the viewport.
+                if response.clicked() || response.drag_started() || response.secondary_clicked() {
+                    if let Some(focused) = ctx.memory(|m| m.focused()) {
+                        ctx.memory_mut(|m| m.surrender_focus(focused));
+                    }
+                }
 
                 // ── Deferred fit-to-viewport on new/open ─────────────────────
                 // Runs now that the real viewport `rect` is known, so artwork
@@ -3387,14 +3727,13 @@ impl PhotonicApp {
                     }
                 }
 
-                // ── Raster (pixel) layers ──────────────────────────────────────
-                // Painted over the GPU-rendered vector layer as textured quads,
-                // matching the headless export compositor. Skipped in outline mode
-                // and in Pixel/Overprint Preview (those re-composite via the
-                // headless render, so the live overlay would double up).
+                // ── Mixed raster/vector scene ──────────────────────────────────
+                // A single ordered CPU composite is placed over the GPU scene
+                // whenever raster objects exist. Separate raster quads would
+                // always sit above every vector, regardless of layer order.
                 if !self.outline_mode && !self.preview_active() {
                     let raster_painter = ui.painter_at(rect);
-                    self.paint_raster_nodes(ctx, &raster_painter, doc, view);
+                    self.paint_mixed_document(ctx, &raster_painter, doc, view, rect);
                 }
 
                 // ── Isolation Mode: dim everything outside the isolated group ──
@@ -5099,7 +5438,20 @@ impl PhotonicApp {
                 }
 
                 // ── Pen tool ─────────────────────────────────────────────────
-                if self.active_tool == Tool::Pen {
+                if self.active_tool == Tool::AreaTrace {
+                    self.handle_area_trace_tool(
+                        ui,
+                        &response,
+                        doc,
+                        view,
+                        history,
+                        &mut doc_modified,
+                    );
+                    return;
+                }
+
+                // ── Pen tool ─────────────────────────────────────────────────
+                if matches!(self.active_tool, Tool::Pen | Tool::CurvaturePen) {
                     self.handle_pen_tool(ui, &response, doc, view, history, &mut doc_modified);
                     return;
                 }
@@ -5133,7 +5485,7 @@ impl PhotonicApp {
                             let mut best_cut = (cx, cy);
 
                             for node in doc.nodes.values() {
-                                if !node.visible {
+                                if !node.visible || doc.is_node_locked(node) {
                                     continue;
                                 }
                                 let pn = match &node.kind {
@@ -5289,6 +5641,9 @@ impl PhotonicApp {
                                     let attr = self.magic_wand_attribute;
                                     let mut matched: Vec<NodeId> = Vec::new();
                                     for (nid, node) in &doc.nodes {
+                                        if doc.is_node_locked(node) {
+                                            continue;
+                                        }
                                         let ok = match attr {
                                             SelectSameAttr::FillColor => {
                                                 let ref_c = magic_wand_solid_fill(&ref_node);
@@ -5418,7 +5773,7 @@ impl PhotonicApp {
                             let to_select: Vec<NodeId> = doc
                                 .nodes_in_draw_order()
                                 .into_iter()
-                                .filter(|n| !n.locked)
+                                .filter(|n| !doc.is_node_locked(n))
                                 .filter_map(|node| {
                                     node_world_aabb_opt(node).and_then(|aabb| {
                                         let cx = (aabb.0 + aabb.2) / 2.0;
@@ -5577,6 +5932,7 @@ impl PhotonicApp {
                             let (cx, cy) = (self.snap(cx), self.snap(cy));
                             let [r, g, b, a] = self.fill_color;
                             let mut text_node = TextNode::new("Text");
+                            self.prefs.typography_defaults.apply_to(&mut text_node);
                             text_node.fill = Fill::solid(Color { r, g, b, a });
                             let kind = SceneNodeKind::Text(text_node);
                             let num = doc.node_count() + 1;
@@ -6228,6 +6584,24 @@ mod direct_select_geometry_tests {
     }
 
     #[test]
+    fn retracted_corner_handles_cannot_capture_an_anchor_drag() {
+        let selected: std::collections::HashSet<usize> = [1usize].into_iter().collect();
+        let smoothed = bez_convert_anchors(&rect(), &selected, true);
+        let cornered = bez_convert_anchors(&smoothed, &selected, false);
+        let node = SceneNode::new(
+            "corner",
+            Default::default(),
+            SceneNodeKind::Path(PathNode::new(PathData::from_bez_path(&cornered))),
+        );
+
+        assert_eq!(
+            ds_find_handle(&node, &CanvasView::default(), &[1], 100.0, 0.0, 10.0),
+            None,
+            "a control retracted onto its anchor is not an interactive handle"
+        );
+    }
+
+    #[test]
     fn set_handle_moves_only_target_when_not_mirrored() {
         let mut b = BezPath::new();
         b.move_to((0.0, 0.0));
@@ -6279,6 +6653,32 @@ mod direct_select_geometry_tests {
         assert!(
             in_h.is_some(),
             "start anchor should resolve its incoming handle across the seam"
+        );
+    }
+
+    #[test]
+    fn distinct_anchors_across_close_path_do_not_share_handles() {
+        // ClosePath contributes a straight edge back to MoveTo. When the final
+        // cubic ends somewhere else, its endpoint and MoveTo are two distinct
+        // anchors and must not borrow one another's handles across that edge.
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.curve_to((10.0, 0.0), (20.0, 10.0), (30.0, 10.0));
+        b.curve_to((40.0, 10.0), (50.0, 0.0), (60.0, 0.0));
+        b.close_path();
+
+        let (start_in, start_out) = anchor_handle_pair(&b, 0);
+        let (last_in, last_out) = anchor_handle_pair(&b, 2);
+
+        assert!(
+            start_in.is_none(),
+            "MoveTo has a straight incoming close edge"
+        );
+        assert_eq!(start_out.unwrap().1, Point::new(10.0, 0.0));
+        assert_eq!(last_in.unwrap().1, Point::new(50.0, 0.0));
+        assert!(
+            last_out.is_none(),
+            "final anchor has a straight outgoing close edge"
         );
     }
 

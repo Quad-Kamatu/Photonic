@@ -106,7 +106,7 @@ pub(crate) fn direct_select_hit(
 ) -> Option<NodeId> {
     use kurbo::{ParamCurveNearest, Shape};
     for node in doc.nodes_in_draw_order().into_iter().rev() {
-        if node.locked {
+        if doc.is_node_locked(node) {
             continue;
         }
         let Some((x0, y0, x1, y1)) = text_aware_canvas_bounds(node, renderer) else {
@@ -150,7 +150,7 @@ pub(crate) fn hit_test(
     renderer: &mut PhotonicRenderer,
 ) -> Option<NodeId> {
     for node in doc.nodes_in_draw_order().into_iter().rev() {
-        if node.locked {
+        if doc.is_node_locked(node) {
             continue;
         }
         // Cheap reject: the click must at least fall inside the bounding box.

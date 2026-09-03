@@ -45,6 +45,13 @@ impl PhotonicApp {
         }
     }
 
+    /// Clipboard commands use native egui events for their defaults because
+    /// the window backend consumes Ctrl+C/V. A remapped binding still arrives
+    /// as a normal key event and must be handled explicitly.
+    pub(crate) fn binding_is_remapped(&self, id: CommandId) -> bool {
+        self.prefs.resolve_binding(id) != commands::default_binding(id)
+    }
+
     /// Run a registered command. Returns `true` if the document changed.
     pub(crate) fn dispatch_command(
         &mut self,
@@ -59,14 +66,19 @@ impl PhotonicApp {
         }
         match id {
             "edit.undo" => {
-                if history.undo(doc) {
+                if self.undo_pen_anchor() {
+                    // Anchor placements are transient until the path commits,
+                    // so they do not dirty the document or touch its history.
+                } else if history.undo(doc) {
                     self.selected_id = doc.selection.ids().next().copied();
                     self.invalidate_point_edit(doc);
                     modified = true;
                 }
             }
             "edit.redo" => {
-                if history.redo(doc) {
+                if self.redo_pen_anchor() {
+                    // See the Pen-local Undo branch above.
+                } else if history.redo(doc) {
                     self.selected_id = doc.selection.ids().next().copied();
                     self.invalidate_point_edit(doc);
                     modified = true;
@@ -101,7 +113,13 @@ impl PhotonicApp {
                     .layer_order
                     .iter()
                     .filter_map(|lid| doc.layers.get(lid))
+                    .filter(|layer| !doc.is_layer_locked(&layer.id))
                     .flat_map(|l| l.node_ids.iter().copied())
+                    .filter(|id| {
+                        doc.nodes
+                            .get(id)
+                            .is_some_and(|node| !doc.is_node_locked(node))
+                    })
                     .collect();
                 if !all.is_empty() {
                     self.selected_id = all.first().copied();
@@ -150,6 +168,7 @@ impl PhotonicApp {
                     // Clear stale point-edit state so entering Direct Select via the
                     // command palette re-seeds from the current selection (#164 finding 1).
                     self.clear_point_edit();
+                    self.clear_pen_path();
                     self.active_tool = t;
                 }
             }
@@ -307,6 +326,9 @@ impl PhotonicApp {
         else {
             return false;
         };
+        if doc.is_layer_locked(&target_layer) {
+            return false;
+        }
         let Some((cmd, new_ids)) = self
             .gui_clipboard
             .paste_command(target_layer, offset, offset)

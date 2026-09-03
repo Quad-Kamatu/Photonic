@@ -10,13 +10,19 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         mut doc_modified: bool,
     ) -> bool {
+        self.prune_locked_selection(doc);
+
         // ── Drain panel actions (z-order, boolean ops) ───────────────────────
         // Use take() so `self` is not borrowed during the loop, allowing calls
         // to &self/&mut self methods (build_shape_with_tool, do_group_selected).
         'actions: for action in std::mem::take(&mut self.pending_panel_actions) {
             match action {
                 PanelAction::SelectNode { node_id } => {
-                    if doc.nodes.contains_key(&node_id) {
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
                         self.selected_id = Some(node_id);
                         doc.selection = Selection::single(node_id);
                         doc_modified = true;
@@ -35,28 +41,34 @@ impl PhotonicApp {
                     }
                 }
                 PanelAction::ReorderNode { node_id, op } => {
-                    if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
-                        let layer_len = doc
-                            .layers
-                            .get(&layer_id)
-                            .map(|l| l.node_ids.len())
-                            .unwrap_or(0);
-                        if layer_len > 0 {
-                            let new_index = match op {
-                                ZOrderOp::SendToBack => 0,
-                                ZOrderOp::BringToFront => layer_len - 1,
-                                ZOrderOp::SendBackward => cur_idx.saturating_sub(1),
-                                ZOrderOp::BringForward => (cur_idx + 1).min(layer_len - 1),
-                            };
-                            if new_index != cur_idx {
-                                let cmd = Command::ReorderNode {
-                                    layer_id,
-                                    node_id,
-                                    old_index: cur_idx,
-                                    new_index,
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
+                        if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&node_id) {
+                            let layer_len = doc
+                                .layers
+                                .get(&layer_id)
+                                .map(|l| l.node_ids.len())
+                                .unwrap_or(0);
+                            if layer_len > 0 {
+                                let new_index = match op {
+                                    ZOrderOp::SendToBack => 0,
+                                    ZOrderOp::BringToFront => layer_len - 1,
+                                    ZOrderOp::SendBackward => cur_idx.saturating_sub(1),
+                                    ZOrderOp::BringForward => (cur_idx + 1).min(layer_len - 1),
                                 };
-                                history.execute(cmd, doc);
-                                doc_modified = true;
+                                if new_index != cur_idx {
+                                    let cmd = Command::ReorderNode {
+                                        layer_id,
+                                        node_id,
+                                        old_index: cur_idx,
+                                        new_index,
+                                    };
+                                    history.execute(cmd, doc);
+                                    doc_modified = true;
+                                }
                             }
                         }
                     }
@@ -333,6 +345,7 @@ impl PhotonicApp {
                             new: new_node,
                         };
                         history.execute(cmd, doc);
+                        self.prune_locked_selection(doc);
                         doc_modified = true;
                     }
                 }
@@ -524,7 +537,12 @@ impl PhotonicApp {
                 }
 
                 PanelAction::DuplicateNode { node_id } => {
-                    if let Some(node) = doc.nodes.get(&node_id).cloned() {
+                    if let Some(node) = doc
+                        .nodes
+                        .get(&node_id)
+                        .filter(|node| !doc.is_node_locked(node))
+                        .cloned()
+                    {
                         let mut copy = node.clone();
                         copy.id = uuid::Uuid::new_v4();
                         copy.name = format!("{} copy", copy.name);
@@ -544,12 +562,18 @@ impl PhotonicApp {
                 }
 
                 PanelAction::DeleteNode { node_id } => {
-                    history.execute(Command::RemoveNode { node_id }, doc);
-                    if self.selected_id == Some(node_id) {
-                        self.selected_id = None;
-                        doc.selection.clear();
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
+                        history.execute(Command::RemoveNode { node_id }, doc);
+                        if self.selected_id == Some(node_id) {
+                            self.selected_id = None;
+                            doc.selection.clear();
+                        }
+                        doc_modified = true;
                     }
-                    doc_modified = true;
                 }
 
                 PanelAction::OutlineStroke { node_ids } => {
@@ -663,6 +687,16 @@ impl PhotonicApp {
                         self.cancel_raster_color_range(doc);
                         doc_modified = true;
                     }
+                }
+
+                PanelAction::ApplyAreaTrace => {
+                    if self.apply_area_trace_preview(doc, history) {
+                        doc_modified = true;
+                    }
+                }
+
+                PanelAction::CancelAreaTrace => {
+                    self.cancel_area_trace_preview(doc, true);
                 }
 
                 PanelAction::ClearRasterMask { node_id } => {
@@ -2408,6 +2442,7 @@ impl PhotonicApp {
                         use photonic_core::node::TextNode;
                         let [r, g, b, a] = fill;
                         let mut text_node = TextNode::new("Text");
+                        self.prefs.typography_defaults.apply_to(&mut text_node);
                         text_node.fill = Fill::solid(Color { r, g, b, a });
                         let num = doc.node_count() + 1;
                         let mut node = SceneNode::new(
@@ -2562,7 +2597,18 @@ impl PhotonicApp {
                     // Guard: never drop a node into itself or one of its own
                     // descendants (would create a cycle).
                     let cycle = matches!(new, NodeContainer::Group(gid) if doc.is_ancestor_or_self(node_id, gid));
-                    if !cycle {
+                    let source_unlocked = doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node));
+                    let destination_unlocked = match new {
+                        NodeContainer::Layer(lid) => !doc.is_layer_locked(&lid),
+                        NodeContainer::Group(gid) => doc
+                            .nodes
+                            .get(&gid)
+                            .is_some_and(|node| !doc.is_node_locked(node)),
+                    };
+                    if !cycle && source_unlocked && destination_unlocked {
                         if let Some((old, old_index)) = doc.node_container_and_index(&node_id) {
                             if !(old == new && old_index == new_index) {
                                 history.execute(
@@ -2782,6 +2828,7 @@ impl PhotonicApp {
                         history,
                         &mut doc_modified,
                     );
+                    self.prune_locked_selection(doc);
                 }
 
                 PanelAction::SetLayerOpacity { layer_id, opacity } => {
@@ -2821,7 +2868,11 @@ impl PhotonicApp {
                 }
 
                 PanelAction::OpenObjectOptions { node_id } => {
-                    if let Some(node) = doc.nodes.get(&node_id) {
+                    if let Some(node) = doc
+                        .nodes
+                        .get(&node_id)
+                        .filter(|node| !doc.is_node_locked(node))
+                    {
                         self.object_options_dialog =
                             Some(ObjectOptionsDialog::from_node(node_id, node));
                     }
@@ -2844,14 +2895,20 @@ impl PhotonicApp {
                 }
 
                 PanelAction::OpenColorPopup { node_id, stroke } => {
-                    // Anchor the picker at the current pointer (the radial-menu
-                    // click site); fall back to a sensible default off-screen.
-                    let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(240.0, 240.0));
-                    self.color_popup = Some(ColorPopupState {
-                        node_id,
-                        stroke,
-                        pos,
-                    });
+                    if doc
+                        .nodes
+                        .get(&node_id)
+                        .is_some_and(|node| !doc.is_node_locked(node))
+                    {
+                        // Anchor the picker at the current pointer (the radial-menu
+                        // click site); fall back to a sensible default off-screen.
+                        let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(240.0, 240.0));
+                        self.color_popup = Some(ColorPopupState {
+                            node_id,
+                            stroke,
+                            pos,
+                        });
+                    }
                 }
 
                 PanelAction::AlignNodes {
@@ -3294,6 +3351,50 @@ impl PhotonicApp {
                             doc_modified = true;
                         }
                     }
+                }
+
+                PanelAction::SetTextEssentials {
+                    node_id,
+                    font_size,
+                    align,
+                } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        if matches!(node.kind, SceneNodeKind::Text(_)) {
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Text(ref mut text) = new_node.kind {
+                                if let Some(font_size) = font_size {
+                                    text.font_size = font_size.clamp(1.0, 1000.0);
+                                }
+                                if let Some(align) = align {
+                                    text.align = align;
+                                }
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                            self.mixed_scene_tex_cache = None;
+                        }
+                    }
+                }
+
+                PanelAction::SetTypographyDefaults { mut defaults } => {
+                    defaults.font_size = defaults.font_size.clamp(1.0, 1000.0);
+                    defaults.font_weight = defaults.font_weight.clamp(100, 900);
+                    defaults.line_height = defaults.line_height.clamp(0.5, 5.0);
+                    defaults.letter_spacing = defaults.letter_spacing.clamp(-20.0, 50.0);
+                    if defaults.font_family.trim().is_empty() {
+                        defaults.font_family = "sans-serif".into();
+                    }
+                    self.font_library
+                        .record_recent_family(&defaults.font_family);
+                    self.prefs.recent_font_families = self.font_library.recent_families.clone();
+                    self.prefs.typography_defaults = defaults;
+                    self.prefs.save();
                 }
 
                 PanelAction::FlipNodes {
@@ -5992,6 +6093,53 @@ impl PhotonicApp {
                     }
                 }
 
+                PanelAction::SetFontFamily { node_id, family } => {
+                    if let Some(node) = doc.nodes.get(&node_id) {
+                        if matches!(node.kind, SceneNodeKind::Text(_)) {
+                            let already_selected = matches!(
+                                &node.kind,
+                                SceneNodeKind::Text(text) if text.font_family == family
+                            );
+                            if already_selected {
+                                continue 'actions;
+                            }
+                            let mut new_node = node.clone();
+                            if let SceneNodeKind::Text(ref mut text) = new_node.kind {
+                                text.font_family = family.clone();
+                            }
+                            history.execute(
+                                Command::UpdateNode {
+                                    old: node.clone(),
+                                    new: new_node,
+                                },
+                                doc,
+                            );
+                            doc_modified = true;
+                            self.mixed_scene_tex_cache = None;
+                            self.font_library.record_recent_family(&family);
+                            self.prefs.recent_font_families =
+                                self.font_library.recent_families.clone();
+                            self.prefs.save();
+                        }
+                    }
+                }
+
+                PanelAction::InstallFont {
+                    node_id,
+                    id,
+                    family,
+                    subset,
+                } => match self
+                    .font_library
+                    .start_install(node_id, id, family.clone(), subset)
+                {
+                    Ok(()) => {
+                        self.file_status = Some(format!("Downloading {family}…"));
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    Err(error) => self.file_status = Some(format!("Font install failed: {error}")),
+                },
+
                 PanelAction::SetTextPath {
                     text_node_id,
                     path_node_id,
@@ -6198,6 +6346,16 @@ impl PhotonicApp {
                             doc_modified = true;
                         }
                     }
+                }
+
+                PanelAction::MergeAnchors { node_id, indices } => {
+                    self.ds_merge_selected_anchors(
+                        node_id,
+                        &indices,
+                        doc,
+                        &mut doc_modified,
+                        history,
+                    );
                 }
 
                 PanelAction::DeleteAnchors { node_id, indices } => {

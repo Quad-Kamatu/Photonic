@@ -1150,6 +1150,19 @@ impl Document {
             .and_then(|id| self.layers.get(id))
     }
 
+    /// Whether a layer is locked for editing. Template layers are implicitly
+    /// locked even if an older document has a stale `locked: false` flag.
+    pub fn is_layer_locked(&self, id: &LayerId) -> bool {
+        self.layers
+            .get(id)
+            .is_some_and(|layer| layer.locked || layer.is_template)
+    }
+
+    /// Whether a node is protected by its own lock or by the layer that owns it.
+    pub fn is_node_locked(&self, node: &SceneNode) -> bool {
+        node.locked || self.is_layer_locked(&node.layer_id)
+    }
+
     // --- Node operations ---
 
     /// Add a node to the specified layer (or the active layer if None).
@@ -1899,6 +1912,29 @@ mod tests {
             assert_eq!(out.conflicts, vec![MergeConflict::EditVsDelete(aid)]);
             assert!(out.merged.nodes.contains_key(&aid));
         }
+    }
+
+    #[test]
+    fn node_lock_includes_owning_layer_lock() {
+        let mut doc = Document::new("locks", 100.0, 100.0);
+        let layer_id = doc.layer_order[0];
+        let node = SceneNode::new(
+            "rect",
+            layer_id,
+            SceneNodeKind::Path(PathNode::new(PathData::rect(0.0, 0.0, 10.0, 10.0))),
+        );
+
+        assert!(!doc.is_layer_locked(&layer_id));
+        assert!(!doc.is_node_locked(&node));
+
+        doc.layers.get_mut(&layer_id).unwrap().locked = true;
+        assert!(doc.is_layer_locked(&layer_id));
+        assert!(doc.is_node_locked(&node));
+
+        doc.layers.get_mut(&layer_id).unwrap().locked = false;
+        doc.layers.get_mut(&layer_id).unwrap().is_template = true;
+        assert!(doc.is_layer_locked(&layer_id));
+        assert!(doc.is_node_locked(&node));
     }
 
     #[test]

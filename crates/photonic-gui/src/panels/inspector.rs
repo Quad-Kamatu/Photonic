@@ -19,6 +19,491 @@ pub(crate) fn draw_navigator_section(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum FontPickerTarget {
+    Text(NodeId),
+    Defaults,
+}
+
+impl FontPickerTarget {
+    fn node_id(self) -> Option<NodeId> {
+        match self {
+            Self::Text(node_id) => Some(node_id),
+            Self::Defaults => None,
+        }
+    }
+
+    fn apply_action(
+        self,
+        family: String,
+        defaults: &crate::preferences::TypographyDefaults,
+    ) -> PanelAction {
+        match self {
+            Self::Text(node_id) => PanelAction::SetFontFamily { node_id, family },
+            Self::Defaults => {
+                let mut defaults = defaults.clone();
+                defaults.font_family = family;
+                PanelAction::SetTypographyDefaults { defaults }
+            }
+        }
+    }
+}
+
+fn draw_font_picker(
+    ui: &mut Ui,
+    state: &mut crate::font_library::FontLibraryState,
+    target: FontPickerTarget,
+    current_family: &str,
+    defaults: &crate::preferences::TypographyDefaults,
+) -> Option<PanelAction> {
+    use crate::font_library::{CatalogStatus, FontLibraryTab};
+
+    let mut action = None;
+    let managed = state.is_family_managed(current_family);
+    let family_label = if managed {
+        format!("{current_family}  ·  Photonic")
+    } else {
+        current_family.to_string()
+    };
+    if ui
+        .add_sized(
+            [ui.available_width(), 28.0],
+            egui::Button::new(format!(
+                "{}  {}",
+                family_label,
+                if state.picker_open {
+                    ph::CARET_UP
+                } else {
+                    ph::CARET_DOWN
+                }
+            )),
+        )
+        .on_hover_text("Choose an installed font or browse the open-source library")
+        .clicked()
+    {
+        state.picker_open = !state.picker_open;
+    }
+    if !state.picker_open {
+        return None;
+    }
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.tab, FontLibraryTab::Installed, "Installed");
+        ui.selectable_value(&mut state.tab, FontLibraryTab::Recent, "Recent");
+        ui.selectable_value(&mut state.tab, FontLibraryTab::Library, "Library");
+    });
+    ui.add(
+        egui::TextEdit::singleline(&mut state.search)
+            .hint_text("Search fonts, category, or language…")
+            .desired_width(f32::INFINITY),
+    );
+
+    match state.tab {
+        FontLibraryTab::Installed => {
+            let query = state.search.trim().to_lowercase();
+            let visible: Vec<String> = state
+                .installed_families
+                .iter()
+                .filter(|family| query.is_empty() || family.to_lowercase().contains(&query))
+                .take(150)
+                .cloned()
+                .collect();
+            egui::ScrollArea::vertical()
+                .id_salt("installed_font_list")
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for family in visible {
+                        let selected = family.eq_ignore_ascii_case(current_family);
+                        let managed = state.is_family_managed(&family);
+                        let label = if managed {
+                            format!("{family}  {}", ph::CHECK)
+                        } else {
+                            family.clone()
+                        };
+                        if ui
+                            .selectable_label(selected, label)
+                            .on_hover_text(if managed {
+                                "Installed through Photonic"
+                            } else {
+                                "Available from the operating system"
+                            })
+                            .clicked()
+                        {
+                            state.picker_open = false;
+                            action = Some(target.apply_action(family, defaults));
+                        }
+                    }
+                });
+            if state.installed_families.is_empty() {
+                ui.label(RichText::new("No installed font families were found.").weak());
+            }
+        }
+        FontLibraryTab::Recent => {
+            if state.recent_families.is_empty() {
+                ui.label(
+                    RichText::new("Fonts you apply will appear here for quick reuse.")
+                        .weak()
+                        .small(),
+                );
+            } else {
+                let query = state.search.trim().to_lowercase();
+                let visible = state
+                    .recent_families
+                    .iter()
+                    .filter(|family| query.is_empty() || family.to_lowercase().contains(&query))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for family in visible {
+                    if ui
+                        .selectable_label(family.eq_ignore_ascii_case(current_family), &family)
+                        .clicked()
+                    {
+                        state.picker_open = false;
+                        action = Some(target.apply_action(family, defaults));
+                    }
+                }
+            }
+        }
+        FontLibraryTab::Library => {
+            state.ensure_catalog();
+            match &state.catalog_status {
+                CatalogStatus::NotLoaded | CatalogStatus::Loading => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading the open-source catalog…");
+                    });
+                }
+                CatalogStatus::Error(error) => {
+                    ui.colored_label(Color32::from_rgb(220, 90, 90), error);
+                    if ui.small_button("Retry").clicked() {
+                        state.retry_catalog();
+                    }
+                }
+                CatalogStatus::Ready => {
+                    let query = state.search.trim().to_lowercase();
+                    let visible: Vec<usize> = state
+                        .catalog
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, font)| {
+                            crate::font_library::is_supported_open_license(&font.license)
+                                && (query.is_empty()
+                                    || font.family.to_lowercase().contains(&query)
+                                    || font.category.to_lowercase().contains(&query)
+                                    || font
+                                        .subsets
+                                        .iter()
+                                        .any(|subset| subset.to_lowercase().contains(&query)))
+                        })
+                        .map(|(index, _)| index)
+                        .take(100)
+                        .collect();
+                    let mut choose = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("fontsource_font_list")
+                        .max_height(190.0)
+                        .show(ui, |ui| {
+                            for index in visible {
+                                let font = &state.catalog[index];
+                                let selected = state.selected_id.as_deref() == Some(&font.id);
+                                let installed = state.is_family_managed(&font.family);
+                                let suffix = if installed {
+                                    "installed".to_string()
+                                } else if font.category.is_empty() {
+                                    font.license.clone()
+                                } else {
+                                    font.category.clone()
+                                };
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        format!("{}  ·  {}", font.family, suffix),
+                                    )
+                                    .clicked()
+                                {
+                                    choose = Some(font.clone());
+                                }
+                            }
+                        });
+
+                    if let Some(font) = choose {
+                        state.selected_id = Some(font.id.clone());
+                        state.selected_subset = if font.def_subset.is_empty() {
+                            font.subsets
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "latin".into())
+                        } else {
+                            font.def_subset.clone()
+                        };
+                        state.start_preview(font.id, font.family, state.selected_subset.clone());
+                    }
+
+                    let selected = state
+                        .selected_id
+                        .as_ref()
+                        .and_then(|id| state.catalog.iter().find(|font| &font.id == id))
+                        .cloned();
+                    if let Some(font) = selected {
+                        ui.separator();
+                        ui.label(RichText::new(&font.family).strong());
+                        let kind = if font.variable { "variable" } else { "static" };
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {} · {}",
+                                font.category, kind, font.license
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                        if !font.weights.is_empty() {
+                            let weights = font
+                                .weights
+                                .iter()
+                                .map(u16::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            ui.label(RichText::new(format!("Weights: {weights}")).small());
+                        }
+                        if !font.subsets.is_empty() {
+                            if !font.subsets.contains(&state.selected_subset) {
+                                state.selected_subset = if font.def_subset.is_empty() {
+                                    font.subsets[0].clone()
+                                } else {
+                                    font.def_subset.clone()
+                                };
+                            }
+                            let prior_subset = state.selected_subset.clone();
+                            egui::ComboBox::from_id_salt("font_library_subset")
+                                .selected_text(&state.selected_subset)
+                                .show_ui(ui, |ui| {
+                                    for subset in &font.subsets {
+                                        ui.selectable_value(
+                                            &mut state.selected_subset,
+                                            subset.clone(),
+                                            subset,
+                                        );
+                                    }
+                                });
+                            if state.selected_subset != prior_subset {
+                                state.start_preview(
+                                    font.id.clone(),
+                                    font.family.clone(),
+                                    state.selected_subset.clone(),
+                                );
+                            }
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.preview_text)
+                                .hint_text("Preview phrase")
+                                .desired_width(f32::INFINITY),
+                        )
+                        .on_hover_text("Edit the live type specimen shown below");
+
+                        let preview_token = format!("{}:{}", font.id, state.selected_subset);
+                        if state.preview_loading_token.as_deref() == Some(&preview_token) {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Loading type specimen…");
+                            });
+                        } else if state.preview_ready_token.as_deref() == Some(&preview_token) {
+                            if let Some(font_key) = &state.preview_font_key {
+                                egui::Frame::group(ui.style())
+                                    .inner_margin(egui::Margin::same(8.0))
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new(&state.preview_text).font(
+                                            egui::FontId::new(
+                                                22.0,
+                                                egui::FontFamily::Name(font_key.clone().into()),
+                                            ),
+                                        ));
+                                    });
+                            }
+                        } else if let Some(error) = &state.preview_error {
+                            ui.label(RichText::new(format!("Preview unavailable: {error}")).weak());
+                        }
+
+                        let installing = state.installing_id.as_deref() == Some(&font.id);
+                        let another_installing = state.installing_id.is_some() && !installing;
+                        if state.is_subset_managed(&font.id, &state.selected_subset) {
+                            let label = match target {
+                                FontPickerTarget::Text(_) => "Apply to selected text",
+                                FontPickerTarget::Defaults => "Use for new text",
+                            };
+                            if ui.button(label).clicked() {
+                                state.picker_open = false;
+                                action = Some(target.apply_action(font.family, defaults));
+                            }
+                        } else if installing {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Downloading and validating family…");
+                            });
+                        } else if another_installing {
+                            ui.add_enabled(false, egui::Button::new("Another font is installing…"));
+                        } else if ui
+                            .button(format!(
+                                "{}  {}",
+                                ph::DOWNLOAD_SIMPLE,
+                                match target {
+                                    FontPickerTarget::Text(_) => "Add & Apply",
+                                    FontPickerTarget::Defaults => "Add & Use",
+                                }
+                            ))
+                            .on_hover_text(
+                                "Download every weight/style for this character set into Photonic",
+                            )
+                            .clicked()
+                        {
+                            action = Some(PanelAction::InstallFont {
+                                node_id: target.node_id(),
+                                id: font.id,
+                                family: font.family,
+                                subset: state.selected_subset.clone(),
+                            });
+                        }
+                    } else {
+                        ui.label(RichText::new("Choose a family to see its details.").weak());
+                    }
+                    ui.label(
+                        RichText::new("Catalog and font files provided by Fontsource.")
+                            .small()
+                            .weak(),
+                    );
+                }
+            }
+        }
+    }
+    if state.is_busy() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    action
+}
+
+pub(crate) fn draw_typography_panel(ui: &mut Ui, ctx: &mut PropPanelCtx) {
+    if matches!(
+        ctx.selected_node.map(|node| &node.kind),
+        Some(SceneNodeKind::Text(_))
+    ) {
+        ctx.typography_only = true;
+        draw_selected_node(ui, ctx);
+        ctx.typography_only = false;
+        return;
+    }
+
+    ui.label(RichText::new("New text defaults").strong());
+    ui.label(
+        RichText::new(if ctx.selected_node.is_some() {
+            "The selection is not text. These settings will be used for the next text object."
+        } else {
+            "These settings will be used for the next text object."
+        })
+        .weak()
+        .small(),
+    );
+    ui.add_space(6.0);
+
+    let current_defaults = ctx.typography_defaults.clone();
+    let current_family = current_defaults.font_family.clone();
+    if let Some(action) = draw_font_picker(
+        ui,
+        ctx.font_library,
+        FontPickerTarget::Defaults,
+        &current_family,
+        &current_defaults,
+    ) {
+        ctx.action = Some(action);
+    }
+
+    ui.separator();
+    ui.label(RichText::new("Essentials").strong());
+    let mut next = current_defaults;
+    let mut changed = false;
+    egui::Grid::new("typography_defaults_grid")
+        .num_columns(2)
+        .spacing([8.0, 5.0])
+        .show(ui, |ui| {
+            ui.label("Size");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut next.font_size)
+                        .speed(0.5)
+                        .range(1.0..=1000.0)
+                        .suffix(" px"),
+                )
+                .changed();
+            ui.end_row();
+
+            ui.label("Weight");
+            let before_weight = next.font_weight;
+            egui::ComboBox::from_id_salt("typography_default_weight")
+                .selected_text(next.font_weight.to_string())
+                .show_ui(ui, |ui| {
+                    for weight in [100, 200, 300, 400, 500, 600, 700, 800, 900] {
+                        ui.selectable_value(&mut next.font_weight, weight, weight.to_string());
+                    }
+                });
+            changed |= next.font_weight != before_weight;
+            ui.end_row();
+
+            ui.label("Line height");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut next.line_height)
+                        .speed(0.05)
+                        .range(0.5..=5.0),
+                )
+                .changed();
+            ui.end_row();
+
+            ui.label("Letter spacing");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut next.letter_spacing)
+                        .speed(0.1)
+                        .range(-20.0..=50.0)
+                        .suffix(" px"),
+                )
+                .changed();
+            ui.end_row();
+        });
+
+    ui.horizontal(|ui| {
+        ui.label("Style");
+        changed |= ui
+            .selectable_value(
+                &mut next.font_style,
+                photonic_core::node::FontStyle::Normal,
+                "Regular",
+            )
+            .changed();
+        changed |= ui
+            .selectable_value(
+                &mut next.font_style,
+                photonic_core::node::FontStyle::Italic,
+                RichText::new("Italic").italics(),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        use photonic_core::node::TextAlign;
+        ui.label("Align");
+        changed |= ui
+            .selectable_value(&mut next.align, TextAlign::Left, "Left")
+            .changed();
+        changed |= ui
+            .selectable_value(&mut next.align, TextAlign::Center, "Center")
+            .changed();
+        changed |= ui
+            .selectable_value(&mut next.align, TextAlign::Right, "Right")
+            .changed();
+    });
+
+    if changed {
+        ctx.action = Some(PanelAction::SetTypographyDefaults { defaults: next });
+    }
+}
+
 pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let doc = ctx.doc;
     let selected_node = ctx.selected_node;
@@ -42,416 +527,421 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let raster_mask_contiguous = &mut *ctx.raster_mask_contiguous;
     let raster_color_range_target = ctx.raster_color_range_target;
     let rmbg_model_cached = ctx.rmbg_model_cached;
+    let font_library = &mut *ctx.font_library;
     let q = ctx.q.as_str();
     let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
     let forced_open = ctx.forced_open;
     let mut action: Option<PanelAction> = None;
     // ── Selected node info ────────────────────────────────────────────────────
     if let Some(node) = selected_node {
-        ui.label(RichText::new("Selected").strong());
-        ui.label(format!("Name:    {}", node.name));
-        egui::CollapsingHeader::new("Transform")
-            .default_open(true)
-            .id_salt("transform_section")
-            .open(forced_open)
-            .show(ui, |ui| {
-                ui.label(format!("Opacity: {:.0}%", node.opacity * 100.0));
+        if !ctx.typography_only {
+            ui.label(RichText::new("Selected").strong());
+            ui.label(format!("Name:    {}", node.name));
+            egui::CollapsingHeader::new("Transform")
+                .default_open(true)
+                .id_salt("transform_section")
+                .open(forced_open)
+                .show(ui, |ui| {
+                    ui.label(format!("Opacity: {:.0}%", node.opacity * 100.0));
 
-                let [_a, _b, _c, _d, tx, ty] = node.transform.matrix;
-                if let Some(nid) = selected_id {
-                    let mut px = tx;
-                    let mut py = ty;
-                    egui::Grid::new("node_pos_grid")
-                        .num_columns(4)
-                        .spacing([4.0, 2.0])
-                        .show(ui, |ui| {
-                            ui.label("X:");
-                            let x_resp =
-                                ui.add(egui::DragValue::new(&mut px).speed(1.0).fixed_decimals(1));
-                            ui.label("Y:");
-                            let y_resp =
-                                ui.add(egui::DragValue::new(&mut py).speed(1.0).fixed_decimals(1));
-                            ui.end_row();
-                            if x_resp.changed() || y_resp.changed() {
-                                action = Some(PanelAction::SetNodePosition {
-                                    node_id: nid,
-                                    x: px,
-                                    y: py,
-                                });
-                            }
-                        });
-                } else {
-                    ui.label(format!("X: {:.1}   Y: {:.1}", tx, ty));
-                }
-
-                // Rotation input — available for any node type when one node is selected.
-                if let Some(nid) = selected_id {
-                    let [a, b, _c, _d, _tx, _ty] = node.transform.matrix;
-                    // Extract current rotation angle in degrees from the matrix column vectors.
-                    let current_deg = b.atan2(a).to_degrees();
-                    let mut angle_deg = current_deg;
-                    egui::Grid::new("node_rot_grid")
-                        .num_columns(2)
-                        .spacing([4.0, 2.0])
-                        .show(ui, |ui| {
-                            ui.label("R°:");
-                            let rot_resp = ui.add(
-                                egui::DragValue::new(&mut angle_deg)
-                                    .speed(0.5)
-                                    .fixed_decimals(1)
-                                    .suffix("°"),
-                            );
-                            if rot_resp.changed() {
-                                // Primary first so its current angle defines the delta;
-                                // the whole selection rotates about its shared center.
-                                let mut node_ids = vec![nid];
-                                node_ids.extend(selected_ids.iter().copied().filter(|&i| i != nid));
-                                action = Some(PanelAction::RotateNode {
-                                    node_ids,
-                                    angle_deg,
-                                });
-                            }
-                        });
-                }
-
-                if let (Some(nid), photonic_core::SceneNodeKind::Path(pn)) =
-                    (selected_id, &node.kind)
-                {
-                    if let Some(local_r) = pn.path_data.bounding_box() {
-                        // Compute world-space W/H by transforming the four local corners.
-                        let affine = node.transform.to_kurbo();
-                        let cx = [local_r.x0, local_r.x1, local_r.x1, local_r.x0];
-                        let cy = [local_r.y0, local_r.y0, local_r.y1, local_r.y1];
-                        let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
-                        let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
-                        for i in 0..4 {
-                            let p = affine * kurbo::Point::new(cx[i], cy[i]);
-                            if p.x < min_x {
-                                min_x = p.x;
-                            }
-                            if p.x > max_x {
-                                max_x = p.x;
-                            }
-                            if p.y < min_y {
-                                min_y = p.y;
-                            }
-                            if p.y > max_y {
-                                max_y = p.y;
-                            }
-                        }
-                        let mut world_w = (max_x - min_x).max(0.1);
-                        let mut world_h = (max_y - min_y).max(0.1);
-                        egui::Grid::new("node_size_grid")
+                    let [_a, _b, _c, _d, tx, ty] = node.transform.matrix;
+                    if let Some(nid) = selected_id {
+                        let mut px = tx;
+                        let mut py = ty;
+                        egui::Grid::new("node_pos_grid")
                             .num_columns(4)
                             .spacing([4.0, 2.0])
                             .show(ui, |ui| {
-                                ui.label("W:");
-                                let w_resp = ui.add(
-                                    egui::DragValue::new(&mut world_w)
-                                        .speed(1.0)
-                                        .fixed_decimals(1),
+                                ui.label("X:");
+                                let x_resp = ui.add(
+                                    egui::DragValue::new(&mut px).speed(1.0).fixed_decimals(1),
                                 );
-                                ui.label("H:");
-                                let h_resp = ui.add(
-                                    egui::DragValue::new(&mut world_h)
-                                        .speed(1.0)
-                                        .fixed_decimals(1),
+                                ui.label("Y:");
+                                let y_resp = ui.add(
+                                    egui::DragValue::new(&mut py).speed(1.0).fixed_decimals(1),
                                 );
                                 ui.end_row();
-                                if (w_resp.changed() || h_resp.changed())
-                                    && world_w > 0.1
-                                    && world_h > 0.1
-                                {
-                                    action = Some(PanelAction::SetNodeSize {
+                                if x_resp.changed() || y_resp.changed() {
+                                    action = Some(PanelAction::SetNodePosition {
                                         node_id: nid,
-                                        width: world_w,
-                                        height: world_h,
+                                        x: px,
+                                        y: py,
+                                    });
+                                }
+                            });
+                    } else {
+                        ui.label(format!("X: {:.1}   Y: {:.1}", tx, ty));
+                    }
+
+                    // Rotation input — available for any node type when one node is selected.
+                    if let Some(nid) = selected_id {
+                        let [a, b, _c, _d, _tx, _ty] = node.transform.matrix;
+                        // Extract current rotation angle in degrees from the matrix column vectors.
+                        let current_deg = b.atan2(a).to_degrees();
+                        let mut angle_deg = current_deg;
+                        egui::Grid::new("node_rot_grid")
+                            .num_columns(2)
+                            .spacing([4.0, 2.0])
+                            .show(ui, |ui| {
+                                ui.label("R°:");
+                                let rot_resp = ui.add(
+                                    egui::DragValue::new(&mut angle_deg)
+                                        .speed(0.5)
+                                        .fixed_decimals(1)
+                                        .suffix("°"),
+                                );
+                                if rot_resp.changed() {
+                                    // Primary first so its current angle defines the delta;
+                                    // the whole selection rotates about its shared center.
+                                    let mut node_ids = vec![nid];
+                                    node_ids
+                                        .extend(selected_ids.iter().copied().filter(|&i| i != nid));
+                                    action = Some(PanelAction::RotateNode {
+                                        node_ids,
+                                        angle_deg,
                                     });
                                 }
                             });
                     }
-                }
 
-                // ── Visibility / Lock toggles ─────────────────────────────────────
-                if let Some(nid) = selected_id {
-                    ui.horizontal(|ui| {
-                        let eye_icon = if node.visible { ph::EYE } else { ph::EYE_SLASH };
-                        let eye_tip = if node.visible {
-                            "Hide this node"
-                        } else {
-                            "Show this node"
-                        };
-                        if ui
-                            .button(eye_icon.to_string())
-                            .on_hover_text(eye_tip)
-                            .clicked()
-                        {
-                            action = Some(PanelAction::SetVisible {
-                                node_id: nid,
-                                visible: !node.visible,
-                            });
-                        }
-
-                        let lock_icon = if node.locked { ph::LOCK } else { ph::LOCK_OPEN };
-                        let lock_tip = if node.locked {
-                            "Unlock this node"
-                        } else {
-                            "Lock this node (prevents canvas selection)"
-                        };
-                        if ui
-                            .button(lock_icon.to_string())
-                            .on_hover_text(lock_tip)
-                            .clicked()
-                        {
-                            action = Some(PanelAction::SetLocked {
-                                node_id: nid,
-                                locked: !node.locked,
-                            });
-                        }
-                    });
-                }
-            });
-        ui.add_space(2.0);
-
-        // ── Path node accordions (alphabetical) ───────────────────────────
-        if let (Some(nid), SceneNodeKind::Path(pn)) = (selected_id, &node.kind) {
-            // Fill
-            if matches("Fill") {
-                egui::CollapsingHeader::new("Fill")
-                    .default_open(true)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        // When 2+ nodes are selected, a fill edit broadcasts to
-                        // the whole selection; with one node it targets just it.
-                        let multi = selection_count >= 2;
-                        if multi {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Editing fill for {selection_count} selected objects"
-                                ))
-                                .weak()
-                                .small(),
-                            );
-                        }
-                        // Clicking the fill preview opens the movable fill color
-                        // popup (full picker + slide-out gradient drawer).
-                        ui.horizontal(|ui| {
-                            if ColorPopup::fill_preview(ui, &pn.fill, egui::vec2(56.0, 22.0))
-                                .on_hover_text("Edit fill — opens the color popup")
-                                .clicked()
-                            {
-                                action = Some(PanelAction::OpenColorPopup {
-                                    node_id: nid,
-                                    stroke: false,
-                                });
-                            }
-                            let label = {
-                                use photonic_core::style::FillKind as FK;
-                                match &pn.fill.kind {
-                                    FK::None => "None",
-                                    FK::Solid(_) => "Solid",
-                                    FK::Gradient(_) => "Gradient",
-                                    FK::FluidGradient(_) => "Fluid",
-                                    FK::MeshGradient(_) => "Mesh",
-                                    FK::Pattern(_) => "Pattern",
+                    if let (Some(nid), photonic_core::SceneNodeKind::Path(pn)) =
+                        (selected_id, &node.kind)
+                    {
+                        if let Some(local_r) = pn.path_data.bounding_box() {
+                            // Compute world-space W/H by transforming the four local corners.
+                            let affine = node.transform.to_kurbo();
+                            let cx = [local_r.x0, local_r.x1, local_r.x1, local_r.x0];
+                            let cy = [local_r.y0, local_r.y0, local_r.y1, local_r.y1];
+                            let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+                            let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+                            for i in 0..4 {
+                                let p = affine * kurbo::Point::new(cx[i], cy[i]);
+                                if p.x < min_x {
+                                    min_x = p.x;
                                 }
-                            };
-                            ui.label(RichText::new(label).weak().small());
-                        });
-                        // ── Recent colors swatches ──────────────────────────
-                        if !doc.recent_colors.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new("Recent").weak().small());
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
-                                for rc in &doc.recent_colors {
-                                    let c32 = Color32::from_rgba_unmultiplied(
-                                        (rc.r * 255.0) as u8,
-                                        (rc.g * 255.0) as u8,
-                                        (rc.b * 255.0) as u8,
-                                        (rc.a * 255.0) as u8,
+                                if p.x > max_x {
+                                    max_x = p.x;
+                                }
+                                if p.y < min_y {
+                                    min_y = p.y;
+                                }
+                                if p.y > max_y {
+                                    max_y = p.y;
+                                }
+                            }
+                            let mut world_w = (max_x - min_x).max(0.1);
+                            let mut world_h = (max_y - min_y).max(0.1);
+                            egui::Grid::new("node_size_grid")
+                                .num_columns(4)
+                                .spacing([4.0, 2.0])
+                                .show(ui, |ui| {
+                                    ui.label("W:");
+                                    let w_resp = ui.add(
+                                        egui::DragValue::new(&mut world_w)
+                                            .speed(1.0)
+                                            .fixed_decimals(1),
                                     );
-                                    let (rect, resp) = ui.allocate_exact_size(
-                                        egui::vec2(16.0, 16.0),
-                                        egui::Sense::click(),
+                                    ui.label("H:");
+                                    let h_resp = ui.add(
+                                        egui::DragValue::new(&mut world_h)
+                                            .speed(1.0)
+                                            .fixed_decimals(1),
                                     );
-                                    ui.painter().rect_filled(rect, 2.0, c32);
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        2.0,
-                                        egui::Stroke::new(0.5, Color32::from_gray(100)),
-                                    );
-                                    if resp.clicked() {
-                                        use photonic_core::{Color, Fill};
-                                        let fill = Fill::solid(Color {
-                                            r: rc.r,
-                                            g: rc.g,
-                                            b: rc.b,
-                                            a: rc.a,
-                                        });
-                                        action = Some(if multi {
-                                            PanelAction::UpdateNodesFill {
-                                                node_ids: selected_ids.to_vec(),
-                                                fill,
-                                            }
-                                        } else {
-                                            PanelAction::UpdateNodeFill { node_id: nid, fill }
+                                    ui.end_row();
+                                    if (w_resp.changed() || h_resp.changed())
+                                        && world_w > 0.1
+                                        && world_h > 0.1
+                                    {
+                                        action = Some(PanelAction::SetNodeSize {
+                                            node_id: nid,
+                                            width: world_w,
+                                            height: world_h,
                                         });
                                     }
-                                    if resp.hovered() {
-                                        resp.on_hover_text(format!(
-                                            "#{:02X}{:02X}{:02X}{:02X}",
+                                });
+                        }
+                    }
+
+                    // ── Visibility / Lock toggles ─────────────────────────────────────
+                    if let Some(nid) = selected_id {
+                        ui.horizontal(|ui| {
+                            let eye_icon = if node.visible { ph::EYE } else { ph::EYE_SLASH };
+                            let eye_tip = if node.visible {
+                                "Hide this node"
+                            } else {
+                                "Show this node"
+                            };
+                            if ui
+                                .button(eye_icon.to_string())
+                                .on_hover_text(eye_tip)
+                                .clicked()
+                            {
+                                action = Some(PanelAction::SetVisible {
+                                    node_id: nid,
+                                    visible: !node.visible,
+                                });
+                            }
+
+                            let lock_icon = if node.locked { ph::LOCK } else { ph::LOCK_OPEN };
+                            let lock_tip = if node.locked {
+                                "Unlock this node"
+                            } else {
+                                "Lock this node (prevents canvas selection)"
+                            };
+                            if ui
+                                .button(lock_icon.to_string())
+                                .on_hover_text(lock_tip)
+                                .clicked()
+                            {
+                                action = Some(PanelAction::SetLocked {
+                                    node_id: nid,
+                                    locked: !node.locked,
+                                });
+                            }
+                        });
+                    }
+                });
+            ui.add_space(2.0);
+
+            // ── Path node accordions (alphabetical) ───────────────────────────
+            if let (Some(nid), SceneNodeKind::Path(pn)) = (selected_id, &node.kind) {
+                // Fill
+                if matches("Fill") {
+                    egui::CollapsingHeader::new("Fill")
+                        .default_open(true)
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            // When 2+ nodes are selected, a fill edit broadcasts to
+                            // the whole selection; with one node it targets just it.
+                            let multi = selection_count >= 2;
+                            if multi {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Editing fill for {selection_count} selected objects"
+                                    ))
+                                    .weak()
+                                    .small(),
+                                );
+                            }
+                            // Clicking the fill preview opens the movable fill color
+                            // popup (full picker + slide-out gradient drawer).
+                            ui.horizontal(|ui| {
+                                if ColorPopup::fill_preview(ui, &pn.fill, egui::vec2(56.0, 22.0))
+                                    .on_hover_text("Edit fill — opens the color popup")
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::OpenColorPopup {
+                                        node_id: nid,
+                                        stroke: false,
+                                    });
+                                }
+                                let label = {
+                                    use photonic_core::style::FillKind as FK;
+                                    match &pn.fill.kind {
+                                        FK::None => "None",
+                                        FK::Solid(_) => "Solid",
+                                        FK::Gradient(_) => "Gradient",
+                                        FK::FluidGradient(_) => "Fluid",
+                                        FK::MeshGradient(_) => "Mesh",
+                                        FK::Pattern(_) => "Pattern",
+                                    }
+                                };
+                                ui.label(RichText::new(label).weak().small());
+                            });
+                            // ── Recent colors swatches ──────────────────────────
+                            if !doc.recent_colors.is_empty() {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new("Recent").weak().small());
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+                                    for rc in &doc.recent_colors {
+                                        let c32 = Color32::from_rgba_unmultiplied(
                                             (rc.r * 255.0) as u8,
                                             (rc.g * 255.0) as u8,
                                             (rc.b * 255.0) as u8,
                                             (rc.a * 255.0) as u8,
-                                        ));
-                                    }
-                                }
-                            });
-                        }
-                    });
-            }
-
-            // Stroke
-            if matches("Stroke") {
-                egui::CollapsingHeader::new("Stroke")
-                    .default_open(true)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        let multi = selection_count >= 2;
-                        let mut d = false;
-                        if let Some(new_stroke) = draw_stroke_editor(ui, &pn.stroke, &mut d) {
-                            action = Some(if multi {
-                                PanelAction::UpdateNodesStroke {
-                                    node_ids: selected_ids.to_vec(),
-                                    stroke: new_stroke,
-                                }
-                            } else {
-                                PanelAction::UpdateNodeStroke {
-                                    node_id: nid,
-                                    stroke: new_stroke,
-                                }
-                            });
-                        }
-                        if d {
-                            // With 2+ selected, the stroke eyedropper recolors
-                            // every selected object's stroke; otherwise just this one.
-                            action = Some(PanelAction::StartEyedropper(if multi {
-                                EyedropperTarget::NodesStroke {
-                                    node_ids: selected_ids.to_vec(),
-                                }
-                            } else {
-                                EyedropperTarget::NodeStroke { node_id: nid }
-                            }));
-                        }
-
-                        // Outline Stroke — convert the stroke into a fillable
-                        // shape (Illustrator's Object ▸ Path ▸ Outline Stroke).
-                        if pn.stroke.enabled && pn.stroke.width > 0.0 {
-                            ui.add_space(4.0);
-                            let targets: Vec<NodeId> = if multi {
-                                selected_ids.to_vec()
-                            } else {
-                                vec![nid]
-                            };
-                            if ui
-                                .button("Outline Stroke")
-                                .on_hover_text(
-                                    "Convert the stroke into a filled shape you can \
-                                     edit, like Illustrator's Outline Stroke",
-                                )
-                                .clicked()
-                            {
-                                action = Some(PanelAction::OutlineStroke { node_ids: targets });
-                            }
-                        }
-                    });
-            }
-
-            // Color Guide — only shown when the node has a solid fill
-            if matches("Color Guide") {
-                use photonic_core::style::FillKind;
-                if let FillKind::Solid(base_color) = &pn.fill.kind {
-                    if pn.fill.enabled {
-                        let base = *base_color;
-                        egui::CollapsingHeader::new("Color Guide")
-                            .default_open(false)
-                            .open(forced_open)
-                            .show(ui, |ui| {
-                                // Rule selector buttons
-                                ui.horizontal_wrapped(|ui| {
-                                    for rule in &[
-                                        "complementary",
-                                        "analogous",
-                                        "triadic",
-                                        "split_complementary",
-                                        "tetradic",
-                                        "monochromatic",
-                                    ] {
-                                        let selected = color_guide_rule.as_str() == *rule;
-                                        let label = rule.replace('_', " ");
-                                        if ui.selectable_label(selected, label).clicked() {
-                                            *color_guide_rule = rule.to_string();
-                                        }
-                                    }
-                                });
-                                ui.add_space(4.0);
-                                // Swatches
-                                let palette = base.harmony(color_guide_rule);
-                                ui.horizontal_wrapped(|ui| {
-                                    for (i, swatch) in palette.iter().enumerate() {
-                                        let c32 = Color32::from_rgb(
-                                            (swatch.r * 255.0).round() as u8,
-                                            (swatch.g * 255.0).round() as u8,
-                                            (swatch.b * 255.0).round() as u8,
                                         );
                                         let (rect, resp) = ui.allocate_exact_size(
-                                            egui::vec2(24.0, 24.0),
+                                            egui::vec2(16.0, 16.0),
                                             egui::Sense::click(),
                                         );
-                                        ui.painter().rect_filled(rect, 3.0, c32);
-                                        if i == 0 {
-                                            ui.painter().rect_stroke(
-                                                rect,
-                                                3.0,
-                                                egui::Stroke::new(2.0, Color32::WHITE),
-                                            );
-                                        }
-                                        let hex = swatch.to_hex();
-                                        if resp.on_hover_text(hex).clicked() {
-                                            let mut new_fill = pn.fill.clone();
-                                            new_fill.kind = FillKind::Solid(*swatch);
-                                            action = Some(PanelAction::UpdateNodeFill {
-                                                node_id: nid,
-                                                fill: new_fill,
+                                        ui.painter().rect_filled(rect, 2.0, c32);
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            2.0,
+                                            egui::Stroke::new(0.5, Color32::from_gray(100)),
+                                        );
+                                        if resp.clicked() {
+                                            use photonic_core::{Color, Fill};
+                                            let fill = Fill::solid(Color {
+                                                r: rc.r,
+                                                g: rc.g,
+                                                b: rc.b,
+                                                a: rc.a,
                                             });
+                                            action = Some(if multi {
+                                                PanelAction::UpdateNodesFill {
+                                                    node_ids: selected_ids.to_vec(),
+                                                    fill,
+                                                }
+                                            } else {
+                                                PanelAction::UpdateNodeFill { node_id: nid, fill }
+                                            });
+                                        }
+                                        if resp.hovered() {
+                                            resp.on_hover_text(format!(
+                                                "#{:02X}{:02X}{:02X}{:02X}",
+                                                (rc.r * 255.0) as u8,
+                                                (rc.g * 255.0) as u8,
+                                                (rc.b * 255.0) as u8,
+                                                (rc.a * 255.0) as u8,
+                                            ));
                                         }
                                     }
                                 });
-                            });
+                            }
+                        });
+                }
+
+                // Stroke
+                if matches("Stroke") {
+                    egui::CollapsingHeader::new("Stroke")
+                        .default_open(true)
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            let multi = selection_count >= 2;
+                            let mut d = false;
+                            if let Some(new_stroke) = draw_stroke_editor(ui, &pn.stroke, &mut d) {
+                                action = Some(if multi {
+                                    PanelAction::UpdateNodesStroke {
+                                        node_ids: selected_ids.to_vec(),
+                                        stroke: new_stroke,
+                                    }
+                                } else {
+                                    PanelAction::UpdateNodeStroke {
+                                        node_id: nid,
+                                        stroke: new_stroke,
+                                    }
+                                });
+                            }
+                            if d {
+                                // With 2+ selected, the stroke eyedropper recolors
+                                // every selected object's stroke; otherwise just this one.
+                                action = Some(PanelAction::StartEyedropper(if multi {
+                                    EyedropperTarget::NodesStroke {
+                                        node_ids: selected_ids.to_vec(),
+                                    }
+                                } else {
+                                    EyedropperTarget::NodeStroke { node_id: nid }
+                                }));
+                            }
+
+                            // Outline Stroke — convert the stroke into a fillable
+                            // shape (Illustrator's Object ▸ Path ▸ Outline Stroke).
+                            if pn.stroke.enabled && pn.stroke.width > 0.0 {
+                                ui.add_space(4.0);
+                                let targets: Vec<NodeId> = if multi {
+                                    selected_ids.to_vec()
+                                } else {
+                                    vec![nid]
+                                };
+                                if ui
+                                    .button("Outline Stroke")
+                                    .on_hover_text(
+                                        "Convert the stroke into a filled shape you can \
+                                     edit, like Illustrator's Outline Stroke",
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::OutlineStroke { node_ids: targets });
+                                }
+                            }
+                        });
+                }
+
+                // Color Guide — only shown when the node has a solid fill
+                if matches("Color Guide") {
+                    use photonic_core::style::FillKind;
+                    if let FillKind::Solid(base_color) = &pn.fill.kind {
+                        if pn.fill.enabled {
+                            let base = *base_color;
+                            egui::CollapsingHeader::new("Color Guide")
+                                .default_open(false)
+                                .open(forced_open)
+                                .show(ui, |ui| {
+                                    // Rule selector buttons
+                                    ui.horizontal_wrapped(|ui| {
+                                        for rule in &[
+                                            "complementary",
+                                            "analogous",
+                                            "triadic",
+                                            "split_complementary",
+                                            "tetradic",
+                                            "monochromatic",
+                                        ] {
+                                            let selected = color_guide_rule.as_str() == *rule;
+                                            let label = rule.replace('_', " ");
+                                            if ui.selectable_label(selected, label).clicked() {
+                                                *color_guide_rule = rule.to_string();
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                    // Swatches
+                                    let palette = base.harmony(color_guide_rule);
+                                    ui.horizontal_wrapped(|ui| {
+                                        for (i, swatch) in palette.iter().enumerate() {
+                                            let c32 = Color32::from_rgb(
+                                                (swatch.r * 255.0).round() as u8,
+                                                (swatch.g * 255.0).round() as u8,
+                                                (swatch.b * 255.0).round() as u8,
+                                            );
+                                            let (rect, resp) = ui.allocate_exact_size(
+                                                egui::vec2(24.0, 24.0),
+                                                egui::Sense::click(),
+                                            );
+                                            ui.painter().rect_filled(rect, 3.0, c32);
+                                            if i == 0 {
+                                                ui.painter().rect_stroke(
+                                                    rect,
+                                                    3.0,
+                                                    egui::Stroke::new(2.0, Color32::WHITE),
+                                                );
+                                            }
+                                            let hex = swatch.to_hex();
+                                            if resp.on_hover_text(hex).clicked() {
+                                                let mut new_fill = pn.fill.clone();
+                                                new_fill.kind = FillKind::Solid(*swatch);
+                                                action = Some(PanelAction::UpdateNodeFill {
+                                                    node_id: nid,
+                                                    fill: new_fill,
+                                                });
+                                            }
+                                        }
+                                    });
+                                });
+                        }
                     }
                 }
-            }
 
-            // Recolor
-            if matches("Recolor") {
-                egui::CollapsingHeader::new("Recolor")
-                    .default_open(false)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Map fills to nearest palette color.")
-                                .weak()
-                                .small(),
-                        );
-                        ui.label("Palette (hex, comma-separated):");
-                        ui.add(
-                            egui::TextEdit::singleline(recolor_palette_input)
-                                .hint_text("#FF0000, #00FF00, #0000FF")
-                                .desired_width(ui.available_width()),
-                        );
-                        if ui
+                // Recolor
+                if matches("Recolor") {
+                    egui::CollapsingHeader::new("Recolor")
+                        .default_open(false)
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Map fills to nearest palette color.")
+                                    .weak()
+                                    .small(),
+                            );
+                            ui.label("Palette (hex, comma-separated):");
+                            ui.add(
+                                egui::TextEdit::singleline(recolor_palette_input)
+                                    .hint_text("#FF0000, #00FF00, #0000FF")
+                                    .desired_width(ui.available_width()),
+                            );
+                            if ui
                             .button("Apply to Selection")
                             .on_hover_text(
                                 "Remap every solid fill to the nearest color in the palette above",
@@ -473,264 +963,280 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                                 });
                             }
                         }
-                    });
-            }
+                        });
+                }
 
-            // ── Effects ───────────────────────────────────────────────────────
-            if matches("Effects")
-                || matches("Inner Glow")
-                || matches("Outer Glow")
-                || matches("Gaussian Glow")
-            {
-                egui::CollapsingHeader::new("Effects")
-                    .default_open(false)
-                    .id_salt("effects_section")
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        // ── Layer Styles (reorderable effect stack) ─────────────
-                        egui::CollapsingHeader::new("Layer Styles")
-                            .default_open(true)
-                            .id_salt("layer_styles")
-                            .open(forced_open)
-                            .show(ui, |ui| {
-                                use photonic_core::effects::{
-                                    ColorOverlay, GradientOverlay, LayerEffect, StrokeEffect,
-                                };
-                                let mut effects = node.effects.clone();
-                                let mut changed = false;
-                                let mut remove: Option<usize> = None;
-                                for (i, eff) in effects.iter_mut().enumerate() {
-                                    match eff {
-                                        LayerEffect::ColorOverlay(co) => {
-                                            ui.horizontal(|ui| {
-                                                if ui.checkbox(&mut co.enabled, "").changed() {
-                                                    changed = true;
-                                                }
-                                                ui.label("Color Overlay");
-                                                let mut col = egui::Color32::from_rgb(
-                                                    (co.color.r * 255.0) as u8,
-                                                    (co.color.g * 255.0) as u8,
-                                                    (co.color.b * 255.0) as u8,
-                                                );
-                                                if ui.color_edit_button_srgba(&mut col).changed() {
-                                                    co.color.r = col.r() as f32 / 255.0;
-                                                    co.color.g = col.g() as f32 / 255.0;
-                                                    co.color.b = col.b() as f32 / 255.0;
-                                                    changed = true;
-                                                }
-                                                if ui.small_button("Remove").clicked() {
-                                                    remove = Some(i);
-                                                }
-                                            });
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(&mut co.opacity, 0.0..=1.0)
-                                                        .text("opacity"),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
-                                            }
-                                        }
-                                        LayerEffect::Stroke(st) => {
-                                            ui.horizontal(|ui| {
-                                                if ui.checkbox(&mut st.enabled, "").changed() {
-                                                    changed = true;
-                                                }
-                                                ui.label("Stroke");
-                                                if let photonic_core::style::FillKind::Solid(sc) =
-                                                    &mut st.fill.kind
-                                                {
+                // ── Effects ───────────────────────────────────────────────────────
+                if matches("Effects")
+                    || matches("Inner Glow")
+                    || matches("Outer Glow")
+                    || matches("Gaussian Glow")
+                {
+                    egui::CollapsingHeader::new("Effects")
+                        .default_open(false)
+                        .id_salt("effects_section")
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            // ── Layer Styles (reorderable effect stack) ─────────────
+                            egui::CollapsingHeader::new("Layer Styles")
+                                .default_open(true)
+                                .id_salt("layer_styles")
+                                .open(forced_open)
+                                .show(ui, |ui| {
+                                    use photonic_core::effects::{
+                                        ColorOverlay, GradientOverlay, LayerEffect, StrokeEffect,
+                                    };
+                                    let mut effects = node.effects.clone();
+                                    let mut changed = false;
+                                    let mut remove: Option<usize> = None;
+                                    for (i, eff) in effects.iter_mut().enumerate() {
+                                        match eff {
+                                            LayerEffect::ColorOverlay(co) => {
+                                                ui.horizontal(|ui| {
+                                                    if ui.checkbox(&mut co.enabled, "").changed() {
+                                                        changed = true;
+                                                    }
+                                                    ui.label("Color Overlay");
                                                     let mut col = egui::Color32::from_rgb(
-                                                        (sc.r * 255.0) as u8,
-                                                        (sc.g * 255.0) as u8,
-                                                        (sc.b * 255.0) as u8,
+                                                        (co.color.r * 255.0) as u8,
+                                                        (co.color.g * 255.0) as u8,
+                                                        (co.color.b * 255.0) as u8,
                                                     );
                                                     if ui
                                                         .color_edit_button_srgba(&mut col)
                                                         .changed()
                                                     {
-                                                        sc.r = col.r() as f32 / 255.0;
-                                                        sc.g = col.g() as f32 / 255.0;
-                                                        sc.b = col.b() as f32 / 255.0;
+                                                        co.color.r = col.r() as f32 / 255.0;
+                                                        co.color.g = col.g() as f32 / 255.0;
+                                                        co.color.b = col.b() as f32 / 255.0;
                                                         changed = true;
                                                     }
-                                                }
-                                                if ui.small_button("Remove").clicked() {
-                                                    remove = Some(i);
-                                                }
-                                            });
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(&mut st.width, 0.0..=50.0)
-                                                        .text("width"),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
-                                            }
-                                        }
-                                        LayerEffect::GradientOverlay(go) => {
-                                            ui.horizontal(|ui| {
-                                                if ui.checkbox(&mut go.enabled, "").changed() {
+                                                    if ui.small_button("Remove").clicked() {
+                                                        remove = Some(i);
+                                                    }
+                                                });
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut co.opacity,
+                                                            0.0..=1.0,
+                                                        )
+                                                        .text("opacity"),
+                                                    )
+                                                    .changed()
+                                                {
                                                     changed = true;
                                                 }
-                                                ui.label("Gradient Overlay");
-                                                if ui.small_button("Remove").clicked() {
-                                                    remove = Some(i);
-                                                }
-                                            });
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(&mut go.opacity, 0.0..=1.0)
-                                                        .text("opacity"),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
                                             }
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(
-                                                        &mut go.angle,
-                                                        -180.0..=180.0,
+                                            LayerEffect::Stroke(st) => {
+                                                ui.horizontal(|ui| {
+                                                    if ui.checkbox(&mut st.enabled, "").changed() {
+                                                        changed = true;
+                                                    }
+                                                    ui.label("Stroke");
+                                                    if let photonic_core::style::FillKind::Solid(
+                                                        sc,
+                                                    ) = &mut st.fill.kind
+                                                    {
+                                                        let mut col = egui::Color32::from_rgb(
+                                                            (sc.r * 255.0) as u8,
+                                                            (sc.g * 255.0) as u8,
+                                                            (sc.b * 255.0) as u8,
+                                                        );
+                                                        if ui
+                                                            .color_edit_button_srgba(&mut col)
+                                                            .changed()
+                                                        {
+                                                            sc.r = col.r() as f32 / 255.0;
+                                                            sc.g = col.g() as f32 / 255.0;
+                                                            sc.b = col.b() as f32 / 255.0;
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                    if ui.small_button("Remove").clicked() {
+                                                        remove = Some(i);
+                                                    }
+                                                });
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut st.width,
+                                                            0.0..=50.0,
+                                                        )
+                                                        .text("width"),
                                                     )
-                                                    .text("angle"),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
                                             }
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(&mut go.scale, 0.1..=3.0)
-                                                        .text("scale"),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
+                                            LayerEffect::GradientOverlay(go) => {
+                                                ui.horizontal(|ui| {
+                                                    if ui.checkbox(&mut go.enabled, "").changed() {
+                                                        changed = true;
+                                                    }
+                                                    ui.label("Gradient Overlay");
+                                                    if ui.small_button("Remove").clicked() {
+                                                        remove = Some(i);
+                                                    }
+                                                });
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut go.opacity,
+                                                            0.0..=1.0,
+                                                        )
+                                                        .text("opacity"),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut go.angle,
+                                                            -180.0..=180.0,
+                                                        )
+                                                        .text("angle"),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(&mut go.scale, 0.1..=3.0)
+                                                            .text("scale"),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                            }
+                                            other => {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(other.kind());
+                                                    if ui.small_button("Remove").clicked() {
+                                                        remove = Some(i);
+                                                    }
+                                                });
                                             }
                                         }
-                                        other => {
-                                            ui.horizontal(|ui| {
-                                                ui.label(other.kind());
-                                                if ui.small_button("Remove").clicked() {
-                                                    remove = Some(i);
-                                                }
+                                    }
+                                    if let Some(i) = remove {
+                                        effects.remove(i);
+                                        changed = true;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button("+ Color Overlay").clicked() {
+                                            effects.push(LayerEffect::ColorOverlay(
+                                                ColorOverlay::default(),
+                                            ));
+                                            changed = true;
+                                        }
+                                        if ui.button("+ Gradient Overlay").clicked() {
+                                            effects.push(LayerEffect::GradientOverlay(
+                                                GradientOverlay::default(),
+                                            ));
+                                            changed = true;
+                                        }
+                                        if ui.button("+ Stroke").clicked() {
+                                            effects
+                                                .push(LayerEffect::Stroke(StrokeEffect::default()));
+                                            changed = true;
+                                        }
+                                    });
+                                    if changed {
+                                        action = Some(PanelAction::SetNodeEffects {
+                                            node_id: nid,
+                                            effects,
+                                        });
+                                    }
+                                });
+                            // Inner Glow
+                            if matches("Inner Glow") || matches("Effects") {
+                                egui::CollapsingHeader::new("Inner Glow")
+                                    .default_open(false)
+                                    .open(forced_open)
+                                    .show(ui, |ui| {
+                                        let mut d = false;
+                                        if let Some(new_ig) =
+                                            draw_glow_editor(ui, &node.inner_glow, &mut d)
+                                        {
+                                            action = Some(PanelAction::UpdateNodeInnerGlow {
+                                                node_id: nid,
+                                                glow: new_ig,
                                             });
                                         }
-                                    }
-                                }
-                                if let Some(i) = remove {
-                                    effects.remove(i);
-                                    changed = true;
-                                }
-                                ui.horizontal(|ui| {
-                                    if ui.button("+ Color Overlay").clicked() {
-                                        effects.push(LayerEffect::ColorOverlay(
-                                            ColorOverlay::default(),
-                                        ));
-                                        changed = true;
-                                    }
-                                    if ui.button("+ Gradient Overlay").clicked() {
-                                        effects.push(LayerEffect::GradientOverlay(
-                                            GradientOverlay::default(),
-                                        ));
-                                        changed = true;
-                                    }
-                                    if ui.button("+ Stroke").clicked() {
-                                        effects.push(LayerEffect::Stroke(StrokeEffect::default()));
-                                        changed = true;
-                                    }
-                                });
-                                if changed {
-                                    action = Some(PanelAction::SetNodeEffects {
-                                        node_id: nid,
-                                        effects,
+                                        if d {
+                                            action = Some(PanelAction::StartEyedropper(
+                                                EyedropperTarget::NodeInnerGlow { node_id: nid },
+                                            ));
+                                        }
                                     });
-                                }
-                            });
-                        // Inner Glow
-                        if matches("Inner Glow") || matches("Effects") {
-                            egui::CollapsingHeader::new("Inner Glow")
-                                .default_open(false)
-                                .open(forced_open)
-                                .show(ui, |ui| {
-                                    let mut d = false;
-                                    if let Some(new_ig) =
-                                        draw_glow_editor(ui, &node.inner_glow, &mut d)
-                                    {
-                                        action = Some(PanelAction::UpdateNodeInnerGlow {
-                                            node_id: nid,
-                                            glow: new_ig,
-                                        });
-                                    }
-                                    if d {
-                                        action = Some(PanelAction::StartEyedropper(
-                                            EyedropperTarget::NodeInnerGlow { node_id: nid },
-                                        ));
-                                    }
-                                });
-                        }
-                        // Outer Glow
-                        if matches("Outer Glow") || matches("Effects") {
-                            egui::CollapsingHeader::new("Outer Glow")
-                                .default_open(false)
-                                .open(forced_open)
-                                .show(ui, |ui| {
-                                    let mut d = false;
-                                    if let Some(new_og) =
-                                        draw_glow_editor(ui, &node.outer_glow, &mut d)
-                                    {
-                                        action = Some(PanelAction::UpdateNodeOuterGlow {
-                                            node_id: nid,
-                                            glow: new_og,
-                                        });
-                                    }
-                                    if d {
-                                        action = Some(PanelAction::StartEyedropper(
-                                            EyedropperTarget::NodeOuterGlow { node_id: nid },
-                                        ));
-                                    }
-                                });
-                        }
-                        // Gaussian Glow
-                        if matches("Gaussian Glow") || matches("Effects") {
-                            egui::CollapsingHeader::new("Gaussian Glow")
-                                .default_open(false)
-                                .open(forced_open)
-                                .show(ui, |ui| {
-                                    let mut d = false;
-                                    if let Some(new_gg) =
-                                        draw_gaussian_glow_editor(ui, &node.gaussian_glow, &mut d)
-                                    {
-                                        action = Some(PanelAction::UpdateNodeGaussianGlow {
-                                            node_id: nid,
-                                            glow: new_gg,
-                                        });
-                                    }
-                                    if d {
-                                        action = Some(PanelAction::StartEyedropper(
-                                            EyedropperTarget::NodeGaussianGlow { node_id: nid },
-                                        ));
-                                    }
-                                });
-                        }
-                    });
-                ui.add_space(2.0);
-            }
+                            }
+                            // Outer Glow
+                            if matches("Outer Glow") || matches("Effects") {
+                                egui::CollapsingHeader::new("Outer Glow")
+                                    .default_open(false)
+                                    .open(forced_open)
+                                    .show(ui, |ui| {
+                                        let mut d = false;
+                                        if let Some(new_og) =
+                                            draw_glow_editor(ui, &node.outer_glow, &mut d)
+                                        {
+                                            action = Some(PanelAction::UpdateNodeOuterGlow {
+                                                node_id: nid,
+                                                glow: new_og,
+                                            });
+                                        }
+                                        if d {
+                                            action = Some(PanelAction::StartEyedropper(
+                                                EyedropperTarget::NodeOuterGlow { node_id: nid },
+                                            ));
+                                        }
+                                    });
+                            }
+                            // Gaussian Glow
+                            if matches("Gaussian Glow") || matches("Effects") {
+                                egui::CollapsingHeader::new("Gaussian Glow")
+                                    .default_open(false)
+                                    .open(forced_open)
+                                    .show(ui, |ui| {
+                                        let mut d = false;
+                                        if let Some(new_gg) = draw_gaussian_glow_editor(
+                                            ui,
+                                            &node.gaussian_glow,
+                                            &mut d,
+                                        ) {
+                                            action = Some(PanelAction::UpdateNodeGaussianGlow {
+                                                node_id: nid,
+                                                glow: new_gg,
+                                            });
+                                        }
+                                        if d {
+                                            action = Some(PanelAction::StartEyedropper(
+                                                EyedropperTarget::NodeGaussianGlow { node_id: nid },
+                                            ));
+                                        }
+                                    });
+                            }
+                        });
+                    ui.add_space(2.0);
+                }
 
-            // ── Path / Geometry ───────────────────────────────────────────────
-            if matches("Path / Geometry")
-                || matches("Path Operations")
-                || matches("Shear")
-                || matches("Flip")
-                || matches("Radial Copies")
-                || matches("Pin Guides")
-                || matches("Select Similar")
-                || matches("Snap to Pixel")
-            {
-                egui::CollapsingHeader::new("Path / Geometry")
+                // ── Path / Geometry ───────────────────────────────────────────────
+                if matches("Path / Geometry")
+                    || matches("Path Operations")
+                    || matches("Shear")
+                    || matches("Flip")
+                    || matches("Radial Copies")
+                    || matches("Pin Guides")
+                    || matches("Select Similar")
+                    || matches("Snap to Pixel")
+                {
+                    egui::CollapsingHeader::new("Path / Geometry")
                     .default_open(false)
                     .id_salt("path_geometry_section")
                     .open(forced_open)
@@ -1113,28 +1619,28 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                     });
             }
                     });
-                ui.add_space(2.0);
-            }
-        }
-
-        // ── Group Operations ───────────────────────────────────────────────
-        if let (SceneNodeKind::Group(gn), Some(gid)) = (&node.kind, selected_id) {
-            if gn.children.len() > 1 && matches("Reverse Order") {
-                if ui
-                    .button("Reverse Order")
-                    .on_hover_text(
-                        "Reverse the front-to-back stacking order of this group's children",
-                    )
-                    .clicked()
-                {
-                    action = Some(PanelAction::ReverseNodeOrder {
-                        node_ids: vec![gid],
-                    });
+                    ui.add_space(2.0);
                 }
-                ui.add_space(2.0);
             }
-            if gn.children.len() > 1 && matches("Flex Layout") {
-                egui::CollapsingHeader::new("Flex Layout")
+
+            // ── Group Operations ───────────────────────────────────────────────
+            if let (SceneNodeKind::Group(gn), Some(gid)) = (&node.kind, selected_id) {
+                if gn.children.len() > 1 && matches("Reverse Order") {
+                    if ui
+                        .button("Reverse Order")
+                        .on_hover_text(
+                            "Reverse the front-to-back stacking order of this group's children",
+                        )
+                        .clicked()
+                    {
+                        action = Some(PanelAction::ReverseNodeOrder {
+                            node_ids: vec![gid],
+                        });
+                    }
+                    ui.add_space(2.0);
+                }
+                if gn.children.len() > 1 && matches("Flex Layout") {
+                    egui::CollapsingHeader::new("Flex Layout")
                     .default_open(false)
                     .id_salt("flex_layout_header")
                     .show(ui, |ui| {
@@ -1204,23 +1710,23 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             }
                         });
                     });
-                ui.add_space(2.0);
-            }
+                    ui.add_space(2.0);
+                }
 
-            // ── Expand Blend ─────────────────────────────────────────────
-            if matches("Expand Blend") {
-                if ui.button("Expand Blend")
+                // ── Expand Blend ─────────────────────────────────────────────
+                if matches("Expand Blend") {
+                    if ui.button("Expand Blend")
                     .on_hover_text("Dissolve this group and place all child objects as standalone nodes at the parent layer")
                     .clicked()
                 {
                     action = Some(PanelAction::ExpandBlend { group_id: gid });
                 }
-                ui.add_space(2.0);
-            }
+                    ui.add_space(2.0);
+                }
 
-            // ── Blend Spine ───────────────────────────────────────────────
-            if matches("Blend Spine") {
-                egui::CollapsingHeader::new("Blend Spine")
+                // ── Blend Spine ───────────────────────────────────────────────
+                if matches("Blend Spine") {
+                    egui::CollapsingHeader::new("Blend Spine")
                     .default_open(false)
                     .id_salt("blend_spine_header")
                     .show(ui, |ui| {
@@ -1267,14 +1773,14 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             }
                         });
                     });
-                ui.add_space(2.0);
+                    ui.add_space(2.0);
+                }
             }
-        }
 
-        // ── Per-Node Undo ──────────────────────────────────────────────────
-        if let Some(nid) = selected_id {
-            if matches("Revert Node") {
-                ui.horizontal(|ui| {
+            // ── Per-Node Undo ──────────────────────────────────────────────────
+            if let Some(nid) = selected_id {
+                if matches("Revert Node") {
+                    ui.horizontal(|ui| {
                     if ui.button("↩ Revert Last Edit")
                         .on_hover_text("Undo the last edit to this node only, without affecting any other nodes")
                         .clicked()
@@ -1288,101 +1794,182 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                         action = Some(PanelAction::UndoNode { node_id: nid, steps: 3 });
                     }
                 });
+                    ui.add_space(2.0);
+                }
+            }
+
+            // ── Prompt History (read-only) ─────────────────────────────────────
+            if !node.prompt_history.is_empty() && matches("Origin") {
+                egui::CollapsingHeader::new("Origin (Prompt History)")
+                    .default_open(false)
+                    .open(forced_open)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("AI prompts that created or modified this node:")
+                                .weak()
+                                .small(),
+                        );
+                        for (i, prompt) in node.prompt_history.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("{}.", i + 1)).weak().small());
+                                ui.label(RichText::new(prompt).small());
+                            });
+                        }
+                    });
+                ui.add_space(2.0);
+            }
+
+            // ── Asset Export ───────────────────────────────────────────────────
+            if matches("Asset Export") {
+                let nid = node.id;
+                egui::CollapsingHeader::new("Asset Export")
+                    .default_open(node.export_spec.is_some())
+                    .open(forced_open)
+                    .show(ui, |ui| {
+                        if let Some(spec) = &node.export_spec {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Tagged: {} ({})",
+                                        spec.name, spec.format
+                                    ))
+                                    .small(),
+                                );
+                                if !spec.scales.is_empty() && spec.format != "svg" {
+                                    let scale_str: Vec<_> =
+                                        spec.scales.iter().map(|s| format!("{}x", s)).collect();
+                                    ui.label(RichText::new(scale_str.join(", ")).weak().small());
+                                }
+                            });
+                            if ui
+                                .small_button("Remove Tag")
+                                .on_hover_text("Remove this node's asset export tag")
+                                .clicked()
+                            {
+                                action = Some(PanelAction::RemoveExportTag { node_id: nid });
+                            }
+                        } else {
+                            ui.label(RichText::new("Not tagged for export.").weak().small());
+                            if ui
+                                .button("Tag as SVG Asset")
+                                .on_hover_text("Tag this node for batch SVG export using its name")
+                                .clicked()
+                            {
+                                action = Some(PanelAction::TagNodeForExport {
+                                    node_id: nid,
+                                    name: if node.name.is_empty() {
+                                        format!("asset-{}", &nid.to_string()[..8])
+                                    } else {
+                                        node.name.clone()
+                                    },
+                                    format: "svg".to_string(),
+                                });
+                            }
+                        }
+                    });
                 ui.add_space(2.0);
             }
         }
 
-        // ── Prompt History (read-only) ─────────────────────────────────────
-        if !node.prompt_history.is_empty() && matches("Origin") {
-            egui::CollapsingHeader::new("Origin (Prompt History)")
-                .default_open(false)
-                .open(forced_open)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("AI prompts that created or modified this node:")
-                            .weak()
-                            .small(),
-                    );
-                    for (i, prompt) in node.prompt_history.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}.", i + 1)).weak().small());
-                            ui.label(RichText::new(prompt).small());
-                        });
-                    }
-                });
-            ui.add_space(2.0);
-        }
+        // ── Typography & Text ─────────────────────────────────────────────
+        if ctx.typography_only {
+            if let SceneNodeKind::Text(_) = &node.kind {
+                ui.label(RichText::new(format!("Editing {}", node.name)).strong());
+                ui.label(
+                    RichText::new("Changes apply to the selected text object.")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(2.0);
+            }
 
-        // ── Asset Export ───────────────────────────────────────────────────
-        if matches("Asset Export") {
-            let nid = node.id;
-            egui::CollapsingHeader::new("Asset Export")
-                .default_open(node.export_spec.is_some())
-                .open(forced_open)
-                .show(ui, |ui| {
-                    if let Some(spec) = &node.export_spec {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("Tagged: {} ({})", spec.name, spec.format))
-                                    .small(),
-                            );
-                            if !spec.scales.is_empty() && spec.format != "svg" {
-                                let scale_str: Vec<_> =
-                                    spec.scales.iter().map(|s| format!("{}x", s)).collect();
-                                ui.label(RichText::new(scale_str.join(", ")).weak().small());
+            // ── Text Operations ────────────────────────────────────────────────
+            if let SceneNodeKind::Text(tn) = &node.kind {
+                let text_nid = node.id;
+                if matches("Font") {
+                    egui::CollapsingHeader::new("Font")
+                        .default_open(true)
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            if let Some(requested) = draw_font_picker(
+                                ui,
+                                font_library,
+                                FontPickerTarget::Text(text_nid),
+                                &tn.font_family,
+                                ctx.typography_defaults,
+                            ) {
+                                action = Some(requested);
                             }
                         });
-                        if ui
-                            .small_button("Remove Tag")
-                            .on_hover_text("Remove this node's asset export tag")
-                            .clicked()
-                        {
-                            action = Some(PanelAction::RemoveExportTag { node_id: nid });
-                        }
-                    } else {
-                        ui.label(RichText::new("Not tagged for export.").weak().small());
-                        if ui
-                            .button("Tag as SVG Asset")
-                            .on_hover_text("Tag this node for batch SVG export using its name")
-                            .clicked()
-                        {
-                            action = Some(PanelAction::TagNodeForExport {
-                                node_id: nid,
-                                name: if node.name.is_empty() {
-                                    format!("asset-{}", &nid.to_string()[..8])
-                                } else {
-                                    node.name.clone()
-                                },
-                                format: "svg".to_string(),
-                            });
-                        }
-                    }
-                });
-            ui.add_space(2.0);
-        }
-
-        // ── Typography & Text ─────────────────────────────────────────────
-        if let SceneNodeKind::Text(_) = &node.kind {
-            ui.add_space(2.0);
-            ui.separator();
-            ui.label(
-                RichText::new("Typography")
-                    .small()
-                    .color(Color32::from_rgb(80, 80, 110)),
-            );
-            ui.add_space(2.0);
-        }
-
-        // ── Text Operations ────────────────────────────────────────────────
-        if let SceneNodeKind::Text(tn) = &node.kind {
-            let text_nid = node.id;
-            if matches("Text Operations") {
-                let mut line_h = tn.line_height;
-                let mut letter_sp = tn.letter_spacing;
-                egui::CollapsingHeader::new("Text Operations")
+                    ui.add_space(2.0);
+                }
+                if matches("Text Operations") {
+                    let mut line_h = tn.line_height;
+                    let mut letter_sp = tn.letter_spacing;
+                    egui::CollapsingHeader::new("Text Operations")
                     .default_open(true)
                     .open(forced_open)
                     .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Size");
+                            let mut size = tn.font_size;
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut size)
+                                        .speed(0.5)
+                                        .range(1.0..=1000.0)
+                                        .suffix(" px"),
+                                )
+                                .changed()
+                            {
+                                action = Some(PanelAction::SetTextEssentials {
+                                    node_id: text_nid,
+                                    font_size: Some(size),
+                                    align: None,
+                                });
+                            }
+                            ui.label("Weight");
+                            let mut weight = tn.font_weight;
+                            egui::ComboBox::from_id_salt("selected_text_weight")
+                                .selected_text(weight.to_string())
+                                .width(62.0)
+                                .show_ui(ui, |ui| {
+                                    for option in
+                                        [100, 200, 300, 400, 500, 600, 700, 800, 900]
+                                    {
+                                        ui.selectable_value(
+                                            &mut weight,
+                                            option,
+                                            option.to_string(),
+                                        );
+                                    }
+                                });
+                            if weight != tn.font_weight {
+                                action = Some(PanelAction::SetFontWeight {
+                                    node_id: text_nid,
+                                    weight,
+                                });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            use photonic_core::node::TextAlign;
+                            ui.label("Align");
+                            for (align, label) in [
+                                (TextAlign::Left, "Left"),
+                                (TextAlign::Center, "Center"),
+                                (TextAlign::Right, "Right"),
+                            ] {
+                                if ui.selectable_label(tn.align == align, label).clicked()
+                                    && tn.align != align
+                                {
+                                    action = Some(PanelAction::SetTextEssentials {
+                                        node_id: text_nid,
+                                        font_size: None,
+                                        align: Some(align),
+                                    });
+                                }
+                            }
+                        });
                         ui.horizontal(|ui| {
                             ui.label("Line Height");
                             if ui.add(egui::DragValue::new(&mut line_h).speed(0.05).range(0.5..=5.0)).changed() {
@@ -1560,104 +2147,104 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             }
                         });
                     });
+                }
             }
-        }
 
-        // ── Character Styles (shown for text nodes when styles exist) ─────
-        if let SceneNodeKind::Text(_) = &node.kind {
-            let text_nid = node.id;
-            if !doc.character_styles.is_empty() && matches("Character Styles") {
-                egui::CollapsingHeader::new("Character Styles")
-                    .default_open(false)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        for style in &doc.character_styles {
-                            ui.horizontal(|ui| {
-                                let label = if let Some(fs) = style.font_size {
-                                    format!("{} ({}pt)", style.name, fs as u32)
-                                } else {
-                                    style.name.clone()
-                                };
-                                ui.label(RichText::new(&label).small());
-                                if ui
-                                    .small_button("Apply")
-                                    .on_hover_text(format!(
-                                        "Apply '{}' to this text node",
-                                        style.name
-                                    ))
-                                    .clicked()
-                                {
-                                    action = Some(PanelAction::ApplyCharacterStyle {
-                                        node_id: text_nid,
-                                        style_name: style.name.clone(),
-                                    });
-                                }
-                                if ui
-                                    .small_button(ph::X)
-                                    .on_hover_text("Delete this character style")
-                                    .clicked()
-                                {
-                                    action = Some(PanelAction::DeleteCharacterStyle {
-                                        name: style.name.clone(),
-                                    });
-                                }
-                            });
-                        }
-                    });
-                ui.add_space(2.0);
+            // ── Character Styles (shown for text nodes when styles exist) ─────
+            if let SceneNodeKind::Text(_) = &node.kind {
+                let text_nid = node.id;
+                if !doc.character_styles.is_empty() && matches("Character Styles") {
+                    egui::CollapsingHeader::new("Character Styles")
+                        .default_open(false)
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            for style in &doc.character_styles {
+                                ui.horizontal(|ui| {
+                                    let label = if let Some(fs) = style.font_size {
+                                        format!("{} ({}pt)", style.name, fs as u32)
+                                    } else {
+                                        style.name.clone()
+                                    };
+                                    ui.label(RichText::new(&label).small());
+                                    if ui
+                                        .small_button("Apply")
+                                        .on_hover_text(format!(
+                                            "Apply '{}' to this text node",
+                                            style.name
+                                        ))
+                                        .clicked()
+                                    {
+                                        action = Some(PanelAction::ApplyCharacterStyle {
+                                            node_id: text_nid,
+                                            style_name: style.name.clone(),
+                                        });
+                                    }
+                                    if ui
+                                        .small_button(ph::X)
+                                        .on_hover_text("Delete this character style")
+                                        .clicked()
+                                    {
+                                        action = Some(PanelAction::DeleteCharacterStyle {
+                                            name: style.name.clone(),
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    ui.add_space(2.0);
+                }
             }
-        }
 
-        // ── Paragraph Styles (shown for text nodes when styles exist) ────
-        if let SceneNodeKind::Text(_) = &node.kind {
-            let text_nid = node.id;
-            if !doc.paragraph_styles.is_empty() && matches("Paragraph Styles") {
-                egui::CollapsingHeader::new("Paragraph Styles")
-                    .default_open(false)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        for style in &doc.paragraph_styles {
-                            ui.horizontal(|ui| {
-                                let label = if let Some(a) = &style.align {
-                                    format!("{} ({})", style.name, a)
-                                } else {
-                                    style.name.clone()
-                                };
-                                ui.label(RichText::new(&label).small());
-                                if ui
-                                    .small_button("Apply")
-                                    .on_hover_text(format!(
-                                        "Apply '{}' to this text node",
-                                        style.name
-                                    ))
-                                    .clicked()
-                                {
-                                    action = Some(PanelAction::ApplyParagraphStyle {
-                                        node_id: text_nid,
-                                        style_name: style.name.clone(),
-                                    });
-                                }
-                                if ui
-                                    .small_button(ph::X)
-                                    .on_hover_text("Delete this paragraph style")
-                                    .clicked()
-                                {
-                                    action = Some(PanelAction::DeleteParagraphStyle {
-                                        name: style.name.clone(),
-                                    });
-                                }
-                            });
-                        }
-                    });
-                ui.add_space(2.0);
+            // ── Paragraph Styles (shown for text nodes when styles exist) ────
+            if let SceneNodeKind::Text(_) = &node.kind {
+                let text_nid = node.id;
+                if !doc.paragraph_styles.is_empty() && matches("Paragraph Styles") {
+                    egui::CollapsingHeader::new("Paragraph Styles")
+                        .default_open(false)
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            for style in &doc.paragraph_styles {
+                                ui.horizontal(|ui| {
+                                    let label = if let Some(a) = &style.align {
+                                        format!("{} ({})", style.name, a)
+                                    } else {
+                                        style.name.clone()
+                                    };
+                                    ui.label(RichText::new(&label).small());
+                                    if ui
+                                        .small_button("Apply")
+                                        .on_hover_text(format!(
+                                            "Apply '{}' to this text node",
+                                            style.name
+                                        ))
+                                        .clicked()
+                                    {
+                                        action = Some(PanelAction::ApplyParagraphStyle {
+                                            node_id: text_nid,
+                                            style_name: style.name.clone(),
+                                        });
+                                    }
+                                    if ui
+                                        .small_button(ph::X)
+                                        .on_hover_text("Delete this paragraph style")
+                                        .clicked()
+                                    {
+                                        action = Some(PanelAction::DeleteParagraphStyle {
+                                            name: style.name.clone(),
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    ui.add_space(2.0);
+                }
             }
-        }
 
-        // ── Type on a Path (shown for text nodes) ────────────────────────
-        if let SceneNodeKind::Text(ref tn) = node.kind {
-            let text_nid = node.id;
-            if matches("Type on a Path") {
-                egui::CollapsingHeader::new("Type on a Path")
+            // ── Type on a Path (shown for text nodes) ────────────────────────
+            if let SceneNodeKind::Text(ref tn) = node.kind {
+                let text_nid = node.id;
+                if matches("Type on a Path") {
+                    egui::CollapsingHeader::new("Type on a Path")
                     .default_open(true)
                     .open(forced_open)
                     .show(ui, |ui| {
@@ -1696,15 +2283,15 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             }
                         }
                     });
-                ui.add_space(2.0);
+                    ui.add_space(2.0);
+                }
             }
-        }
 
-        // ── Area Type (shown for text nodes) ─────────────────────────────
-        if let SceneNodeKind::Text(ref tn) = node.kind {
-            let text_nid = node.id;
-            if matches("Area Type") {
-                egui::CollapsingHeader::new("Area Type")
+            // ── Area Type (shown for text nodes) ─────────────────────────────
+            if let SceneNodeKind::Text(ref tn) = node.kind {
+                let text_nid = node.id;
+                if matches("Area Type") {
+                    egui::CollapsingHeader::new("Area Type")
                     .default_open(true)
                     .open(forced_open)
                     .show(ui, |ui| {
@@ -1740,500 +2327,507 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             }
                         }
                     });
-                ui.add_space(2.0);
+                    ui.add_space(2.0);
+                }
             }
-        }
 
-        // ── OpenType Features ─────────────────────────────────────────────
-        if let SceneNodeKind::Text(ref tn) = node.kind {
-            let text_nid = node.id;
-            if matches("OpenType Features") {
-                const OTF_FEATURES: &[(&str, &str)] = &[
-                    ("liga", "Standard Ligatures"),
-                    ("calt", "Contextual Alternates"),
-                    ("frac", "Fractions"),
-                    ("smcp", "Small Caps"),
-                    ("sups", "Superscript"),
-                    ("subs", "Subscript"),
-                    ("ordn", "Ordinals"),
-                    ("swsh", "Swashes"),
-                    ("dlig", "Discretionary Ligatures"),
-                    ("onum", "Oldstyle Figures"),
-                    ("tnum", "Tabular Figures"),
-                    ("zero", "Slashed Zero"),
-                ];
-                egui::CollapsingHeader::new("OpenType Features")
-                    .default_open(false)
-                    .id_salt("opentype_features_header")
-                    .show(ui, |ui| {
-                        let mut new_features = tn.opentype_features.clone();
-                        let mut changed = false;
-                        ui.label(
-                            RichText::new("Enable typographic features (font support varies).")
-                                .weak()
-                                .small(),
-                        );
-                        ui.add_space(2.0);
-                        for (tag, label) in OTF_FEATURES {
-                            let mut enabled = new_features.contains(&tag.to_string());
-                            if ui.checkbox(&mut enabled, *label).changed() {
-                                changed = true;
-                                if enabled {
-                                    new_features.push(tag.to_string());
-                                } else {
-                                    new_features.retain(|f| f != *tag);
-                                }
-                            }
-                        }
-                        if changed {
-                            action = Some(PanelAction::SetOpenTypeFeatures {
-                                node_id: text_nid,
-                                features: new_features,
-                            });
-                        }
-                    });
-                ui.add_space(2.0);
-            }
-        }
-
-        // ── Text Frame Threading ─────────────────────────────────────────
-        if let SceneNodeKind::Text(ref tn) = node.kind {
-            let text_nid = node.id;
-            if matches("Text Frame Threading") {
-                egui::CollapsingHeader::new("Text Frame Threading")
-                    .default_open(false)
-                    .id_salt("text_frame_thread_header")
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(
-                                "Chain text nodes so overflow flows from one to the next.",
-                            )
-                            .weak()
-                            .small(),
-                        );
-                        ui.add_space(2.0);
-
-                        // Show current chain state.
-                        if tn.prev_frame.is_some() || tn.next_frame.is_some() {
-                            if let Some(pid) = tn.prev_frame {
-                                let pname = doc
-                                    .nodes
-                                    .get(&pid)
-                                    .map(|n| n.name.clone())
-                                    .unwrap_or_else(|| pid.to_string());
-                                ui.label(RichText::new(format!("← from: {}", pname)).small());
-                            }
-                            if let Some(nid) = tn.next_frame {
-                                let nname = doc
-                                    .nodes
-                                    .get(&nid)
-                                    .map(|n| n.name.clone())
-                                    .unwrap_or_else(|| nid.to_string());
-                                ui.label(RichText::new(format!("→ to: {}", nname)).small());
-                            }
-                            if ui.button("Unlink Frame").clicked() {
-                                action = Some(PanelAction::UnlinkTextFrames { node_id: text_nid });
-                            }
-                        } else {
-                            // Find another text node in selection to link to.
-                            let other_text: Option<NodeId> = doc
-                                .selection
-                                .ids()
-                                .find(|&&sid| {
-                                    sid != text_nid
-                                        && doc.nodes.get(&sid).map_or(false, |n| {
-                                            matches!(n.kind, SceneNodeKind::Text(_))
-                                        })
-                                })
-                                .copied();
-                            if let Some(other_id) = other_text {
-                                let other_name = doc
-                                    .nodes
-                                    .get(&other_id)
-                                    .map(|n| n.name.clone())
-                                    .unwrap_or_default();
-                                ui.label(
-                                    RichText::new(format!("Selected text node: {}", other_name))
-                                        .small()
-                                        .weak(),
-                                );
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .button("Link Frame →")
-                                        .on_hover_text(
-                                            "This node overflows into the selected text node",
-                                        )
-                                        .clicked()
-                                    {
-                                        action = Some(PanelAction::LinkTextFrames {
-                                            from_id: text_nid,
-                                            to_id: other_id,
-                                        });
-                                    }
-                                    if ui
-                                        .button("← Link Frame")
-                                        .on_hover_text(
-                                            "The selected text node overflows into this node",
-                                        )
-                                        .clicked()
-                                    {
-                                        action = Some(PanelAction::LinkTextFrames {
-                                            from_id: other_id,
-                                            to_id: text_nid,
-                                        });
-                                    }
-                                });
-                            } else {
-                                ui.label(
-                                    RichText::new("Select two text nodes to link them.")
-                                        .weak()
-                                        .small(),
-                                );
-                            }
-                        }
-                    });
-                ui.add_space(2.0);
-            }
-        }
-
-        // ── Select Same ──────────────────────────────────────────────────
-        if let Some(ref_id) = selected_id {
-            if matches("Select Same") {
-                egui::CollapsingHeader::new("Select Same")
-                    .default_open(false)
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Select all nodes sharing this attribute")
-                                .weak()
-                                .small(),
-                        );
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button("Fill Color")
-                                .on_hover_text("Select nodes with the same solid fill color")
-                                .clicked()
-                            {
-                                action = Some(PanelAction::SelectSame {
-                                    node_id: ref_id,
-                                    attribute: SelectSameAttr::FillColor,
-                                });
-                            }
-                            if ui
-                                .button("Stroke Color")
-                                .on_hover_text("Select nodes with the same stroke color")
-                                .clicked()
-                            {
-                                action = Some(PanelAction::SelectSame {
-                                    node_id: ref_id,
-                                    attribute: SelectSameAttr::StrokeColor,
-                                });
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button("Stroke Weight")
-                                .on_hover_text("Select nodes with the same stroke width")
-                                .clicked()
-                            {
-                                action = Some(PanelAction::SelectSame {
-                                    node_id: ref_id,
-                                    attribute: SelectSameAttr::StrokeWeight,
-                                });
-                            }
-                            if ui
-                                .button("Opacity")
-                                .on_hover_text("Select nodes with the same opacity")
-                                .clicked()
-                            {
-                                action = Some(PanelAction::SelectSame {
-                                    node_id: ref_id,
-                                    attribute: SelectSameAttr::Opacity,
-                                });
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button("Blend Mode")
-                                .on_hover_text("Select nodes with the same blend mode")
-                                .clicked()
-                            {
-                                action = Some(PanelAction::SelectSame {
-                                    node_id: ref_id,
-                                    attribute: SelectSameAttr::BlendMode,
-                                });
-                            }
-                            if ui
-                                .button("Object Type")
-                                .on_hover_text(
-                                    "Select all nodes of the same type (path/group/text)",
-                                )
-                                .clicked()
-                            {
-                                action = Some(PanelAction::SelectSame {
-                                    node_id: ref_id,
-                                    attribute: SelectSameAttr::ObjectType,
-                                });
-                            }
-                        });
-                    });
-            }
-        }
-
-        // ── Raster Masking (raster layers only) ───────────────────────────
-        // Non-destructive: both operations write the node's layer mask (which
-        // the compositor multiplies into source alpha), never the pixels, and
-        // commit as one undoable UpdateNode.
-        if let (Some(nid), Some(node)) = (selected_id, selected_node) {
-            let is_plain_raster = matches!(
-                &node.kind,
-                SceneNodeKind::Raster(r) if !r.is_adjustment_layer()
-            );
-            if is_plain_raster && matches("Raster Masking") {
-                egui::CollapsingHeader::new("Raster Masking")
-                    .default_open(true)
-                    .id_salt("raster_masking_header")
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        // ── Color range ────────────────────────────────────
-                        ui.label(
-                            RichText::new(
-                                "Hide pixels by color (like Select > Color Range + delete, \
-                                 but reversible via the layer mask).",
-                            )
-                            .weak()
-                            .small(),
-                        );
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            ui.label("Fuzziness:");
-                            let tol = ui.add(
-                                egui::Slider::new(raster_mask_tolerance, 0.0..=1.0)
-                                    .fixed_decimals(2),
+            // ── OpenType Features ─────────────────────────────────────────────
+            if let SceneNodeKind::Text(ref tn) = node.kind {
+                let text_nid = node.id;
+                if matches("OpenType Features") {
+                    const OTF_FEATURES: &[(&str, &str)] = &[
+                        ("liga", "Standard Ligatures"),
+                        ("calt", "Contextual Alternates"),
+                        ("frac", "Fractions"),
+                        ("smcp", "Small Caps"),
+                        ("sups", "Superscript"),
+                        ("subs", "Subscript"),
+                        ("ordn", "Ordinals"),
+                        ("swsh", "Swashes"),
+                        ("dlig", "Discretionary Ligatures"),
+                        ("onum", "Oldstyle Figures"),
+                        ("tnum", "Tabular Figures"),
+                        ("zero", "Slashed Zero"),
+                    ];
+                    egui::CollapsingHeader::new("OpenType Features")
+                        .default_open(false)
+                        .id_salt("opentype_features_header")
+                        .show(ui, |ui| {
+                            let mut new_features = tn.opentype_features.clone();
+                            let mut changed = false;
+                            ui.label(
+                                RichText::new("Enable typographic features (font support varies).")
+                                    .weak()
+                                    .small(),
                             );
-                            if tol.changed() && raster_color_range_target.is_some() {
-                                action = Some(PanelAction::SetRasterColorRangeParams {
-                                    tolerance: *raster_mask_tolerance,
-                                    contiguous: *raster_mask_contiguous,
-                                });
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            let cont = ui
-                                .checkbox(raster_mask_contiguous, "Contiguous")
-                                .on_hover_text(
-                                    "On: only the connected region under the click \
-                                     (magic wand). Off: every matching pixel in the layer \
-                                     (color range).",
-                                );
-                            if cont.changed() && raster_color_range_target.is_some() {
-                                action = Some(PanelAction::SetRasterColorRangeParams {
-                                    tolerance: *raster_mask_tolerance,
-                                    contiguous: *raster_mask_contiguous,
-                                });
-                            }
-                        });
-                        match raster_color_range_target {
-                            None => {
-                                if ui
-                                    .button(format!("{} Pick Color to Hide", ph::EYEDROPPER))
-                                    .on_hover_text(
-                                        "Click a color on the canvas; matching pixels \
-                                         preview as hidden, then Apply or Cancel",
-                                    )
-                                    .clicked()
-                                {
-                                    action =
-                                        Some(PanelAction::StartRasterColorRange { node_id: nid });
+                            ui.add_space(2.0);
+                            for (tag, label) in OTF_FEATURES {
+                                let mut enabled = new_features.contains(&tag.to_string());
+                                if ui.checkbox(&mut enabled, *label).changed() {
+                                    changed = true;
+                                    if enabled {
+                                        new_features.push(tag.to_string());
+                                    } else {
+                                        new_features.retain(|f| f != *tag);
+                                    }
                                 }
                             }
-                            Some(rgba) => {
-                                ui.horizontal(|ui| {
-                                    ui.label("Hiding:");
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(18.0, 14.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        3.0,
-                                        Color32::from_rgb(rgba[0], rgba[1], rgba[2]),
-                                    );
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        3.0,
-                                        egui::Stroke::new(1.0, Color32::WHITE),
-                                    );
+                            if changed {
+                                action = Some(PanelAction::SetOpenTypeFeatures {
+                                    node_id: text_nid,
+                                    features: new_features,
+                                });
+                            }
+                        });
+                    ui.add_space(2.0);
+                }
+            }
+
+            // ── Text Frame Threading ─────────────────────────────────────────
+            if let SceneNodeKind::Text(ref tn) = node.kind {
+                let text_nid = node.id;
+                if matches("Text Frame Threading") {
+                    egui::CollapsingHeader::new("Text Frame Threading")
+                        .default_open(false)
+                        .id_salt("text_frame_thread_header")
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(
+                                    "Chain text nodes so overflow flows from one to the next.",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                            ui.add_space(2.0);
+
+                            // Show current chain state.
+                            if tn.prev_frame.is_some() || tn.next_frame.is_some() {
+                                if let Some(pid) = tn.prev_frame {
+                                    let pname = doc
+                                        .nodes
+                                        .get(&pid)
+                                        .map(|n| n.name.clone())
+                                        .unwrap_or_else(|| pid.to_string());
+                                    ui.label(RichText::new(format!("← from: {}", pname)).small());
+                                }
+                                if let Some(nid) = tn.next_frame {
+                                    let nname = doc
+                                        .nodes
+                                        .get(&nid)
+                                        .map(|n| n.name.clone())
+                                        .unwrap_or_else(|| nid.to_string());
+                                    ui.label(RichText::new(format!("→ to: {}", nname)).small());
+                                }
+                                if ui.button("Unlink Frame").clicked() {
+                                    action =
+                                        Some(PanelAction::UnlinkTextFrames { node_id: text_nid });
+                                }
+                            } else {
+                                // Find another text node in selection to link to.
+                                let other_text: Option<NodeId> = doc
+                                    .selection
+                                    .ids()
+                                    .find(|&&sid| {
+                                        sid != text_nid
+                                            && doc.nodes.get(&sid).map_or(false, |n| {
+                                                matches!(n.kind, SceneNodeKind::Text(_))
+                                            })
+                                    })
+                                    .copied();
+                                if let Some(other_id) = other_text {
+                                    let other_name = doc
+                                        .nodes
+                                        .get(&other_id)
+                                        .map(|n| n.name.clone())
+                                        .unwrap_or_default();
                                     ui.label(
                                         RichText::new(format!(
-                                            "#{:02X}{:02X}{:02X}",
-                                            rgba[0], rgba[1], rgba[2]
+                                            "Selected text node: {}",
+                                            other_name
                                         ))
                                         .small()
                                         .weak(),
                                     );
-                                });
-                                ui.horizontal(|ui| {
-                                    if ui.button("Apply").clicked() {
-                                        action = Some(PanelAction::ApplyRasterColorRange);
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        action = Some(PanelAction::CancelRasterColorRange);
-                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .button("Link Frame →")
+                                            .on_hover_text(
+                                                "This node overflows into the selected text node",
+                                            )
+                                            .clicked()
+                                        {
+                                            action = Some(PanelAction::LinkTextFrames {
+                                                from_id: text_nid,
+                                                to_id: other_id,
+                                            });
+                                        }
+                                        if ui
+                                            .button("← Link Frame")
+                                            .on_hover_text(
+                                                "The selected text node overflows into this node",
+                                            )
+                                            .clicked()
+                                        {
+                                            action = Some(PanelAction::LinkTextFrames {
+                                                from_id: other_id,
+                                                to_id: text_nid,
+                                            });
+                                        }
+                                    });
+                                } else {
+                                    ui.label(
+                                        RichText::new("Select two text nodes to link them.")
+                                            .weak()
+                                            .small(),
+                                    );
+                                }
+                            }
+                        });
+                    ui.add_space(2.0);
+                }
+            }
+        }
+
+        // ── Select Same ──────────────────────────────────────────────────
+        if !ctx.typography_only {
+            if let Some(ref_id) = selected_id {
+                if matches("Select Same") {
+                    egui::CollapsingHeader::new("Select Same")
+                        .default_open(false)
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Select all nodes sharing this attribute")
+                                    .weak()
+                                    .small(),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Fill Color")
+                                    .on_hover_text("Select nodes with the same solid fill color")
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::SelectSame {
+                                        node_id: ref_id,
+                                        attribute: SelectSameAttr::FillColor,
+                                    });
+                                }
+                                if ui
+                                    .button("Stroke Color")
+                                    .on_hover_text("Select nodes with the same stroke color")
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::SelectSame {
+                                        node_id: ref_id,
+                                        attribute: SelectSameAttr::StrokeColor,
+                                    });
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Stroke Weight")
+                                    .on_hover_text("Select nodes with the same stroke width")
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::SelectSame {
+                                        node_id: ref_id,
+                                        attribute: SelectSameAttr::StrokeWeight,
+                                    });
+                                }
+                                if ui
+                                    .button("Opacity")
+                                    .on_hover_text("Select nodes with the same opacity")
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::SelectSame {
+                                        node_id: ref_id,
+                                        attribute: SelectSameAttr::Opacity,
+                                    });
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Blend Mode")
+                                    .on_hover_text("Select nodes with the same blend mode")
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::SelectSame {
+                                        node_id: ref_id,
+                                        attribute: SelectSameAttr::BlendMode,
+                                    });
+                                }
+                                if ui
+                                    .button("Object Type")
+                                    .on_hover_text(
+                                        "Select all nodes of the same type (path/group/text)",
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(PanelAction::SelectSame {
+                                        node_id: ref_id,
+                                        attribute: SelectSameAttr::ObjectType,
+                                    });
+                                }
+                            });
+                        });
+                }
+            }
+
+            // ── Raster Masking (raster layers only) ───────────────────────────
+            // Non-destructive: both operations write the node's layer mask (which
+            // the compositor multiplies into source alpha), never the pixels, and
+            // commit as one undoable UpdateNode.
+            if let (Some(nid), Some(node)) = (selected_id, selected_node) {
+                let is_plain_raster = matches!(
+                    &node.kind,
+                    SceneNodeKind::Raster(r) if !r.is_adjustment_layer()
+                );
+                if is_plain_raster && matches("Raster Masking") {
+                    egui::CollapsingHeader::new("Raster Masking")
+                        .default_open(true)
+                        .id_salt("raster_masking_header")
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            // ── Color range ────────────────────────────────────
+                            ui.label(
+                                RichText::new(
+                                    "Hide pixels by color (like Select > Color Range + delete, \
+                                 but reversible via the layer mask).",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Fuzziness:");
+                                let tol = ui.add(
+                                    egui::Slider::new(raster_mask_tolerance, 0.0..=1.0)
+                                        .fixed_decimals(2),
+                                );
+                                if tol.changed() && raster_color_range_target.is_some() {
+                                    action = Some(PanelAction::SetRasterColorRangeParams {
+                                        tolerance: *raster_mask_tolerance,
+                                        contiguous: *raster_mask_contiguous,
+                                    });
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                let cont = ui
+                                    .checkbox(raster_mask_contiguous, "Contiguous")
+                                    .on_hover_text(
+                                        "On: only the connected region under the click \
+                                     (magic wand). Off: every matching pixel in the layer \
+                                     (color range).",
+                                    );
+                                if cont.changed() && raster_color_range_target.is_some() {
+                                    action = Some(PanelAction::SetRasterColorRangeParams {
+                                        tolerance: *raster_mask_tolerance,
+                                        contiguous: *raster_mask_contiguous,
+                                    });
+                                }
+                            });
+                            match raster_color_range_target {
+                                None => {
                                     if ui
-                                        .button(format!("{} Repick", ph::EYEDROPPER))
-                                        .on_hover_text("Sample a different color")
+                                        .button(format!("{} Pick Color to Hide", ph::EYEDROPPER))
+                                        .on_hover_text(
+                                            "Click a color on the canvas; matching pixels \
+                                         preview as hidden, then Apply or Cancel",
+                                        )
                                         .clicked()
                                     {
                                         action = Some(PanelAction::StartRasterColorRange {
                                             node_id: nid,
                                         });
                                     }
-                                });
+                                }
+                                Some(rgba) => {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Hiding:");
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(18.0, 14.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            3.0,
+                                            Color32::from_rgb(rgba[0], rgba[1], rgba[2]),
+                                        );
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            3.0,
+                                            egui::Stroke::new(1.0, Color32::WHITE),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "#{:02X}{:02X}{:02X}",
+                                                rgba[0], rgba[1], rgba[2]
+                                            ))
+                                            .small()
+                                            .weak(),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Apply").clicked() {
+                                            action = Some(PanelAction::ApplyRasterColorRange);
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            action = Some(PanelAction::CancelRasterColorRange);
+                                        }
+                                        if ui
+                                            .button(format!("{} Repick", ph::EYEDROPPER))
+                                            .on_hover_text("Sample a different color")
+                                            .clicked()
+                                        {
+                                            action = Some(PanelAction::StartRasterColorRange {
+                                                node_id: nid,
+                                            });
+                                        }
+                                    });
+                                }
                             }
-                        }
 
-                        // ── Remove background ─────────────────────────────
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.label(
-                            RichText::new(
-                                "Detect the subject with a local model (offline, on-device) \
+                            // ── Remove background ─────────────────────────────
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.label(
+                                RichText::new(
+                                    "Detect the subject with a local model (offline, on-device) \
                                  and mask out the background.",
-                            )
-                            .weak()
-                            .small(),
-                        );
-                        ui.add_space(2.0);
-                        if ui
-                            .button(format!("{} Remove Background", ph::PERSON_SIMPLE))
-                            .on_hover_text(if rmbg_model_cached {
-                                "Runs the local U²-Net model and applies the result as a \
+                                )
+                                .weak()
+                                .small(),
+                            );
+                            ui.add_space(2.0);
+                            if ui
+                                .button(format!("{} Remove Background", ph::PERSON_SIMPLE))
+                                .on_hover_text(if rmbg_model_cached {
+                                    "Runs the local U²-Net model and applies the result as a \
                                  non-destructive layer mask"
-                            } else {
-                                "First use downloads the small model (~4.7 MB) to the \
+                                } else {
+                                    "First use downloads the small model (~4.7 MB) to the \
                                  Photonic cache, then works offline"
-                            })
-                            .clicked()
-                        {
-                            action = Some(PanelAction::RasterRemoveBackground { node_id: nid });
-                        }
-                        if ui
-                            .small_button("Clear Layer Mask")
-                            .on_hover_text("Remove the layer mask, revealing all pixels again")
-                            .clicked()
-                        {
-                            action = Some(PanelAction::ClearRasterMask { node_id: nid });
-                        }
-                    });
-                ui.add_space(2.0);
-            }
-            if is_plain_raster && matches("Raster Layer") {
-                egui::CollapsingHeader::new("Raster Layer")
-                    .default_open(true)
-                    .id_salt("raster_layer_header")
-                    .open(forced_open)
-                    .show(ui, |ui| {
-                        if ui
-                            .button(format!("{} Crop to Artboard", ph::CROP))
-                            .on_hover_text(
-                                "Trim the image (and its layer mask) to the artboard \
+                                })
+                                .clicked()
+                            {
+                                action = Some(PanelAction::RasterRemoveBackground { node_id: nid });
+                            }
+                            if ui
+                                .small_button("Clear Layer Mask")
+                                .on_hover_text("Remove the layer mask, revealing all pixels again")
+                                .clicked()
+                            {
+                                action = Some(PanelAction::ClearRasterMask { node_id: nid });
+                            }
+                        });
+                    ui.add_space(2.0);
+                }
+                if is_plain_raster && matches("Raster Layer") {
+                    egui::CollapsingHeader::new("Raster Layer")
+                        .default_open(true)
+                        .id_salt("raster_layer_header")
+                        .open(forced_open)
+                        .show(ui, |ui| {
+                            if ui
+                                .button(format!("{} Crop to Artboard", ph::CROP))
+                                .on_hover_text(
+                                    "Trim the image (and its layer mask) to the artboard \
                                  bounds, discarding pixels outside. Destructive but \
                                  undoable. Requires an unrotated image.",
-                            )
-                            .clicked()
-                        {
-                            action = Some(PanelAction::CropRasterToArtboard { node_id: nid });
-                        }
-                    });
-                ui.add_space(2.0);
-            }
-        }
-
-        ui.add_space(4.0);
-    } else {
-        // ── Document Info (shown when no node is selected) ─────────────────
-        ui.label(RichText::new("Document").strong());
-        ui.add_space(2.0);
-        ui.label(format!(
-            "Canvas: {}×{}",
-            doc.width as u32, doc.height as u32
-        ));
-        ui.label(format!("Layers: {}", doc.layers.len()));
-
-        // Count nodes by kind
-        let mut n_path = 0usize;
-        let mut n_text = 0usize;
-        let mut n_group = 0usize;
-        for node in doc.nodes.values() {
-            match &node.kind {
-                SceneNodeKind::Path(_) => n_path += 1,
-                SceneNodeKind::Text(_) => n_text += 1,
-                SceneNodeKind::Group(_) => n_group += 1,
-                // raster nodes are not counted in the vector node summary
-                SceneNodeKind::Raster(_) => {}
-            }
-        }
-        let total = n_path + n_text + n_group;
-        ui.label(format!(
-            "Nodes: {} ({} path, {} text, {} group)",
-            total, n_path, n_text, n_group
-        ));
-
-        // ── Print Settings ────────────────────────────────────────────────
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new("Print Settings")
-            .default_open(false)
-            .id_salt("print_settings_header")
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Bleed and slug for print production.")
-                        .weak()
-                        .small(),
-                );
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label("Bleed (mm):")
-                        .on_hover_text("Extra artwork past trim edge (typically 3 mm)");
-                    ui.add(
-                        egui::DragValue::new(bleed_mm_input)
-                            .speed(0.1)
-                            .range(0.0..=25.0)
-                            .suffix(" mm"),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Slug (mm):")
-                        .on_hover_text("Area outside bleed for printer marks");
-                    ui.add(
-                        egui::DragValue::new(slug_mm_input)
-                            .speed(0.1)
-                            .range(0.0..=25.0)
-                            .suffix(" mm"),
-                    );
-                });
-                ui.add_space(2.0);
-                if ui.button("Apply Print Settings").clicked() {
-                    action = Some(PanelAction::SetDocumentBleed {
-                        bleed_mm: *bleed_mm_input,
-                        slug_mm: *slug_mm_input,
-                    });
+                                )
+                                .clicked()
+                            {
+                                action = Some(PanelAction::CropRasterToArtboard { node_id: nid });
+                            }
+                        });
+                    ui.add_space(2.0);
                 }
-                if doc.bleed_mm > 0.0 || doc.slug_mm > 0.0 {
+            }
+
+            ui.add_space(4.0);
+        } else {
+            // ── Document Info (shown when no node is selected) ─────────────────
+            ui.label(RichText::new("Document").strong());
+            ui.add_space(2.0);
+            ui.label(format!(
+                "Canvas: {}×{}",
+                doc.width as u32, doc.height as u32
+            ));
+            ui.label(format!("Layers: {}", doc.layers.len()));
+
+            // Count nodes by kind
+            let mut n_path = 0usize;
+            let mut n_text = 0usize;
+            let mut n_group = 0usize;
+            for node in doc.nodes.values() {
+                match &node.kind {
+                    SceneNodeKind::Path(_) => n_path += 1,
+                    SceneNodeKind::Text(_) => n_text += 1,
+                    SceneNodeKind::Group(_) => n_group += 1,
+                    // raster nodes are not counted in the vector node summary
+                    SceneNodeKind::Raster(_) => {}
+                }
+            }
+            let total = n_path + n_text + n_group;
+            ui.label(format!(
+                "Nodes: {} ({} path, {} text, {} group)",
+                total, n_path, n_text, n_group
+            ));
+
+            // ── Print Settings ────────────────────────────────────────────────
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new("Print Settings")
+                .default_open(false)
+                .id_salt("print_settings_header")
+                .show(ui, |ui| {
                     ui.label(
-                        RichText::new(format!(
-                            "Current: bleed={:.2} mm, slug={:.2} mm",
-                            doc.bleed_mm, doc.slug_mm
-                        ))
-                        .small()
-                        .weak(),
+                        RichText::new("Bleed and slug for print production.")
+                            .weak()
+                            .small(),
                     );
-                }
-            });
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Bleed (mm):")
+                            .on_hover_text("Extra artwork past trim edge (typically 3 mm)");
+                        ui.add(
+                            egui::DragValue::new(bleed_mm_input)
+                                .speed(0.1)
+                                .range(0.0..=25.0)
+                                .suffix(" mm"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Slug (mm):")
+                            .on_hover_text("Area outside bleed for printer marks");
+                        ui.add(
+                            egui::DragValue::new(slug_mm_input)
+                                .speed(0.1)
+                                .range(0.0..=25.0)
+                                .suffix(" mm"),
+                        );
+                    });
+                    ui.add_space(2.0);
+                    if ui.button("Apply Print Settings").clicked() {
+                        action = Some(PanelAction::SetDocumentBleed {
+                            bleed_mm: *bleed_mm_input,
+                            slug_mm: *slug_mm_input,
+                        });
+                    }
+                    if doc.bleed_mm > 0.0 || doc.slug_mm > 0.0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "Current: bleed={:.2} mm, slug={:.2} mm",
+                                doc.bleed_mm, doc.slug_mm
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+                });
 
-        // ── Artboard Margins ──────────────────────────────────────────────
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new("Artboard Margins")
+            // ── Artboard Margins ──────────────────────────────────────────────
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new("Artboard Margins")
             .default_open(false)
             .id_salt("artboard_margins_header")
             .show(ui, |ui| {
@@ -2292,343 +2886,344 @@ pub(crate) fn draw_selected_node(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                 }
             });
 
-        // ── Construction Lines ────────────────────────────────────────────
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new("Construction Lines")
-            .default_open(false)
-            .id_salt("construction_lines_header")
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Infinite non-printing reference lines at any angle.")
-                        .weak()
-                        .small(),
-                );
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label("X:");
-                    ui.add(egui::DragValue::new(construction_x).speed(1.0));
-                    ui.label("Y:");
-                    ui.add(egui::DragValue::new(construction_y).speed(1.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Angle:");
-                    ui.add(
-                        egui::DragValue::new(construction_angle)
-                            .speed(1.0)
-                            .range(-360.0..=360.0)
-                            .suffix("°"),
+            // ── Construction Lines ────────────────────────────────────────────
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new("Construction Lines")
+                .default_open(false)
+                .id_salt("construction_lines_header")
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Infinite non-printing reference lines at any angle.")
+                            .weak()
+                            .small(),
                     );
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label("X:");
+                        ui.add(egui::DragValue::new(construction_x).speed(1.0));
+                        ui.label("Y:");
+                        ui.add(egui::DragValue::new(construction_y).speed(1.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Angle:");
+                        ui.add(
+                            egui::DragValue::new(construction_angle)
+                                .speed(1.0)
+                                .range(-360.0..=360.0)
+                                .suffix("°"),
+                        );
+                    });
+                    if ui
+                        .button("Add Construction Line")
+                        .on_hover_text("Add an infinite angled reference line (non-printing)")
+                        .clicked()
+                    {
+                        action = Some(PanelAction::AddConstructionLine {
+                            x: *construction_x,
+                            y: *construction_y,
+                            angle_degrees: *construction_angle,
+                        });
+                    }
+                    ui.add_space(2.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .small_button("H (0°)")
+                            .on_hover_text("Add horizontal construction line")
+                            .clicked()
+                        {
+                            action = Some(PanelAction::AddConstructionLine {
+                                x: *construction_x,
+                                y: *construction_y,
+                                angle_degrees: 0.0,
+                            });
+                        }
+                        if ui
+                            .small_button("V (90°)")
+                            .on_hover_text("Add vertical construction line")
+                            .clicked()
+                        {
+                            action = Some(PanelAction::AddConstructionLine {
+                                x: *construction_x,
+                                y: *construction_y,
+                                angle_degrees: 90.0,
+                            });
+                        }
+                        if ui
+                            .small_button("D (45°)")
+                            .on_hover_text("Add 45° diagonal construction line")
+                            .clicked()
+                        {
+                            action = Some(PanelAction::AddConstructionLine {
+                                x: *construction_x,
+                                y: *construction_y,
+                                angle_degrees: 45.0,
+                            });
+                        }
+                        if ui
+                            .small_button("D (-45°)")
+                            .on_hover_text("Add -45° diagonal construction line")
+                            .clicked()
+                        {
+                            action = Some(PanelAction::AddConstructionLine {
+                                x: *construction_x,
+                                y: *construction_y,
+                                angle_degrees: -45.0,
+                            });
+                        }
+                    });
                 });
+
+            // ── Select by Kind buttons ────────────────────────────────────────
+            ui.add_space(4.0);
+            ui.label(RichText::new("Select all…").small());
+            ui.horizontal_wrapped(|ui| {
                 if ui
-                    .button("Add Construction Line")
-                    .on_hover_text("Add an infinite angled reference line (non-printing)")
+                    .small_button("Paths")
+                    .on_hover_text("Select all path/shape nodes")
                     .clicked()
                 {
-                    action = Some(PanelAction::AddConstructionLine {
-                        x: *construction_x,
-                        y: *construction_y,
-                        angle_degrees: *construction_angle,
+                    action = Some(PanelAction::SelectByKind {
+                        kind: "path".to_string(),
+                        additive: false,
                     });
                 }
-                ui.add_space(2.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .small_button("H (0°)")
-                        .on_hover_text("Add horizontal construction line")
-                        .clicked()
-                    {
-                        action = Some(PanelAction::AddConstructionLine {
-                            x: *construction_x,
-                            y: *construction_y,
-                            angle_degrees: 0.0,
-                        });
-                    }
-                    if ui
-                        .small_button("V (90°)")
-                        .on_hover_text("Add vertical construction line")
-                        .clicked()
-                    {
-                        action = Some(PanelAction::AddConstructionLine {
-                            x: *construction_x,
-                            y: *construction_y,
-                            angle_degrees: 90.0,
-                        });
-                    }
-                    if ui
-                        .small_button("D (45°)")
-                        .on_hover_text("Add 45° diagonal construction line")
-                        .clicked()
-                    {
-                        action = Some(PanelAction::AddConstructionLine {
-                            x: *construction_x,
-                            y: *construction_y,
-                            angle_degrees: 45.0,
-                        });
-                    }
-                    if ui
-                        .small_button("D (-45°)")
-                        .on_hover_text("Add -45° diagonal construction line")
-                        .clicked()
-                    {
-                        action = Some(PanelAction::AddConstructionLine {
-                            x: *construction_x,
-                            y: *construction_y,
-                            angle_degrees: -45.0,
-                        });
-                    }
-                });
+                if ui
+                    .small_button("Text")
+                    .on_hover_text("Select all text nodes")
+                    .clicked()
+                {
+                    action = Some(PanelAction::SelectByKind {
+                        kind: "text".to_string(),
+                        additive: false,
+                    });
+                }
+                if ui
+                    .small_button("Groups")
+                    .on_hover_text("Select all group nodes")
+                    .clicked()
+                {
+                    action = Some(PanelAction::SelectByKind {
+                        kind: "group".to_string(),
+                        additive: false,
+                    });
+                }
+                if ui
+                    .small_button("On Layer")
+                    .on_hover_text("Select all nodes on the active layer")
+                    .clicked()
+                {
+                    action = Some(PanelAction::SelectByKind {
+                        kind: "same_layer".to_string(),
+                        additive: false,
+                    });
+                }
             });
 
-        // ── Select by Kind buttons ────────────────────────────────────────
-        ui.add_space(4.0);
-        ui.label(RichText::new("Select all…").small());
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .small_button("Paths")
-                .on_hover_text("Select all path/shape nodes")
-                .clicked()
-            {
-                action = Some(PanelAction::SelectByKind {
-                    kind: "path".to_string(),
-                    additive: false,
-                });
-            }
-            if ui
-                .small_button("Text")
-                .on_hover_text("Select all text nodes")
-                .clicked()
-            {
-                action = Some(PanelAction::SelectByKind {
-                    kind: "text".to_string(),
-                    additive: false,
-                });
-            }
-            if ui
-                .small_button("Groups")
-                .on_hover_text("Select all group nodes")
-                .clicked()
-            {
-                action = Some(PanelAction::SelectByKind {
-                    kind: "group".to_string(),
-                    additive: false,
-                });
-            }
-            if ui
-                .small_button("On Layer")
-                .on_hover_text("Select all nodes on the active layer")
-                .clicked()
-            {
-                action = Some(PanelAction::SelectByKind {
-                    kind: "same_layer".to_string(),
-                    additive: false,
-                });
-            }
-        });
-
-        // Unique solid fill colors as swatches
-        use photonic_core::style::FillKind;
-        let mut fill_colors: Vec<photonic_core::color::Color> = Vec::new();
-        for node in doc.nodes.values() {
-            let fill_opt = match &node.kind {
-                SceneNodeKind::Path(p) => Some(&p.fill),
-                SceneNodeKind::Text(t) => Some(&t.fill),
-                SceneNodeKind::Group(_) => None,
-                // raster nodes have no vector fill
-                SceneNodeKind::Raster(_) => None,
-            };
-            if let Some(fill) = fill_opt {
-                if fill.enabled {
-                    if let FillKind::Solid(c) = &fill.kind {
-                        let hex = c.to_hex();
-                        if !fill_colors.iter().any(|existing| existing.to_hex() == hex) {
-                            fill_colors.push(*c);
+            // Unique solid fill colors as swatches
+            use photonic_core::style::FillKind;
+            let mut fill_colors: Vec<photonic_core::color::Color> = Vec::new();
+            for node in doc.nodes.values() {
+                let fill_opt = match &node.kind {
+                    SceneNodeKind::Path(p) => Some(&p.fill),
+                    SceneNodeKind::Text(t) => Some(&t.fill),
+                    SceneNodeKind::Group(_) => None,
+                    // raster nodes have no vector fill
+                    SceneNodeKind::Raster(_) => None,
+                };
+                if let Some(fill) = fill_opt {
+                    if fill.enabled {
+                        if let FillKind::Solid(c) = &fill.kind {
+                            let hex = c.to_hex();
+                            if !fill_colors.iter().any(|existing| existing.to_hex() == hex) {
+                                fill_colors.push(*c);
+                            }
                         }
                     }
                 }
+                if fill_colors.len() >= 16 {
+                    break;
+                }
             }
-            if fill_colors.len() >= 16 {
-                break;
-            }
-        }
-        if !fill_colors.is_empty() {
-            ui.add_space(4.0);
-            ui.label(RichText::new("Fill colors in document:").small());
+            if !fill_colors.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Fill colors in document:").small());
 
-            // Click a swatch to recolor every object using that exact color,
-            // with a live preview while picking. The in-progress picker state
-            // lives in egui temp memory.
-            let edit_id = ui.make_persistent_id("recolor_swatch_edit");
-            let mut edit = ui.data(|d| d.get_temp::<RecolorSwatchEdit>(edit_id));
-            let mut just_opened = false;
+                // Click a swatch to recolor every object using that exact color,
+                // with a live preview while picking. The in-progress picker state
+                // lives in egui temp memory.
+                let edit_id = ui.make_persistent_id("recolor_swatch_edit");
+                let mut edit = ui.data(|d| d.get_temp::<RecolorSwatchEdit>(edit_id));
+                let mut just_opened = false;
 
-            // A pending eyedropper request from the picker's "Pick" button.
-            // The eyedropper is started one frame *after* the popup closes so any
-            // live preview has already been reverted to the original color first;
-            // an Esc during the eyedropper then leaves the document untouched.
-            let pending_pick_id = ui.make_persistent_id("recolor_swatch_pending_pick");
-            if let Some((ids, from)) =
-                ui.data_mut(|d| d.remove_temp::<(Vec<NodeId>, [f32; 4])>(pending_pick_id))
-            {
-                action = Some(PanelAction::StartEyedropper(
-                    EyedropperTarget::RecolorSwatch { ids, from },
-                ));
-            }
-
-            ui.horizontal_wrapped(|ui| {
-                for c in &fill_colors {
-                    let rgba = [c.r, c.g, c.b, c.a];
-                    let c32 = egui::Color32::from_rgb(
-                        (c.r * 255.0).round() as u8,
-                        (c.g * 255.0).round() as u8,
-                        (c.b * 255.0).round() as u8,
-                    );
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                    ui.painter().rect_filled(rect, 2.0, c32);
-                    let is_editing = edit.as_ref().map_or(false, |e| e.original == rgba);
-                    if resp.hovered() || is_editing {
-                        ui.painter().rect_stroke(
-                            rect,
-                            2.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 86, 207)),
-                        );
-                    }
-                    // Only start a new edit when none is active — finish the
-                    // current one (Apply/Cancel/click-away) before switching.
-                    if resp.clicked() && edit.is_none() {
-                        let ids: Vec<NodeId> = doc
-                            .nodes
-                            .values()
-                            .filter(|n| {
-                                let solid = match &n.kind {
-                                    SceneNodeKind::Path(p) if p.fill.enabled => {
-                                        match &p.fill.kind {
-                                            FillKind::Solid(fc) => Some(fc),
-                                            _ => None,
-                                        }
-                                    }
-                                    SceneNodeKind::Text(t) if t.fill.enabled => {
-                                        match &t.fill.kind {
-                                            FillKind::Solid(fc) => Some(fc),
-                                            _ => None,
-                                        }
-                                    }
-                                    _ => None,
-                                };
-                                solid.map_or(false, |fc| fc.to_hex() == c.to_hex())
-                            })
-                            .map(|n| n.id)
-                            .collect();
-                        edit = Some(RecolorSwatchEdit {
-                            ids,
-                            original: rgba,
-                            applied: rgba,
-                            current: rgba,
-                        });
-                        just_opened = true;
-                    }
-                    resp.on_hover_text(format!(
-                        "{} — click to recolor every object using this color",
-                        c.to_hex()
+                // A pending eyedropper request from the picker's "Pick" button.
+                // The eyedropper is started one frame *after* the popup closes so any
+                // live preview has already been reverted to the original color first;
+                // an Esc during the eyedropper then leaves the document untouched.
+                let pending_pick_id = ui.make_persistent_id("recolor_swatch_pending_pick");
+                if let Some((ids, from)) =
+                    ui.data_mut(|d| d.remove_temp::<(Vec<NodeId>, [f32; 4])>(pending_pick_id))
+                {
+                    action = Some(PanelAction::StartEyedropper(
+                        EyedropperTarget::RecolorSwatch { ids, from },
                     ));
                 }
-            });
 
-            // Inline picker shown while a swatch is being edited.
-            if let Some(e) = edit.clone() {
-                let mut current = e.current;
-                let mut apply = false;
-                let mut cancel = false;
-                let mut pick = false;
-                let frame_resp = egui::Frame::popup(ui.style())
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Recolor all matching objects (live)")
-                                .small()
-                                .strong(),
+                ui.horizontal_wrapped(|ui| {
+                    for c in &fill_colors {
+                        let rgba = [c.r, c.g, c.b, c.a];
+                        let c32 = egui::Color32::from_rgb(
+                            (c.r * 255.0).round() as u8,
+                            (c.g * 255.0).round() as u8,
+                            (c.b * 255.0).round() as u8,
                         );
-                        // Shared picker body; alpha preserved (Opaque), rgb
-                        // edited in place.
-                        ColorPopup::picker_body_simple(ui, &mut current, false);
-                        ui.horizontal(|ui| {
-                            if ui.button("Apply").clicked() {
-                                apply = true;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                cancel = true;
-                            }
-                            if ui
-                                .button(format!("{} Pick", ph::EYEDROPPER))
-                                .on_hover_text(
-                                    "Sample a replacement color from the canvas \
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                        ui.painter().rect_filled(rect, 2.0, c32);
+                        let is_editing = edit.as_ref().map_or(false, |e| e.original == rgba);
+                        if resp.hovered() || is_editing {
+                            ui.painter().rect_stroke(
+                                rect,
+                                2.0,
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 86, 207)),
+                            );
+                        }
+                        // Only start a new edit when none is active — finish the
+                        // current one (Apply/Cancel/click-away) before switching.
+                        if resp.clicked() && edit.is_none() {
+                            let ids: Vec<NodeId> = doc
+                                .nodes
+                                .values()
+                                .filter(|n| {
+                                    let solid = match &n.kind {
+                                        SceneNodeKind::Path(p) if p.fill.enabled => {
+                                            match &p.fill.kind {
+                                                FillKind::Solid(fc) => Some(fc),
+                                                _ => None,
+                                            }
+                                        }
+                                        SceneNodeKind::Text(t) if t.fill.enabled => {
+                                            match &t.fill.kind {
+                                                FillKind::Solid(fc) => Some(fc),
+                                                _ => None,
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    solid.map_or(false, |fc| fc.to_hex() == c.to_hex())
+                                })
+                                .map(|n| n.id)
+                                .collect();
+                            edit = Some(RecolorSwatchEdit {
+                                ids,
+                                original: rgba,
+                                applied: rgba,
+                                current: rgba,
+                            });
+                            just_opened = true;
+                        }
+                        resp.on_hover_text(format!(
+                            "{} — click to recolor every object using this color",
+                            c.to_hex()
+                        ));
+                    }
+                });
+
+                // Inline picker shown while a swatch is being edited.
+                if let Some(e) = edit.clone() {
+                    let mut current = e.current;
+                    let mut apply = false;
+                    let mut cancel = false;
+                    let mut pick = false;
+                    let frame_resp = egui::Frame::popup(ui.style())
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Recolor all matching objects (live)")
+                                    .small()
+                                    .strong(),
+                            );
+                            // Shared picker body; alpha preserved (Opaque), rgb
+                            // edited in place.
+                            ColorPopup::picker_body_simple(ui, &mut current, false);
+                            ui.horizontal(|ui| {
+                                if ui.button("Apply").clicked() {
+                                    apply = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    cancel = true;
+                                }
+                                if ui
+                                    .button(format!("{} Pick", ph::EYEDROPPER))
+                                    .on_hover_text(
+                                        "Sample a replacement color from the canvas \
                                      (Esc to cancel)",
-                                )
-                                .clicked()
-                            {
-                                pick = true;
-                            }
-                        });
-                    })
-                    .response;
+                                    )
+                                    .clicked()
+                                {
+                                    pick = true;
+                                }
+                            });
+                        })
+                        .response;
 
-                // Clicking outside the picker (e.g. another swatch, empty space)
-                // keeps the change — same as Apply. Ignore the click that opened it.
-                let click_away = !just_opened && frame_resp.clicked_elsewhere();
+                    // Clicking outside the picker (e.g. another swatch, empty space)
+                    // keeps the change — same as Apply. Ignore the click that opened it.
+                    let click_away = !just_opened && frame_resp.clicked_elsewhere();
 
-                if pick {
-                    // Hand off to the canvas eyedropper. Revert any live preview
-                    // to the original color now, then start the eyedropper next
-                    // frame (via the pending marker) so an Esc leaves no change.
-                    if e.applied != e.original {
-                        action = Some(PanelAction::RecolorPreview {
-                            ids: e.ids.clone(),
-                            to: e.original,
+                    if pick {
+                        // Hand off to the canvas eyedropper. Revert any live preview
+                        // to the original color now, then start the eyedropper next
+                        // frame (via the pending marker) so an Esc leaves no change.
+                        if e.applied != e.original {
+                            action = Some(PanelAction::RecolorPreview {
+                                ids: e.ids.clone(),
+                                to: e.original,
+                            });
+                        }
+                        ui.data_mut(|d| {
+                            d.insert_temp::<(Vec<NodeId>, [f32; 4])>(
+                                pending_pick_id,
+                                (e.ids.clone(), e.original),
+                            )
                         });
-                    }
-                    ui.data_mut(|d| {
-                        d.insert_temp::<(Vec<NodeId>, [f32; 4])>(
-                            pending_pick_id,
-                            (e.ids.clone(), e.original),
-                        )
-                    });
-                    edit = None;
-                } else if apply || click_away {
-                    action = Some(PanelAction::RecolorCommit {
-                        ids: e.ids.clone(),
-                        from: e.original,
-                        to: current,
-                    });
-                    edit = None;
-                } else if cancel {
-                    // Revert the live preview, no history entry.
-                    if e.applied != e.original {
-                        action = Some(PanelAction::RecolorPreview {
+                        edit = None;
+                    } else if apply || click_away {
+                        action = Some(PanelAction::RecolorCommit {
                             ids: e.ids.clone(),
-                            to: e.original,
-                        });
-                    }
-                    edit = None;
-                } else {
-                    // Live preview: push the new color whenever it changed.
-                    if current != e.applied {
-                        action = Some(PanelAction::RecolorPreview {
-                            ids: e.ids.clone(),
+                            from: e.original,
                             to: current,
                         });
+                        edit = None;
+                    } else if cancel {
+                        // Revert the live preview, no history entry.
+                        if e.applied != e.original {
+                            action = Some(PanelAction::RecolorPreview {
+                                ids: e.ids.clone(),
+                                to: e.original,
+                            });
+                        }
+                        edit = None;
+                    } else {
+                        // Live preview: push the new color whenever it changed.
+                        if current != e.applied {
+                            action = Some(PanelAction::RecolorPreview {
+                                ids: e.ids.clone(),
+                                to: current,
+                            });
+                        }
+                        edit = Some(RecolorSwatchEdit {
+                            ids: e.ids,
+                            original: e.original,
+                            applied: current,
+                            current,
+                        });
                     }
-                    edit = Some(RecolorSwatchEdit {
-                        ids: e.ids,
-                        original: e.original,
-                        applied: current,
-                        current,
-                    });
                 }
-            }
 
-            // Persist or clear the picker state for next frame.
-            match edit {
-                Some(e) => ui.data_mut(|d| d.insert_temp(edit_id, e)),
-                None => ui.data_mut(|d| d.remove::<RecolorSwatchEdit>(edit_id)),
+                // Persist or clear the picker state for next frame.
+                match edit {
+                    Some(e) => ui.data_mut(|d| d.insert_temp(edit_id, e)),
+                    None => ui.data_mut(|d| d.remove::<RecolorSwatchEdit>(edit_id)),
+                }
             }
         }
         ui.add_space(4.0);
@@ -2645,6 +3240,70 @@ pub(crate) fn draw_tool_shape_options(ui: &mut Ui, ctx: &mut PropPanelCtx) {
     let matches = |label: &str| -> bool { q.is_empty() || label.to_lowercase().contains(q) };
     let forced_open = ctx.forced_open;
     let mut action: Option<PanelAction> = None;
+    if ctx.active_tool == Tool::AreaTrace && matches("Area Trace") {
+        egui::CollapsingHeader::new("Area Trace")
+            .default_open(true)
+            .open(forced_open)
+            .show(ui, |ui| {
+                ui.label("Colors");
+                ui.add(egui::Slider::new(ctx.area_trace_colors, 1..=24));
+                ui.label("Detail");
+                ui.add(
+                    egui::Slider::new(ctx.area_trace_detail, 0.1..=1.0).custom_formatter(
+                        |value, _| format!("{}%", (value * 100.0).round() as u32),
+                    ),
+                );
+                ui.label("Smoothing");
+                ui.add(egui::Slider::new(ctx.area_trace_smoothing, 0.0..=8.0).suffix(" px"));
+                ui.label("Minimum area");
+                ui.add(egui::Slider::new(ctx.area_trace_min_area, 1..=128).suffix(" px"));
+                ui.checkbox(ctx.area_trace_ignore_white, "Ignore white background");
+                ui.add_space(7.0);
+                if ctx.area_trace_preview_active {
+                    ui.label(
+                        RichText::new(if ctx.area_trace_preview_ready {
+                            "● Live vector preview"
+                        } else {
+                            "● No visible result with these settings"
+                        })
+                        .color(if ctx.area_trace_preview_ready {
+                            Color32::from_rgb(92, 196, 132)
+                        } else {
+                            Color32::from_rgb(238, 166, 72)
+                        })
+                        .small(),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(ctx.area_trace_preview_ready, egui::Button::new("Apply"))
+                            .clicked()
+                        {
+                            ctx.action = Some(PanelAction::ApplyAreaTrace);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            ctx.action = Some(PanelAction::CancelAreaTrace);
+                        }
+                    });
+                    ui.label(
+                        RichText::new("Adjust freely · Enter applies · Esc cancels")
+                            .weak()
+                            .small(),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("Drag over an image to define the trace area")
+                            .weak()
+                            .small(),
+                    );
+                    ui.label(
+                        RichText::new("A live preview appears before anything is committed")
+                            .weak()
+                            .small(),
+                    );
+                }
+            });
+        return;
+    }
     // ── Tool / shape options ──────────────────────────────────────────────────
     if matches("New Shape Fill") {
         egui::CollapsingHeader::new("New Shape Fill")

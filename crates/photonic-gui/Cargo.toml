@@ -17,15 +17,19 @@ egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 winit = { workspace = true }
 wgpu = { workspace = true }
+glyphon = { workspace = true }
 bytemuck = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+semver = "1"
+sha2 = "0.10"
 uuid = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 rfd = "0.15"
 regex = "1"
+ureq = "2.12"
 pollster = { workspace = true }
 self_update = { version = "0.42", default-features = false, features = [
     "rustls",

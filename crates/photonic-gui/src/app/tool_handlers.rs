@@ -3,6 +3,160 @@
 #![allow(clippy::too_many_arguments)]
 use super::*;
 
+/// Registry-backed commands handled in every viewport tool. Keeping this list
+/// explicit allows the audit test to catch shortcut entries that have a label
+/// and default binding but no runtime dispatch path.
+const GLOBAL_SHORTCUT_COMMANDS: &[&str] = &[
+    "edit.undo",
+    "edit.redo",
+    "edit.duplicate",
+    "selection.select_all",
+    "selection.deselect",
+    "object.group",
+    "object.ungroup",
+    "object.bring_forward",
+    "object.send_backward",
+    "object.bring_to_front",
+    "object.send_to_back",
+    "object.flip_horizontal",
+    "object.flip_vertical",
+    "view.outline_mode",
+    "view.pixel_preview",
+    "view.overprint_preview",
+    "view.toggle_guides",
+];
+
+/// Build the in-progress Pen geometry. `curvature_mode` chooses between
+/// explicit anchor handles and a Catmull-Rom interpolation through positions.
+fn build_pen_bez(anchors: &[PenAnchor], curvature_mode: bool, close: bool) -> Option<BezPath> {
+    if anchors.len() < 2 {
+        return None;
+    }
+    if curvature_mode {
+        Some(curvature_pen_bez(anchors, close && anchors.len() >= 3))
+    } else {
+        Some(handled_pen_bez(anchors, close && anchors.len() >= 3))
+    }
+}
+
+/// Emit cubic segments using the outgoing handle of the previous anchor and
+/// incoming handle of the current anchor. With neither side pulled, preserve a
+/// true straight `LineTo` rather than a degenerate cubic.
+fn handled_pen_bez(anchors: &[PenAnchor], close: bool) -> BezPath {
+    let mut bez = BezPath::new();
+    bez.move_to(anchors[0].position);
+    for pair in anchors.windows(2) {
+        emit_pen_edge(&mut bez, pair[0], pair[1]);
+    }
+    if close {
+        let last = anchors[anchors.len() - 1];
+        let first = anchors[0];
+        if last.out_handle.is_some() || first.in_handle.is_some() {
+            bez.curve_to(
+                last.out_handle.unwrap_or(last.position),
+                first.in_handle.unwrap_or(first.position),
+                first.position,
+            );
+        }
+        bez.close_path();
+    }
+    bez
+}
+
+fn emit_pen_edge(bez: &mut BezPath, from: PenAnchor, to: PenAnchor) {
+    match (from.out_handle, to.in_handle) {
+        (None, None) => bez.line_to(to.position),
+        (out_handle, in_handle) => bez.curve_to(
+            out_handle.unwrap_or(from.position),
+            in_handle.unwrap_or(to.position),
+            to.position,
+        ),
+    }
+}
+
+/// Uniform Catmull-Rom interpolation converted to cubic Béziers. Every input
+/// position is emitted as a segment endpoint, so the resulting path passes
+/// through — rather than merely approaches — each placed anchor.
+fn curvature_pen_bez(anchors: &[PenAnchor], closed: bool) -> BezPath {
+    let points: Vec<Point> = anchors.iter().map(|anchor| anchor.position).collect();
+    let n = points.len();
+    let mut bez = BezPath::new();
+    bez.move_to(points[0]);
+
+    if n == 2 {
+        bez.line_to(points[1]);
+        return bez;
+    }
+
+    let point_at = |i: isize| -> Point {
+        if closed {
+            points[((i % n as isize) + n as isize) as usize % n]
+        } else if i < 0 {
+            Point::new(
+                2.0 * points[0].x - points[1].x,
+                2.0 * points[0].y - points[1].y,
+            )
+        } else if i >= n as isize {
+            Point::new(
+                2.0 * points[n - 1].x - points[n - 2].x,
+                2.0 * points[n - 1].y - points[n - 2].y,
+            )
+        } else {
+            points[i as usize]
+        }
+    };
+
+    let segment_count = if closed { n } else { n - 1 };
+    for i in 0..segment_count {
+        let p0 = point_at(i as isize - 1);
+        let p1 = point_at(i as isize);
+        let p2 = point_at(i as isize + 1);
+        let p3 = point_at(i as isize + 2);
+        let c1 = Point::new(p1.x + (p2.x - p0.x) / 6.0, p1.y + (p2.y - p0.y) / 6.0);
+        let c2 = Point::new(p2.x - (p3.x - p1.x) / 6.0, p2.y - (p3.y - p1.y) / 6.0);
+        bez.curve_to(c1, c2, p2);
+    }
+    if closed {
+        bez.close_path();
+    }
+    bez
+}
+
+/// Paint a kurbo path in canvas coordinates into egui screen coordinates.
+/// Flattening is only for the transient overlay; committed geometry remains
+/// cubic, and the tolerance tracks zoom so handles stay visually accurate.
+fn paint_pen_bez(painter: &egui::Painter, view: &CanvasView, bez: &BezPath, stroke: egui::Stroke) {
+    let mut subpaths: Vec<Vec<egui::Pos2>> = Vec::new();
+    let tolerance = (0.35 / view.zoom.max(0.01)).clamp(0.01, 2.0);
+    kurbo::flatten(
+        bez.elements().iter().copied(),
+        tolerance,
+        |element| match element {
+            PathEl::MoveTo(point) => {
+                let (sx, sy) = view.canvas_to_screen(point.x, point.y);
+                subpaths.push(vec![egui::pos2(sx as f32, sy as f32)]);
+            }
+            PathEl::LineTo(point) => {
+                let (sx, sy) = view.canvas_to_screen(point.x, point.y);
+                if let Some(subpath) = subpaths.last_mut() {
+                    subpath.push(egui::pos2(sx as f32, sy as f32));
+                }
+            }
+            PathEl::ClosePath => {
+                if let Some(subpath) = subpaths.last_mut() {
+                    if let Some(first) = subpath.first().copied() {
+                        subpath.push(first);
+                    }
+                }
+            }
+            PathEl::QuadTo(..) | PathEl::CurveTo(..) => {}
+        },
+    );
+    for points in subpaths.into_iter().filter(|points| points.len() >= 2) {
+        painter.add(egui::Shape::line(points, stroke));
+    }
+}
+
 impl PhotonicApp {
     /// Finalize a completed object-move drag by recording it as a single,
     /// **discrete** undoable History step (#11 / #183).
@@ -101,6 +255,11 @@ impl PhotonicApp {
     ) -> bool {
         let mut doc_modified = false;
 
+        // A layer can have been locked from the sidebar since the last canvas
+        // frame. Prune its contents before shortcuts such as Delete, Duplicate,
+        // Group, and Z-order inspect the current selection.
+        self.prune_locked_selection(doc);
+
         // The native host queues image/SVG clipboard data because egui's
         // clipboard event can only carry text. Consume it even when a text
         // widget has focus so a paste intended for that widget cannot leak
@@ -112,121 +271,19 @@ impl PhotonicApp {
             return doc_modified;
         }
 
-        // ── Selection-anchored shortcuts (z-order, ungroup) ───────────────────
-        // These need a single anchor node from `self.selected_id`. They operate
-        // on `doc.selection` / the anchored node, so they are safe under any
-        // tool.
-        if let Some(sel_id) = self.selected_id {
-            let (ctrl, shift, bracket_right, bracket_left, key_g) = ctx.input(|i| {
-                (
-                    i.modifiers.ctrl,
-                    i.modifiers.shift,
-                    i.key_pressed(egui::Key::CloseBracket),
-                    i.key_pressed(egui::Key::OpenBracket),
-                    i.key_pressed(egui::Key::G),
-                )
-            });
-
-            // Z-order shortcuts: Ctrl+] / Ctrl+[ (with Shift for extremes)
-            if ctrl && (bracket_right || bracket_left) {
-                if let Some((layer_id, cur_idx)) = doc.node_layer_and_index(&sel_id) {
-                    let layer_len = doc
-                        .layers
-                        .get(&layer_id)
-                        .map(|l| l.node_ids.len())
-                        .unwrap_or(0);
-                    if layer_len > 0 {
-                        let new_index = if bracket_right && shift {
-                            layer_len - 1 // Bring to Front
-                        } else if bracket_left && shift {
-                            0 // Send to Back
-                        } else if bracket_right {
-                            (cur_idx + 1).min(layer_len - 1) // Bring Forward
-                        } else {
-                            cur_idx.saturating_sub(1) // Send Backward
-                        };
-                        if new_index != cur_idx {
-                            let cmd = Command::ReorderNode {
-                                layer_id,
-                                node_id: sel_id,
-                                old_index: cur_idx,
-                                new_index,
-                            };
-                            history.execute(cmd, doc);
-                            doc_modified = true;
-                        }
-                    }
-                }
-            }
-
-            // Ctrl+Shift+G: ungroup (only if selected node is a group)
-            if ctrl && shift && key_g {
-                if let Some(node) = doc.get_node(&sel_id) {
-                    if let SceneNodeKind::Group(g) = &node.kind {
-                        let children = g.children.clone();
-                        let node_clone = node.clone();
-                        if let Some((layer_id, group_index)) = doc.node_layer_and_index(&sel_id) {
-                            let first_child = children.first().copied();
-                            let cmd = Command::UngroupNodes {
-                                group: node_clone,
-                                layer_id,
-                                group_index,
-                                children,
-                            };
-                            history.execute(cmd, doc);
-                            self.selected_id = first_child;
-                            if let Some(fc) = first_child {
-                                doc.selection = Selection::single(fc);
-                            } else {
-                                doc.selection.clear();
-                            }
-                            doc_modified = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Ctrl+G: group selected nodes (requires 2+ in selection)
-        let (ctrl_g, shift_g) = ctx.input(|i| {
-            (
-                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::G),
-                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::G),
-            )
-        });
-        if ctrl_g && !shift_g && doc.selection.count() >= 2 {
-            self.do_group_selected(doc, history, &mut doc_modified);
-        }
-
-        // Toggle Outline Mode (default Ctrl+Y) — resolved via the keymap so
-        // a user remap takes effect (#140). The three view-preview modes are
-        // mutually exclusive (#22).
-        if self.binding_pressed(ctx, "view.outline_mode") {
-            self.toggle_outline_mode();
-        }
-
-        // Toggle Pixel Preview (default Ctrl+Alt+Y) — keymap-resolved (#22).
-        if self.binding_pressed(ctx, "view.pixel_preview") {
-            self.toggle_pixel_preview();
-        }
-
-        // Toggle Overprint Preview (default Ctrl+Shift+Y) — keymap-resolved (#22).
-        if self.binding_pressed(ctx, "view.overprint_preview") {
-            self.toggle_overprint_preview();
-        }
-
-        // Toggle guide visibility (default Ctrl+;) — keymap-resolved.
-        if self.binding_pressed(ctx, "view.toggle_guides") {
-            self.guides_visible = !self.guides_visible;
-        }
-
         // Copy / paste are driven by egui's clipboard **events** plus the
         // native host queue for non-text formats. egui-winit intercepts
         // Ctrl+C / Ctrl+V (and Ctrl+Shift+V) and emits `Event::Copy` /
         // `Event::Paste`, swallowing the underlying key event — so
         // `key_pressed(Key::C / Key::V)` never fires for them. `Event::Paste`
         // does not carry modifier state, so read `shift` from the same frame.
-        let (want_copy, paste_text, paste_in_place) = ctx.input(|i| {
+        let remapped_copy =
+            self.binding_is_remapped("edit.copy") && self.binding_pressed(ctx, "edit.copy");
+        let remapped_paste =
+            self.binding_is_remapped("edit.paste") && self.binding_pressed(ctx, "edit.paste");
+        let remapped_paste_in_place = self.binding_is_remapped("edit.paste_in_place")
+            && self.binding_pressed(ctx, "edit.paste_in_place");
+        let (native_copy, paste_text, paste_in_place) = ctx.input(|i| {
             (
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 i.events.iter().find_map(|e| match e {
@@ -236,6 +293,7 @@ impl PhotonicApp {
                 i.modifiers.shift,
             )
         });
+        let want_copy = native_copy || remapped_copy;
 
         // Ctrl+C: copy the selected objects (each as a full subtree) to the
         // in-process clipboard, so a group of paths/images pastes intact and
@@ -262,6 +320,10 @@ impl PhotonicApp {
                 NativeClipboardPaste::Text(text),
                 paste_in_place,
             )
+        } else if remapped_paste_in_place {
+            self.dispatch_command("edit.paste_in_place", doc, history)
+        } else if remapped_paste {
+            self.dispatch_command("edit.paste", doc, history)
         } else {
             false
         };
@@ -269,46 +331,19 @@ impl PhotonicApp {
             doc_modified = true;
         }
 
-        // Flip horizontal / vertical (defaults Ctrl+Shift+H / Ctrl+Shift+J)
-        // — keymap-resolved and routed through the shared flip helper (#140).
-        if self.binding_pressed(ctx, "object.flip_horizontal")
-            && self.flip_selection(doc, history, true)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "object.flip_vertical")
-            && self.flip_selection(doc, history, false)
-        {
-            doc_modified = true;
+        // Every non-clipboard global action is resolved through the keymap and
+        // the same dispatcher used by the command palette.
+        for &id in GLOBAL_SHORTCUT_COMMANDS {
+            if self.binding_pressed(ctx, id) && self.dispatch_command(id, doc, history) {
+                doc_modified = true;
+            }
         }
 
-        // Undo / Redo (defaults Ctrl+Z / Ctrl+R) — keymap-resolved.
-        if self.binding_pressed(ctx, "edit.undo")
-            && self.dispatch_command("edit.undo", doc, history)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "edit.redo")
-            && self.dispatch_command("edit.redo", doc, history)
-        {
-            doc_modified = true;
-        }
-
-        // Select All / Deselect / Duplicate (defaults Ctrl+A / Ctrl+Shift+A
-        // / Ctrl+D) — keymap-resolved so the displayed shortcut and any user
-        // remap actually fire on the canvas (#140).
-        if self.binding_pressed(ctx, "selection.select_all")
-            && self.dispatch_command("selection.select_all", doc, history)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "selection.deselect")
-            && self.dispatch_command("selection.deselect", doc, history)
-        {
-            doc_modified = true;
-        }
-        if self.binding_pressed(ctx, "edit.duplicate")
-            && self.dispatch_command("edit.duplicate", doc, history)
+        // Delete is global except in tools where it removes a sub-object (an
+        // anchor or width sample) rather than the selected scene node.
+        if !matches!(self.active_tool, Tool::DirectSelect | Tool::Width)
+            && self.binding_pressed(ctx, "edit.delete")
+            && self.dispatch_command("edit.delete", doc, history)
         {
             doc_modified = true;
         }
@@ -332,7 +367,15 @@ impl PhotonicApp {
         }
         match doc.outermost_group_of(&hit_id) {
             Some(gid) => {
-                let members = doc.group_member_ids(&gid);
+                let members: Vec<NodeId> = doc
+                    .group_member_ids(&gid)
+                    .into_iter()
+                    .filter(|id| {
+                        doc.nodes
+                            .get(id)
+                            .is_some_and(|node| !doc.is_node_locked(node))
+                    })
+                    .collect();
                 if members.is_empty() {
                     vec![hit_id]
                 } else {
@@ -353,6 +396,8 @@ impl PhotonicApp {
         doc_modified: &mut bool,
         history: &mut CommandHistory,
     ) {
+        self.prune_locked_selection(doc);
+
         // ── Keyboard shortcuts (skipped when a text widget has focus) ─────────
         // Tool-independent shortcuts (undo/redo, copy/paste, duplicate,
         // select-all/deselect, flip, group/ungroup, z-order, view toggles) live
@@ -1010,6 +1055,9 @@ impl PhotonicApp {
                     let nodes = doc.nodes_in_draw_order();
                     let mut ids = Vec::new();
                     for node in nodes {
+                        if doc.is_node_locked(node) {
+                            continue;
+                        }
                         if let Some((nx0, ny0, nx1, ny1)) = text_aware_canvas_bounds(node, renderer)
                         {
                             if nx1 >= mx0 && nx0 <= mx1 && ny1 >= my0 && ny0 <= my1 {
@@ -1263,9 +1311,11 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         doc_modified: &mut bool,
     ) {
+        let curvature_mode = self.active_tool == Tool::CurvaturePen;
+
         // Escape cancels the in-progress path
         if viewport_kb(ui.ctx()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.pen_points.clear();
+            self.clear_pen_path();
             return;
         }
 
@@ -1287,8 +1337,44 @@ impl PhotonicApp {
             if let Some(path) = self.build_pen_path(true) {
                 self.finalize_pen_node(path, doc, history, doc_modified);
             }
-            self.pen_points.clear();
+            self.clear_pen_path();
             return;
+        }
+
+        // A drag places its anchor at the press origin, then pulls a symmetric
+        // direction line from it. The segment arriving at the anchor uses the
+        // opposite handle; the segment leaving it uses the pointer-side handle.
+        // Curvature Pen deliberately ignores manual handles — its smoothing is
+        // recomputed from the on-curve positions after every placement.
+        if response.drag_started_by(egui::PointerButton::Primary) && !ui.input(|i| i.modifiers.alt)
+        {
+            let press = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos());
+            if let Some(pos) = press.filter(|&pos| !self.pen_over_first_anchor(view, pos)) {
+                let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                self.push_pen_anchor(PenAnchor::corner(cx, cy));
+                self.pen_drag_anchor = Some(self.pen_anchors.len() - 1);
+            }
+        }
+
+        if response.dragged_by(egui::PointerButton::Primary) && !curvature_mode {
+            if let (Some(index), Some(pos)) =
+                (self.pen_drag_anchor, response.interact_pointer_pos())
+            {
+                let (hx, hy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
+                if let Some(anchor) = self.pen_anchors.get_mut(index) {
+                    anchor.pull_handle_to(Point::new(hx, hy));
+                }
+            }
+        }
+
+        if response.drag_stopped_by(egui::PointerButton::Primary)
+            || (self.pen_drag_anchor.is_some()
+                && !ui.input(|i| i.pointer.primary_down())
+                && !response.dragged_by(egui::PointerButton::Primary))
+        {
+            self.pen_drag_anchor = None;
         }
 
         // Single click: add an anchor point — or close the path if the click lands
@@ -1300,11 +1386,11 @@ impl PhotonicApp {
                         if let Some(path) = self.build_pen_path(true) {
                             self.finalize_pen_node(path, doc, history, doc_modified);
                         }
-                        self.pen_points.clear();
+                        self.clear_pen_path();
                         return;
                     }
                     let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
-                    self.pen_points.push((cx, cy));
+                    self.push_pen_anchor(PenAnchor::corner(cx, cy));
                 }
             }
         }
@@ -1315,24 +1401,15 @@ impl PhotonicApp {
         let rubber_stroke =
             egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(110, 86, 207, 128));
 
-        // Lines between placed points
-        for i in 0..self.pen_points.len().saturating_sub(1) {
-            let (x0, y0) = self.pen_points[i];
-            let (x1, y1) = self.pen_points[i + 1];
-            let (sx0, sy0) = view.canvas_to_screen(x0, y0);
-            let (sx1, sy1) = view.canvas_to_screen(x1, y1);
-            painter.line_segment(
-                [
-                    egui::pos2(sx0 as f32, sy0 as f32),
-                    egui::pos2(sx1 as f32, sy1 as f32),
-                ],
-                path_stroke,
-            );
+        // Draw the actual cubic preview, not a straight approximation between
+        // anchors, so the gesture reads exactly like the path that will commit.
+        if let Some(bez) = build_pen_bez(&self.pen_anchors, curvature_mode, false) {
+            paint_pen_bez(painter, view, &bez, path_stroke);
         }
 
         // Anchor dots
-        for &(cx, cy) in &self.pen_points {
-            let (sx, sy) = view.canvas_to_screen(cx, cy);
+        for anchor in &self.pen_anchors {
+            let (sx, sy) = view.canvas_to_screen(anchor.position.x, anchor.position.y);
             let center = egui::pos2(sx as f32, sy as f32);
             painter.rect_filled(
                 egui::Rect::from_center_size(center, egui::Vec2::splat(6.0)),
@@ -1344,36 +1421,92 @@ impl PhotonicApp {
                 0.0,
                 path_stroke,
             );
+
+            // Direction lines make click-drag-created curvature explicit and
+            // provide immediate feedback for both sides of the smooth anchor.
+            if !curvature_mode {
+                for handle in [anchor.in_handle, anchor.out_handle].into_iter().flatten() {
+                    let (hsx, hsy) = view.canvas_to_screen(handle.x, handle.y);
+                    let handle_pos = egui::pos2(hsx as f32, hsy as f32);
+                    painter.line_segment([center, handle_pos], rubber_stroke);
+                    painter.circle_filled(handle_pos, 2.5, Color32::WHITE);
+                    painter.circle_stroke(handle_pos, 2.5, rubber_stroke);
+                }
+            }
         }
 
-        // Rubber-band line from last point to cursor
-        if let Some(&(lx, ly)) = self.pen_points.last() {
-            if let Some(cursor) = ui.input(|i| i.pointer.hover_pos()) {
-                let (sx, sy) = view.canvas_to_screen(lx, ly);
-                painter.line_segment([egui::pos2(sx as f32, sy as f32), cursor], rubber_stroke);
+        // Rubber-band the next *actual* segment. In Curvature Pen mode the whole
+        // provisional spline is recalculated with the cursor as its next anchor.
+        if self.pen_drag_anchor.is_none() {
+            if let (Some(last), Some(cursor)) = (
+                self.pen_anchors.last().copied(),
+                ui.input(|i| i.pointer.hover_pos()),
+            ) {
+                let (cx, cy) = view.screen_to_canvas(cursor.x as f64, cursor.y as f64);
+                let mut preview = if curvature_mode {
+                    self.pen_anchors.clone()
+                } else {
+                    vec![last]
+                };
+                preview.push(PenAnchor::corner(cx, cy));
+                if let Some(bez) = build_pen_bez(&preview, curvature_mode, false) {
+                    paint_pen_bez(painter, view, &bez, rubber_stroke);
+                }
             }
         }
     }
 
-    /// Build a `PathData` polyline from the accumulated pen points.
+    /// Clear every piece of transient Pen state. Shared by Escape and all tool
+    /// switching surfaces so an unfinished path can never leak between modes.
+    pub(crate) fn clear_pen_path(&mut self) {
+        self.pen_anchors.clear();
+        self.pen_redo_anchors.clear();
+        self.pen_drag_anchor = None;
+    }
+
+    /// Add a fresh anchor and invalidate the transient redo chain, exactly like
+    /// a new document edit after Undo.
+    fn push_pen_anchor(&mut self, anchor: PenAnchor) {
+        self.pen_anchors.push(anchor);
+        self.pen_redo_anchors.clear();
+    }
+
+    /// Undo one uncommitted Pen placement before falling back to document
+    /// history. Returns whether a transient anchor was consumed.
+    pub(crate) fn undo_pen_anchor(&mut self) -> bool {
+        if !matches!(self.active_tool, Tool::Pen | Tool::CurvaturePen) {
+            return false;
+        }
+        let Some(anchor) = self.pen_anchors.pop() else {
+            return false;
+        };
+        self.pen_redo_anchors.push(anchor);
+        self.pen_drag_anchor = None;
+        true
+    }
+
+    /// Redo one placement removed by [`Self::undo_pen_anchor`].
+    pub(crate) fn redo_pen_anchor(&mut self) -> bool {
+        if !matches!(self.active_tool, Tool::Pen | Tool::CurvaturePen) {
+            return false;
+        }
+        let Some(anchor) = self.pen_redo_anchors.pop() else {
+            return false;
+        };
+        self.pen_anchors.push(anchor);
+        true
+    }
+
+    /// Build `PathData` from the accumulated anchors. Normal Pen uses explicit
+    /// direction handles; Curvature Pen interpolates smoothly through positions.
     ///
     /// When `close` is set and there are at least 3 points, the path is closed
     /// (`close_path`), producing a filled region rather than an open polyline. A
     /// closed 2-point path is degenerate, so closing is skipped below the threshold.
     pub(crate) fn build_pen_path(&self, close: bool) -> Option<PathData> {
-        if self.pen_points.len() < 2 {
-            return None;
-        }
-        let mut bez = BezPath::new();
-        let (x0, y0) = self.pen_points[0];
-        bez.move_to((x0, y0));
-        for &(x, y) in &self.pen_points[1..] {
-            bez.line_to((x, y));
-        }
-        if close && self.pen_points.len() >= 3 {
-            bez.close_path();
-        }
-        Some(PathData::from_bez_path(&bez))
+        let curvature_mode = self.active_tool == Tool::CurvaturePen;
+        build_pen_bez(&self.pen_anchors, curvature_mode, close)
+            .map(|bez| PathData::from_bez_path(&bez))
     }
 
     /// Screen-space hit test: is `screen` within the close radius of the first
@@ -1381,11 +1514,11 @@ impl PhotonicApp {
     /// close-state cursor and click-to-close finalisation.
     fn pen_over_first_anchor(&self, view: &CanvasView, screen: egui::Pos2) -> bool {
         const CLOSE_RADIUS: f32 = 8.0;
-        if self.pen_points.len() < 3 {
+        if self.pen_anchors.len() < 3 {
             return false;
         }
-        let (fx, fy) = self.pen_points[0];
-        let (sfx, sfy) = view.canvas_to_screen(fx, fy);
+        let first = self.pen_anchors[0].position;
+        let (sfx, sfy) = view.canvas_to_screen(first.x, first.y);
         (screen - egui::pos2(sfx as f32, sfy as f32)).length() <= CLOSE_RADIUS
     }
 
@@ -1400,6 +1533,12 @@ impl PhotonicApp {
         history: &mut CommandHistory,
         doc_modified: &mut bool,
     ) {
+        let target_layer = doc
+            .active_layer_id
+            .or_else(|| doc.layer_order.last().copied());
+        if target_layer.is_none_or(|id| doc.is_layer_locked(&id)) {
+            return;
+        }
         history.execute(
             Command::AddNode {
                 node,
@@ -1429,7 +1568,11 @@ impl PhotonicApp {
             path,
             self.fill_color,
             stroke_arg,
-            "Pen",
+            if self.active_tool == Tool::CurvaturePen {
+                "Curvature Pen"
+            } else {
+                "Pen"
+            },
             doc.node_count() + 1,
         );
         self.tool_commit_add(node, doc, history, doc_modified);
@@ -1936,6 +2079,149 @@ impl PhotonicApp {
     }
 }
 
+#[cfg(test)]
+mod pen_path_tests {
+    use super::*;
+
+    fn corner(x: f64, y: f64) -> PenAnchor {
+        PenAnchor::corner(x, y)
+    }
+
+    #[test]
+    fn dragging_pulls_symmetric_handles_and_can_retract_them() {
+        let mut anchor = corner(10.0, 20.0);
+        anchor.pull_handle_to(Point::new(25.0, 12.0));
+        assert_eq!(anchor.out_handle, Some(Point::new(25.0, 12.0)));
+        assert_eq!(anchor.in_handle, Some(Point::new(-5.0, 28.0)));
+
+        anchor.pull_handle_to(anchor.position);
+        assert_eq!(anchor.in_handle, None);
+        assert_eq!(anchor.out_handle, None);
+    }
+
+    #[test]
+    fn dragged_anchors_emit_their_exact_cubic_handles() {
+        let mut first = corner(0.0, 0.0);
+        first.in_handle = Some(Point::new(-10.0, 0.0));
+        first.out_handle = Some(Point::new(10.0, 0.0));
+        let mut second = corner(30.0, 20.0);
+        second.in_handle = Some(Point::new(20.0, 20.0));
+        second.out_handle = Some(Point::new(40.0, 20.0));
+
+        let bez = build_pen_bez(&[first, second], false, false).unwrap();
+        assert_eq!(bez.elements()[0], PathEl::MoveTo(first.position));
+        assert_eq!(
+            bez.elements()[1],
+            PathEl::CurveTo(
+                first.out_handle.unwrap(),
+                second.in_handle.unwrap(),
+                second.position,
+            )
+        );
+    }
+
+    #[test]
+    fn clicked_anchors_remain_true_line_segments() {
+        let anchors = [corner(0.0, 0.0), corner(20.0, 10.0)];
+        let bez = build_pen_bez(&anchors, false, false).unwrap();
+        assert_eq!(bez.elements()[1], PathEl::LineTo(anchors[1].position));
+    }
+
+    #[test]
+    fn curvature_pen_passes_through_every_open_anchor() {
+        let anchors = [
+            corner(0.0, 0.0),
+            corner(20.0, 30.0),
+            corner(50.0, 10.0),
+            corner(80.0, 40.0),
+        ];
+        let bez = build_pen_bez(&anchors, true, false).unwrap();
+        assert_eq!(bez.elements()[0], PathEl::MoveTo(anchors[0].position));
+        let endpoints: Vec<Point> = bez.elements()[1..]
+            .iter()
+            .filter_map(|element| match element {
+                PathEl::CurveTo(_, _, endpoint) => Some(*endpoint),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            endpoints,
+            anchors[1..]
+                .iter()
+                .map(|anchor| anchor.position)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn closed_curvature_pen_smoothly_returns_to_first_anchor() {
+        let anchors = [
+            corner(0.0, 0.0),
+            corner(40.0, 0.0),
+            corner(40.0, 40.0),
+            corner(0.0, 40.0),
+        ];
+        let bez = build_pen_bez(&anchors, true, true).unwrap();
+        assert!(matches!(bez.elements().last(), Some(PathEl::ClosePath)));
+        assert!(matches!(
+            bez.elements()[bez.elements().len() - 2],
+            PathEl::CurveTo(_, _, endpoint) if endpoint == anchors[0].position
+        ));
+    }
+
+    #[test]
+    fn pen_anchor_undo_and_redo_are_individual() {
+        let mut app = PhotonicApp::default();
+        app.active_tool = Tool::Pen;
+        app.push_pen_anchor(corner(1.0, 2.0));
+        app.push_pen_anchor(corner(3.0, 4.0));
+
+        assert!(app.undo_pen_anchor());
+        assert_eq!(app.pen_anchors, vec![corner(1.0, 2.0)]);
+        assert!(app.redo_pen_anchor());
+        assert_eq!(app.pen_anchors, vec![corner(1.0, 2.0), corner(3.0, 4.0)]);
+    }
+
+    #[test]
+    fn fresh_pen_anchor_clears_transient_redo() {
+        let mut app = PhotonicApp::default();
+        app.active_tool = Tool::CurvaturePen;
+        app.push_pen_anchor(corner(1.0, 2.0));
+        app.push_pen_anchor(corner(3.0, 4.0));
+        assert!(app.undo_pen_anchor());
+
+        app.push_pen_anchor(corner(5.0, 6.0));
+        assert!(!app.redo_pen_anchor());
+        assert_eq!(app.pen_anchors, vec![corner(1.0, 2.0), corner(5.0, 6.0)]);
+    }
+}
+
+#[cfg(test)]
+mod shortcut_audit_tests {
+    use super::*;
+
+    #[test]
+    fn every_default_binding_has_a_runtime_handler() {
+        const SPECIAL: &[&str] = &[
+            "edit.copy",
+            "edit.paste",
+            "edit.paste_in_place",
+            "edit.delete",
+            "palette.open",
+        ];
+        for def in crate::commands::REGISTRY
+            .iter()
+            .filter(|def| def.default.is_some())
+        {
+            assert!(
+                GLOBAL_SHORTCUT_COMMANDS.contains(&def.id) || SPECIAL.contains(&def.id),
+                "default shortcut {} has no keyboard dispatch path",
+                def.id
+            );
+        }
+    }
+}
+
 /// Release-decision predicate for the #183 fallback move recorder.
 ///
 /// On a frame where the normal `response.drag_stopped_by(Primary)` release did
@@ -2035,7 +2321,7 @@ mod clipboard_shortcut_tests {
         input.events.push(egui::Event::Copy);
         input.events.push(egui::Event::Paste("ignored".to_string()));
         let mut seen = (false, false);
-        ctx.run(input, |ctx| {
+        let _ = ctx.run(input, |ctx| {
             seen = ctx.input(|i| {
                 (
                     i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
