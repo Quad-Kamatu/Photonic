@@ -2,7 +2,8 @@
 //!
 //! Network and disk work stays off the UI thread. Downloads are constrained to
 //! Fontsource's jsDelivr namespace, size-limited, parsed as fonts before they are
-//! persisted, and finalized atomically so an interrupted install is ignored.
+//! persisted, and finalized with a recoverable directory replacement so an
+//! interrupted install keeps the previous cache usable.
 
 use photonic_core::node::NodeId;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ const FONT_CDN_PREFIX: &str = "https://cdn.jsdelivr.net/fontsource/fonts/";
 const MAX_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FAMILY_BYTES: usize = 256 * 1024 * 1024;
+const FONT_REPLACEMENT_BACKUP_SUFFIX: &str = ".photonic-font-backup";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -451,10 +453,164 @@ fn fetch_font_preview(id: &str, family: &str, subset: &str) -> Result<Vec<u8>, S
     download_font(url)
 }
 
+fn replacement_backup_path(final_dir: &Path) -> Result<PathBuf, String> {
+    let file_name = final_dir
+        .file_name()
+        .ok_or_else(|| "font cache path had no final directory name".to_string())?;
+    let mut backup_name = std::ffi::OsString::from(".");
+    backup_name.push(file_name);
+    backup_name.push(FONT_REPLACEMENT_BACKUP_SUFFIX);
+    Ok(final_dir.with_file_name(backup_name))
+}
+
+fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+fn rename_font_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    // The replacement protocol moves onto paths that are guaranteed to be
+    // absent, so this works on both Unix and Windows without deleting a
+    // non-empty destination directory first.
+    std::fs::rename(from, to)
+}
+
+/// Recover the one backup associated with a font subset. A backup can be left
+/// behind if the process exits after moving the old install but before the new
+/// directory is in place; keeping this path deterministic lets the next scan
+/// finish that interrupted replacement without another download.
+fn recover_font_replacement(final_dir: &Path) -> Result<(), String> {
+    let backup = replacement_backup_path(final_dir)?;
+    let backup_exists = match std::fs::symlink_metadata(&backup) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("checking previous font install backup: {error}")),
+    };
+    if !backup_exists {
+        return Ok(());
+    }
+
+    match std::fs::symlink_metadata(final_dir) {
+        Ok(_) => remove_path_if_exists(&backup)
+            .map_err(|error| format!("cleaning up previous font install backup: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            rename_font_path(&backup, final_dir)
+                .map_err(|error| format!("restoring previous font install: {error}"))
+        }
+        Err(error) => Err(format!("checking existing font install: {error}")),
+    }
+}
+
+fn recover_stale_font_replacements(base: &Path) {
+    let Ok(families) = std::fs::read_dir(base) else {
+        return;
+    };
+    for family in families.flatten() {
+        let family_dir = family.path();
+        if !family_dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&family_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(subset) = name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(FONT_REPLACEMENT_BACKUP_SUFFIX))
+                .filter(|subset| validate_slug(subset).is_ok())
+            else {
+                continue;
+            };
+            let final_dir = family_dir.join(subset);
+            let _ = recover_font_replacement(&final_dir);
+        }
+    }
+}
+
+fn replace_staged_directory_with<F>(
+    staging: &Path,
+    final_dir: &Path,
+    rename: F,
+) -> Result<(), String>
+where
+    F: Fn(&Path, &Path) -> std::io::Result<()>,
+{
+    let backup = replacement_backup_path(final_dir)?;
+    recover_font_replacement(final_dir)?;
+    let had_previous = match std::fs::symlink_metadata(final_dir) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("checking existing font install: {error}")),
+    };
+
+    if had_previous {
+        rename(final_dir, &backup)
+            .map_err(|error| format!("staging previous font install for replacement: {error}"))?;
+    }
+
+    match rename(staging, final_dir) {
+        Ok(()) => {
+            if had_previous {
+                let _ = remove_path_if_exists(&backup);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let finalization_error = format!("finalizing font install: {error}");
+            if !had_previous {
+                return Err(finalization_error);
+            }
+            match rename(&backup, final_dir) {
+                Ok(()) => Err(finalization_error),
+                Err(restore_error) => Err(format!(
+                    "{finalization_error}; restoring previous font install failed: {restore_error}"
+                )),
+            }
+        }
+    }
+}
+
+fn finalize_staged_directory(
+    staging: &Path,
+    staging_root: &Path,
+    final_dir: &Path,
+) -> Result<(), String> {
+    finalize_staged_directory_with(staging, staging_root, final_dir, rename_font_path)
+}
+
+fn finalize_staged_directory_with<F>(
+    staging: &Path,
+    staging_root: &Path,
+    final_dir: &Path,
+    rename: F,
+) -> Result<(), String>
+where
+    F: Fn(&Path, &Path) -> std::io::Result<()>,
+{
+    let result = replace_staged_directory_with(staging, final_dir, rename);
+    if result.is_err() {
+        let _ = remove_path_if_exists(staging);
+    }
+    let _ = std::fs::remove_dir(staging_root);
+    result
+}
+
 fn install_font(request: InstallRequest, base: &Path) -> Result<FontInstallResult, String> {
     validate_slug(&request.id)?;
     validate_slug(&request.subset)?;
     let final_dir = base.join(&request.id).join(&request.subset);
+    recover_font_replacement(&final_dir)?;
     let manifest_path = final_dir.join("manifest.json");
     if let Ok(json) = std::fs::read_to_string(&manifest_path) {
         if let Ok(font) = serde_json::from_str::<InstalledFont>(&json) {
@@ -548,16 +704,11 @@ fn install_font(request: InstallRequest, base: &Path) -> Result<FontInstallResul
         std::fs::write(staging.join("manifest.json"), manifest)
             .map_err(|error| format!("writing font manifest: {error}"))?;
 
-        if final_dir.exists() {
-            std::fs::remove_dir_all(&final_dir)
-                .map_err(|error| format!("replacing prior font install: {error}"))?;
-        }
         if let Some(parent) = final_dir.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("creating family cache: {error}"))?;
         }
-        std::fs::rename(&staging, &final_dir)
-            .map_err(|error| format!("finalizing font install: {error}"))?;
+        finalize_staged_directory(&staging, &staging_root, &final_dir)?;
         let paths = font.files.iter().map(|file| final_dir.join(file)).collect();
         Ok(FontInstallResult {
             node_id: request.node_id,
@@ -661,6 +812,7 @@ fn manifest_is_safe(
 }
 
 fn scan_installed_fonts(base: &Path) -> Vec<InstalledFont> {
+    recover_stale_font_replacements(base);
     let mut fonts = Vec::new();
     let Ok(families) = std::fs::read_dir(base) else {
         return fonts;
@@ -700,6 +852,40 @@ mod tests {
         "700":{"italic":{"latin":{"url":{"ttf":"https://cdn.jsdelivr.net/fontsource/fonts/test-sans@latest/latin-700-italic.ttf"}}}}
       }
     }"#;
+
+    fn usable_system_font_bytes() -> Option<Vec<u8>> {
+        let mut database = glyphon::cosmic_text::fontdb::Database::new();
+        database.load_system_fonts();
+        let ids: Vec<_> = database.faces().map(|face| face.id).collect();
+        ids.into_iter()
+            .find_map(|id| {
+                database.with_face_data(id, |data, _| (data.len() >= 512).then(|| data.to_vec()))
+            })
+            .flatten()
+    }
+
+    fn test_manifest(family: &str, files: &[&str]) -> InstalledFont {
+        InstalledFont {
+            id: "test-font".into(),
+            family: family.into(),
+            subset: "latin".into(),
+            license: "OFL-1.1".into(),
+            source: "https://example.invalid".into(),
+            files: files.iter().map(|file| (*file).into()).collect(),
+        }
+    }
+
+    fn write_test_install(path: &Path, font: &InstalledFont, bytes: &[u8]) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(
+            path.join("manifest.json"),
+            serde_json::to_vec_pretty(font).unwrap(),
+        )
+        .unwrap();
+        for file in &font.files {
+            std::fs::write(path.join(file), bytes).unwrap();
+        }
+    }
 
     #[test]
     fn parses_catalog_fields_used_by_the_picker() {
@@ -751,6 +937,104 @@ mod tests {
     }
 
     #[test]
+    fn failed_font_replacement_restores_the_previous_install() {
+        let root = std::env::temp_dir().join(format!(
+            "photonic-font-replace-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let final_dir = root.join("test-font").join("latin");
+        let staging_root = root.join(".photonic-font-staging");
+        let staging = staging_root.join(".test-font-latin.part");
+        let old = test_manifest("Old Font", &["old.ttf"]);
+        let new = test_manifest("New Font", &["new.ttf"]);
+        let old_manifest = serde_json::to_vec_pretty(&old).unwrap();
+
+        write_test_install(&final_dir, &old, b"old font bytes");
+        write_test_install(&staging, &new, b"new font bytes");
+
+        let source = staging.clone();
+        let destination = final_dir.clone();
+        let error =
+            finalize_staged_directory_with(&staging, &staging_root, &final_dir, move |from, to| {
+                if from == source.as_path() && to == destination.as_path() {
+                    Err(std::io::Error::other("injected finalization failure"))
+                } else {
+                    std::fs::rename(from, to)
+                }
+            })
+            .unwrap_err();
+
+        assert!(error.contains("injected finalization failure"));
+        assert_eq!(
+            std::fs::read(final_dir.join("manifest.json")).unwrap(),
+            old_manifest
+        );
+        assert_eq!(
+            std::fs::read(final_dir.join("old.ttf")).unwrap(),
+            b"old font bytes"
+        );
+        assert!(!final_dir.join("new.ttf").exists());
+        assert!(!staging.exists());
+        assert!(!staging_root.exists());
+        assert!(!replacement_backup_path(&final_dir).unwrap().exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_font_replacement_selects_new_files_and_cleans_staging() {
+        let Some(font_bytes) = usable_system_font_bytes() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "photonic-font-replace-success-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let final_dir = root.join("test-font").join("latin");
+        let staging_root = root.join(".photonic-font-staging");
+        let staging = staging_root.join(".test-font-latin.part");
+        let old = test_manifest("Old Font", &["old.ttf"]);
+        let new = test_manifest("New Font", &["new.ttf"]);
+
+        write_test_install(&final_dir, &old, &font_bytes);
+        write_test_install(&staging, &new, &font_bytes);
+        finalize_staged_directory(&staging, &staging_root, &final_dir).unwrap();
+
+        let found = scan_installed_fonts(&root);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].family, "New Font");
+        assert_eq!(found[0].files, vec!["new.ttf"]);
+        assert!(!final_dir.join("old.ttf").exists());
+        assert!(!staging.exists());
+        assert!(!staging_root.exists());
+        assert!(!replacement_backup_path(&final_dir).unwrap().exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_font_replacement_is_restored_before_discovery() {
+        let Some(font_bytes) = usable_system_font_bytes() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "photonic-font-replace-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let final_dir = root.join("test-font").join("latin");
+        let old = test_manifest("Old Font", &["old.ttf"]);
+        write_test_install(&final_dir, &old, &font_bytes);
+        let backup = replacement_backup_path(&final_dir).unwrap();
+        std::fs::rename(&final_dir, &backup).unwrap();
+
+        let found = scan_installed_fonts(&root);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].family, "Old Font");
+        assert!(final_dir.join("manifest.json").is_file());
+        assert!(final_dir.join("old.ttf").is_file());
+        assert!(!backup.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn installed_manifests_are_discovered_only_when_all_font_files_are_usable() {
         let root =
             std::env::temp_dir().join(format!("photonic-font-test-{}", uuid::Uuid::new_v4()));
@@ -764,18 +1048,6 @@ mod tests {
             dir
         }
 
-        fn system_font_bytes() -> Option<Vec<u8>> {
-            let mut database = glyphon::cosmic_text::fontdb::Database::new();
-            database.load_system_fonts();
-            let ids: Vec<_> = database.faces().map(|face| face.id).collect();
-            ids.into_iter()
-                .find_map(|id| {
-                    database
-                        .with_face_data(id, |data, _| (data.len() >= 512).then(|| data.to_vec()))
-                })
-                .flatten()
-        }
-
         let make_manifest = |id: &str, family: &str, files: Vec<&str>| InstalledFont {
             id: id.into(),
             family: family.into(),
@@ -785,7 +1057,7 @@ mod tests {
             files: files.into_iter().map(str::to_owned).collect(),
         };
 
-        let valid_bytes = system_font_bytes();
+        let valid_bytes = usable_system_font_bytes();
         if let Some(bytes) = valid_bytes.as_ref() {
             let valid = make_manifest("valid-font", "Valid Font", vec!["000-400-normal.ttf"]);
             let dir = write_manifest(&root, &valid);
