@@ -360,6 +360,36 @@ fn fetch_json(url: &str, max_bytes: u64) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "response was not valid UTF-8".into())
 }
 
+fn font_bytes_are_usable(bytes: &[u8]) -> bool {
+    if bytes.len() < 512 || bytes.len() as u64 > MAX_FONT_BYTES {
+        return false;
+    }
+    let source = glyphon::cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(bytes.to_vec()));
+    let mut database = glyphon::cosmic_text::fontdb::Database::new();
+    !database.load_font_source(source).is_empty()
+}
+
+fn font_file_is_usable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() < 512 || metadata.len() > MAX_FONT_BYTES {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    font_bytes_are_usable(&bytes)
+}
+
+fn font_cache_is_usable(font: &InstalledFont, base: &Path) -> bool {
+    !font.files.is_empty()
+        && font
+            .files
+            .iter()
+            .all(|file| font_file_is_usable(&base.join(file)))
+}
+
 fn download_font(url: &str) -> Result<Vec<u8>, String> {
     validate_font_url(url)?;
     let response = http_agent()
@@ -379,9 +409,7 @@ fn download_font(url: &str) -> Result<Vec<u8>, String> {
         return Err("download did not contain a usable font file".into());
     }
 
-    let source = glyphon::cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(bytes.clone()));
-    let mut database = glyphon::cosmic_text::fontdb::Database::new();
-    if database.load_font_source(source).is_empty() {
+    if !font_bytes_are_usable(&bytes) {
         return Err("downloaded data was not a valid TTF/OTF font".into());
     }
     Ok(bytes)
@@ -393,16 +421,12 @@ fn fetch_font_preview(id: &str, family: &str, subset: &str) -> Result<Vec<u8>, S
         .join(subset);
     if let Ok(json) = std::fs::read_to_string(local_dir.join("manifest.json")) {
         if let Ok(font) = serde_json::from_str::<InstalledFont>(&json) {
-            if manifest_is_safe(&font, id, family, subset) {
+            if manifest_is_safe(&font, id, family, subset)
+                && font_cache_is_usable(&font, &local_dir)
+            {
                 if let Some(path) = font.files.first().map(|file| local_dir.join(file)) {
                     if let Ok(bytes) = std::fs::read(path) {
-                        let source = glyphon::cosmic_text::fontdb::Source::Binary(
-                            std::sync::Arc::new(bytes.clone()),
-                        );
-                        let mut database = glyphon::cosmic_text::fontdb::Database::new();
-                        if !database.load_font_source(source).is_empty() {
-                            return Ok(bytes);
-                        }
+                        return Ok(bytes);
                     }
                 }
             }
@@ -434,15 +458,11 @@ fn install_font(request: InstallRequest, base: &Path) -> Result<FontInstallResul
     let manifest_path = final_dir.join("manifest.json");
     if let Ok(json) = std::fs::read_to_string(&manifest_path) {
         if let Ok(font) = serde_json::from_str::<InstalledFont>(&json) {
-            let paths: Vec<PathBuf> = font.files.iter().map(|file| final_dir.join(file)).collect();
             if manifest_is_safe(&font, &request.id, &request.family, &request.subset)
-                && !paths.is_empty()
-                && paths.iter().all(|path| {
-                    std::fs::metadata(path)
-                        .map(|metadata| metadata.is_file() && metadata.len() >= 512)
-                        .unwrap_or(false)
-                })
+                && font_cache_is_usable(&font, &final_dir)
             {
+                let paths: Vec<PathBuf> =
+                    font.files.iter().map(|file| final_dir.join(file)).collect();
                 return Ok(FontInstallResult {
                     node_id: request.node_id,
                     font,
@@ -656,7 +676,9 @@ fn scan_installed_fonts(base: &Path) -> Vec<InstalledFont> {
             if let Ok(json) = std::fs::read_to_string(path) {
                 if let Ok(font) = serde_json::from_str::<InstalledFont>(&json) {
                     let expected_family = font.family.clone();
-                    if manifest_is_safe(&font, &expected_id, &expected_family, &expected_subset) {
+                    if manifest_is_safe(&font, &expected_id, &expected_family, &expected_subset)
+                        && font_cache_is_usable(&font, &subset.path())
+                    {
                         fonts.push(font);
                     }
                 }
@@ -729,41 +751,84 @@ mod tests {
     }
 
     #[test]
-    fn installed_manifests_are_discovered_without_partial_staging_dirs() {
+    fn installed_manifests_are_discovered_only_when_all_font_files_are_usable() {
         let root =
             std::env::temp_dir().join(format!("photonic-font-test-{}", uuid::Uuid::new_v4()));
-        let installed = root.join("test-sans").join("latin");
         let staging = root.join(".unfinished.part");
-        std::fs::create_dir_all(&installed).unwrap();
         std::fs::create_dir_all(&staging).unwrap();
-        let manifest = InstalledFont {
-            id: "test-sans".into(),
-            family: "Test Sans".into(),
+
+        fn write_manifest(root: &Path, font: &InstalledFont) -> PathBuf {
+            let dir = root.join(&font.id).join(&font.subset);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("manifest.json"), serde_json::to_vec(font).unwrap()).unwrap();
+            dir
+        }
+
+        fn system_font_bytes() -> Option<Vec<u8>> {
+            let mut database = glyphon::cosmic_text::fontdb::Database::new();
+            database.load_system_fonts();
+            let ids: Vec<_> = database.faces().map(|face| face.id).collect();
+            ids.into_iter()
+                .find_map(|id| {
+                    database
+                        .with_face_data(id, |data, _| (data.len() >= 512).then(|| data.to_vec()))
+                })
+                .flatten()
+        }
+
+        let make_manifest = |id: &str, family: &str, files: Vec<&str>| InstalledFont {
+            id: id.into(),
+            family: family.into(),
             subset: "latin".into(),
             license: "OFL-1.1".into(),
             source: "https://example.invalid".into(),
-            files: vec!["000-400-normal.ttf".into()],
+            files: files.into_iter().map(str::to_owned).collect(),
         };
-        std::fs::write(
-            installed.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        let unsafe_dir = root.join("unsafe-font").join("latin");
-        std::fs::create_dir_all(&unsafe_dir).unwrap();
-        let mut unsafe_manifest = manifest.clone();
-        unsafe_manifest.id = "unsafe-font".into();
-        unsafe_manifest.family = "Unsafe Font".into();
-        unsafe_manifest.files = vec!["../../outside.ttf".into()];
-        std::fs::write(
-            unsafe_dir.join("manifest.json"),
-            serde_json::to_vec(&unsafe_manifest).unwrap(),
-        )
-        .unwrap();
+
+        let valid_bytes = system_font_bytes();
+        if let Some(bytes) = valid_bytes.as_ref() {
+            let valid = make_manifest("valid-font", "Valid Font", vec!["000-400-normal.ttf"]);
+            let dir = write_manifest(&root, &valid);
+            std::fs::write(dir.join(&valid.files[0]), bytes).unwrap();
+        }
+
+        let missing = make_manifest("missing-font", "Missing Font", vec!["000-400-normal.ttf"]);
+        write_manifest(&root, &missing);
+
+        let undersized = make_manifest(
+            "undersized-font",
+            "Undersized Font",
+            vec!["000-400-normal.ttf"],
+        );
+        let dir = write_manifest(&root, &undersized);
+        std::fs::write(dir.join(&undersized.files[0]), [0_u8; 511]).unwrap();
+
+        let invalid = make_manifest("invalid-font", "Invalid Font", vec!["000-400-normal.ttf"]);
+        let dir = write_manifest(&root, &invalid);
+        std::fs::write(dir.join(&invalid.files[0]), [0_u8; 512]).unwrap();
+
+        if let Some(bytes) = valid_bytes.as_ref() {
+            let partial = make_manifest(
+                "partial-font",
+                "Partial Font",
+                vec!["000-400-normal.ttf", "001-700-normal.ttf"],
+            );
+            let dir = write_manifest(&root, &partial);
+            std::fs::write(dir.join(&partial.files[0]), bytes).unwrap();
+            std::fs::write(dir.join(&partial.files[1]), [0_u8; 512]).unwrap();
+        }
+
+        let unsafe_manifest =
+            make_manifest("unsafe-font", "Unsafe Font", vec!["../../outside.ttf"]);
+        write_manifest(&root, &unsafe_manifest);
 
         let found = scan_installed_fonts(&root);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].family, "Test Sans");
+        if valid_bytes.is_some() {
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].family, "Valid Font");
+        } else {
+            assert!(found.is_empty());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
