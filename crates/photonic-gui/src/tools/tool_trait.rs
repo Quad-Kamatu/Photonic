@@ -85,6 +85,7 @@ tool_registry! {
     Grid => GridTool,
     PolarGrid => PolarGridTool,
     Pen => PenTool,
+    CurvaturePen => CurvaturePenTool,
     ShapeBuilder => ShapeBuilderTool,
     Text => TextTool,
     Scissors => ScissorsTool,
@@ -97,6 +98,7 @@ tool_registry! {
     Width => WidthTool,
     RasterBrush => RasterBrushTool,
     RasterEraser => RasterEraserTool,
+    AreaTrace => AreaTraceTool,
 }
 
 #[cfg(test)]

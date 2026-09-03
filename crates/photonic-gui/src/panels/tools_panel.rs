@@ -62,7 +62,15 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
 
     // ── Draw ──────────────────────────────────────────────────────────────
     section_header(ui, "DRAW");
-    for tool in [Tool::Pen, Tool::Pencil, Tool::ShapeBuilder, Tool::Text] {
+    tool_group(
+        ui,
+        active,
+        "pen_popover",
+        "Pen",
+        &[Tool::Pen, Tool::CurvaturePen],
+        &mut chosen,
+    );
+    for tool in [Tool::Pencil, Tool::ShapeBuilder, Tool::Text] {
         tool_row(ui, active, tool, &mut chosen);
     }
 
@@ -78,9 +86,9 @@ pub fn draw_tools_panel(ui: &mut Ui, active: Tool, pinned_tools: &[Tool]) -> Opt
         tool_row(ui, active, tool, &mut chosen);
     }
 
-    // ── Raster painting ───────────────────────────────────────────────────
-    section_header(ui, "PAINT");
-    for tool in [Tool::RasterBrush, Tool::RasterEraser] {
+    // ── Raster workflows ──────────────────────────────────────────────────
+    section_header(ui, "RASTER");
+    for tool in [Tool::AreaTrace, Tool::RasterBrush, Tool::RasterEraser] {
         tool_row(ui, active, tool, &mut chosen);
     }
 

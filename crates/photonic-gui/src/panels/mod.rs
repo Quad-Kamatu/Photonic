@@ -276,6 +276,10 @@ pub enum PanelAction {
     ApplyRasterColorRange,
     /// Discard the active color-range session, restoring the layer.
     CancelRasterColorRange,
+    /// Commit the active Area Trace preview as one undoable vector subtree.
+    ApplyAreaTrace,
+    /// Discard the active Area Trace preview without changing history.
+    CancelAreaTrace,
     /// Remove a raster layer's non-destructive layer mask (undoable).
     ClearRasterMask { node_id: NodeId },
     /// Crop a raster layer's pixels (and mask) to the artboard bounds,
@@ -500,6 +504,11 @@ pub enum PanelAction {
         indices: Vec<usize>,
         smooth: bool,
     },
+    /// Merge selected anchors into one point at their average position.
+    MergeAnchors {
+        node_id: NodeId,
+        indices: Vec<usize>,
+    },
     /// Delete the selected anchors of an edited path.
     DeleteAnchors {
         node_id: NodeId,
@@ -515,6 +524,16 @@ pub enum PanelAction {
         node_id: NodeId,
         line_height: Option<f64>,
         letter_spacing: Option<f64>,
+    },
+    /// Set the high-frequency type controls surfaced at the top of Typography.
+    SetTextEssentials {
+        node_id: NodeId,
+        font_size: Option<f64>,
+        align: Option<photonic_core::node::TextAlign>,
+    },
+    /// Persist the typography used by subsequently-created text objects.
+    SetTypographyDefaults {
+        defaults: crate::preferences::TypographyDefaults,
     },
     /// Add a drop shadow behind a node.
     AddDropShadow { node_id: NodeId },
@@ -737,6 +756,16 @@ pub enum PanelAction {
     SetFontStyle { node_id: NodeId, style: String },
     /// Set the font weight (100–900) on a text node.
     SetFontWeight { node_id: NodeId, weight: u16 },
+    /// Set the font family of a text node to an already available face.
+    SetFontFamily { node_id: NodeId, family: String },
+    /// Download a Fontsource family into Photonic's local cache, then apply it.
+    InstallFont {
+        /// `None` installs the family and makes it the new-text default.
+        node_id: Option<NodeId>,
+        id: String,
+        family: String,
+        subset: String,
+    },
     /// Flow a text node inside a closed path area.
     SetTextArea {
         text_node_id: NodeId,
@@ -1000,6 +1029,10 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) selected_ids: &'a [NodeId],
     pub(crate) point_edit_node: Option<NodeId>,
     pub(crate) point_selected: &'a [usize],
+    pub(crate) font_library: &'a mut crate::font_library::FontLibraryState,
+    pub(crate) typography_defaults: &'a mut crate::preferences::TypographyDefaults,
+    /// Restricts `draw_selected_node` to its typography-only slice.
+    pub(crate) typography_only: bool,
     pub(crate) prop_search: &'a mut String,
     pub(crate) shear_x: &'a mut f64,
     pub(crate) shear_y: &'a mut f64,
@@ -1017,6 +1050,15 @@ pub(crate) struct PropPanelCtx<'a> {
     pub(crate) magic_wand_attribute: &'a mut SelectSameAttr,
     pub(crate) magic_wand_tolerance: &'a mut f64,
     pub(crate) eraser_radius: &'a mut f64,
+    pub(crate) area_trace_colors: &'a mut u32,
+    pub(crate) area_trace_detail: &'a mut f32,
+    pub(crate) area_trace_smoothing: &'a mut f32,
+    pub(crate) area_trace_min_area: &'a mut u32,
+    pub(crate) area_trace_ignore_white: &'a mut bool,
+    /// Whether Area Trace has a retained region and whether that region
+    /// currently produces a non-empty vector preview.
+    pub(crate) area_trace_preview_active: bool,
+    pub(crate) area_trace_preview_ready: bool,
     /// Proportional Move (Direct Select sub-variant): falloff radius ("spread")
     /// and curve exponent, editable in Tool Options and adjusted live by scroll.
     pub(crate) prop_spread: &'a mut f64,
@@ -1075,7 +1117,7 @@ impl<'a> PropPanelCtx<'a> {
     }
 }
 
-/// One of the six Canva-style drawer groups surfaced by the left icon rail.
+/// One of the Canva-style drawer groups surfaced by the left icon rail.
 ///
 /// Each group owns a disjoint slice of the ~43 property section functions; every
 /// section is reachable through exactly one group. `draw_drawer` renders the
@@ -1087,6 +1129,8 @@ pub enum DrawerGroup {
     /// Selection inspector: navigator, selected node, tool/shape options, symbol
     /// overrides, text-variable binding (+ the Direct-Select vertex panel).
     Inspector,
+    /// Dedicated text formatting and open-font browser.
+    Typography,
     /// Shape/appearance operations: combine, boolean, blend, pathfinder, etc.
     Modify,
     /// Alignment, distribution, distances, dimensions, layer ops.
@@ -1104,9 +1148,10 @@ impl DrawerGroup {
     /// intentionally absent — it now lives on the right rail (see
     /// [`RightDrawerGroup`]) — but the `History` variant is retained so
     /// `draw_drawer` can still render it there.
-    pub const ALL: [DrawerGroup; 6] = [
+    pub const ALL: [DrawerGroup; 7] = [
         DrawerGroup::Tools,
         DrawerGroup::Inspector,
+        DrawerGroup::Typography,
         DrawerGroup::Modify,
         DrawerGroup::Arrange,
         DrawerGroup::Assets,
@@ -1118,6 +1163,7 @@ impl DrawerGroup {
         match self {
             DrawerGroup::Tools => ph::TOOLBOX,
             DrawerGroup::Inspector => ph::SLIDERS_HORIZONTAL,
+            DrawerGroup::Typography => ph::TEXT_T,
             DrawerGroup::Modify => ph::MAGIC_WAND,
             DrawerGroup::Arrange => ph::ARROWS_OUT_CARDINAL,
             DrawerGroup::Assets => ph::SWATCHES,
@@ -1131,6 +1177,7 @@ impl DrawerGroup {
         match self {
             DrawerGroup::Tools => "Tools",
             DrawerGroup::Inspector => "Inspector",
+            DrawerGroup::Typography => "Typography",
             DrawerGroup::Modify => "Modify",
             DrawerGroup::Arrange => "Arrange",
             DrawerGroup::Assets => "Assets",
@@ -1148,6 +1195,7 @@ impl DrawerGroup {
         match self {
             DrawerGroup::Tools
             | DrawerGroup::Inspector
+            | DrawerGroup::Typography
             | DrawerGroup::Assets
             | DrawerGroup::Document
             | DrawerGroup::History => true,
@@ -1268,6 +1316,7 @@ pub(crate) fn draw_drawer(
             draw_symbol_overrides(ui, ctx);
             draw_text_variable_binding(ui, ctx);
         }
+        DrawerGroup::Typography => draw_typography_panel(ui, ctx),
         DrawerGroup::Modify => {
             draw_combine(ui, ctx);
             draw_boolean_ops(ui, ctx);

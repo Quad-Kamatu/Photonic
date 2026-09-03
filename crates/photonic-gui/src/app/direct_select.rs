@@ -194,6 +194,143 @@ impl PhotonicApp {
         *doc_modified = true;
     }
 
+    /// Dissolve the full directly-selected anchor set as one undoable edit.
+    /// Closed contours stay closed; selections that would leave an invalid
+    /// one- or two-anchor loop are left unchanged.
+    fn ds_dissolve_selected_anchors(
+        &mut self,
+        doc: &mut Document,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) {
+        let Some(nid) = self.point_edit_node else {
+            return;
+        };
+        let Some(old_node) = doc.nodes.get(&nid).cloned() else {
+            return;
+        };
+        let SceneNodeKind::Path(path_node) = &old_node.kind else {
+            return;
+        };
+        let old_path = path_node.path_data.to_bez_path();
+        let new_path = bez_dissolve_anchors(&old_path, &self.point_selected);
+        if new_path.elements() == old_path.elements() {
+            self.file_status =
+                Some("Dissolve needs at least three surviving anchors in a closed shape".into());
+            return;
+        }
+
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(path_node) = &mut new_node.kind {
+            path_node.path_data = PathData::from_bez_path(&new_path);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        self.point_selected.clear();
+        self.point_context_anchor = None;
+        self.file_status = Some("Dissolved selected anchors and kept the path connected".into());
+        *doc_modified = true;
+    }
+
+    /// Merge the selected anchors into one point at their average position as
+    /// one undoable edit. The geometry helper preserves valid contour topology
+    /// and reports why an unsupported selection cannot be merged.
+    pub(crate) fn ds_merge_selected_anchors(
+        &mut self,
+        node_id: NodeId,
+        indices: &[usize],
+        doc: &mut Document,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) {
+        let Some(old_node) = doc.nodes.get(&node_id).cloned() else {
+            return;
+        };
+        let SceneNodeKind::Path(path_node) = &old_node.kind else {
+            return;
+        };
+        let old_path = path_node.path_data.to_bez_path();
+        let new_path = match bez_merge_anchors_at_average(&old_path, indices) {
+            Ok(path) => path,
+            Err(message) => {
+                self.file_status = Some(message.into());
+                return;
+            }
+        };
+
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(path_node) = &mut new_node.kind {
+            path_node.path_data = PathData::from_bez_path(&new_path);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        self.point_selected.clear();
+        self.point_context_anchor = None;
+        self.file_status = Some("Merged selected anchors at their average position".into());
+        *doc_modified = true;
+    }
+
+    /// Insert an anchor on the edited path segment nearest a canvas-space
+    /// click. The split preserves the segment's exact geometry and is recorded
+    /// as one undoable node update.
+    fn ds_insert_anchor_at_canvas(
+        &mut self,
+        canvas_x: f64,
+        canvas_y: f64,
+        view: &CanvasView,
+        doc: &mut Document,
+        doc_modified: &mut bool,
+        history: &mut CommandHistory,
+    ) -> bool {
+        const SEGMENT_HIT_RADIUS_PX: f64 = 8.0;
+        let Some(node_id) = self.point_edit_node else {
+            return false;
+        };
+        let Some(old_node) = doc.nodes.get(&node_id).cloned() else {
+            return false;
+        };
+        let SceneNodeKind::Path(path_node) = &old_node.kind else {
+            return false;
+        };
+        let old_path = path_node.path_data.to_bez_path();
+        let tolerance_canvas = SEGMENT_HIT_RADIUS_PX / view.zoom.max(1e-6);
+        let Some((new_path, new_anchor_index)) = bez_insert_anchor_near_canvas(
+            &old_path,
+            &old_node.transform,
+            Point::new(canvas_x, canvas_y),
+            tolerance_canvas,
+        ) else {
+            return false;
+        };
+
+        let mut new_node = old_node.clone();
+        if let SceneNodeKind::Path(path_node) = &mut new_node.kind {
+            path_node.path_data = PathData::from_bez_path(&new_path);
+        }
+        history.execute(
+            Command::UpdateNode {
+                old: old_node,
+                new: new_node,
+            },
+            doc,
+        );
+        self.point_selected = vec![new_anchor_index];
+        self.point_context_anchor = None;
+        self.file_status = Some("Added anchor point".into());
+        *doc_modified = true;
+        true
+    }
+
     /// Hit-test the current point-edit node's anchors at canvas position
     /// `(cx, cy)`, returning the nearest anchor's element index within the
     /// grab radius. Shared by the tool handler and by the radial-wheel
@@ -230,6 +367,8 @@ impl PhotonicApp {
         doc_modified: &mut bool,
         history: &mut CommandHistory,
     ) {
+        self.prune_locked_selection(doc);
+
         // Generous hit radii — make anchors, handles and corner widgets easy to grab.
         const ANCHOR_RADIUS_PX: f64 = 12.0;
         const HANDLE_RADIUS_PX: f64 = 10.0;
@@ -349,8 +488,8 @@ impl PhotonicApp {
         ui.ctx().set_cursor_icon(hover_cursor);
 
         // ── Delete selected anchor points ─────────────────────────────────────
-        let delete =
-            ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        let delete = self.binding_pressed(ui.ctx(), "edit.delete")
+            || ui.input(|i| i.key_pressed(egui::Key::Backspace));
         if delete && !self.point_selected.is_empty() && viewport_kb(ui.ctx()) {
             if let Some(nid) = self.point_edit_node {
                 if let Some(node) = doc.nodes.get(&nid) {
@@ -446,6 +585,35 @@ impl PhotonicApp {
                     }
                 }
             });
+            ui.separator();
+            let merge_enabled = self.point_selected.len() > 1;
+            if ui
+                .add_enabled(merge_enabled, egui::Button::new("Merge"))
+                .on_hover_text("Combine selected anchors into one point at their average position")
+                .clicked()
+            {
+                let indices = self.point_selected.clone();
+                self.ds_merge_selected_anchors(
+                    self.point_edit_node.unwrap(),
+                    &indices,
+                    doc,
+                    doc_modified,
+                    history,
+                );
+                self.point_context_anchor = None;
+                ui.close_menu();
+            }
+            if ui
+                .button("Dissolve")
+                .on_hover_text(
+                    "Remove the selected anchor(s), reconnect their neighbours, and keep closed shapes closed",
+                )
+                .clicked()
+            {
+                self.ds_dissolve_selected_anchors(doc, doc_modified, history);
+                self.point_context_anchor = None;
+                ui.close_menu();
+            }
         });
 
         // ── Drag start: hit-test the original pointer-down position ───────────
@@ -854,7 +1022,15 @@ impl PhotonicApp {
 
                 let hit_anchor = self.ds_anchor_at(cx, cy, doc, view);
 
-                if let Some(anchor_idx) = hit_anchor {
+                let inserted_anchor = ctrl
+                    && self.active_tool == Tool::DirectSelect
+                    && hit_anchor.is_none()
+                    && self.ds_insert_anchor_at_canvas(cx, cy, view, doc, doc_modified, history);
+
+                if inserted_anchor {
+                    // The insertion helper selects the new anchor so its handles
+                    // are immediately available on curved segments.
+                } else if let Some(anchor_idx) = hit_anchor {
                     if add_sel {
                         // Toggle
                         if let Some(pos) = self.point_selected.iter().position(|&i| i == anchor_idx)
@@ -1132,5 +1308,147 @@ mod tests {
             anchors_in_screen_rect(&bez, &transform, &view, rect),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn context_dissolve_is_one_undoable_closed_path_edit() {
+        let mut bez = BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((100.0, 0.0));
+        bez.line_to((100.0, 100.0));
+        bez.line_to((0.0, 100.0));
+        bez.close_path();
+
+        let mut doc = Document::new("test", 200.0, 200.0);
+        let layer = doc.layer_order[0];
+        let node = SceneNode::new(
+            "shape",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::from_bez_path(&bez))),
+        );
+        let node_id = node.id;
+        doc.add_node(node, Some(layer));
+        let mut app = PhotonicApp::default();
+        app.point_edit_node = Some(node_id);
+        app.point_selected = vec![1];
+        app.point_context_anchor = Some(1);
+        let mut history = CommandHistory::new(20);
+        let mut modified = false;
+
+        app.ds_dissolve_selected_anchors(&mut doc, &mut modified, &mut history);
+
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected");
+        };
+        let dissolved = path.path_data.to_bez_path();
+        assert!(modified);
+        assert_eq!(history.undo_depth(), 1);
+        assert_eq!(path_anchor_points(&dissolved).len(), 3);
+        assert!(matches!(
+            dissolved.elements().last(),
+            Some(PathEl::ClosePath)
+        ));
+        assert!(app.point_selected.is_empty());
+        assert!(app.point_context_anchor.is_none());
+
+        assert!(history.undo(&mut doc));
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected after undo");
+        };
+        assert_eq!(path.path_data.to_bez_path().elements(), bez.elements());
+    }
+
+    #[test]
+    fn selected_anchor_merge_is_one_undoable_edit() {
+        let mut bez = BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.line_to((100.0, 0.0));
+        bez.line_to((100.0, 100.0));
+        bez.line_to((0.0, 100.0));
+        bez.close_path();
+
+        let mut doc = Document::new("test", 200.0, 200.0);
+        let layer = doc.layer_order[0];
+        let node = SceneNode::new(
+            "shape",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::from_bez_path(&bez))),
+        );
+        let node_id = node.id;
+        doc.add_node(node, Some(layer));
+        let mut app = PhotonicApp::default();
+        app.point_edit_node = Some(node_id);
+        app.point_selected = vec![1, 2];
+        app.point_context_anchor = Some(1);
+        let mut history = CommandHistory::new(20);
+        let mut modified = false;
+
+        app.ds_merge_selected_anchors(node_id, &[1, 2], &mut doc, &mut modified, &mut history);
+
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected");
+        };
+        let merged = path.path_data.to_bez_path();
+        assert!(modified);
+        assert_eq!(history.undo_depth(), 1);
+        assert_eq!(path_anchor_points(&merged).len(), 3);
+        assert!(path_anchor_points(&merged)
+            .iter()
+            .any(|(_, point)| *point == Point::new(100.0, 50.0)));
+        assert!(app.point_selected.is_empty());
+        assert!(app.point_context_anchor.is_none());
+
+        assert!(history.undo(&mut doc));
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected after undo");
+        };
+        assert_eq!(path.path_data.to_bez_path().elements(), bez.elements());
+    }
+
+    #[test]
+    fn inserted_anchor_is_selected_and_undoes_as_one_edit() {
+        let mut bez = BezPath::new();
+        bez.move_to((0.0, 0.0));
+        bez.curve_to((0.0, 100.0), (100.0, 100.0), (100.0, 0.0));
+
+        let mut doc = Document::new("test", 200.0, 200.0);
+        let layer = doc.layer_order[0];
+        let node = SceneNode::new(
+            "shape",
+            layer,
+            SceneNodeKind::Path(PathNode::new(PathData::from_bez_path(&bez))),
+        );
+        let node_id = node.id;
+        doc.add_node(node, Some(layer));
+        let mut app = PhotonicApp::default();
+        app.point_edit_node = Some(node_id);
+        app.point_selected = vec![0];
+        app.point_context_anchor = Some(0);
+        let mut history = CommandHistory::new(20);
+        let mut modified = false;
+
+        assert!(app.ds_insert_anchor_at_canvas(
+            50.0,
+            75.0,
+            &CanvasView::default(),
+            &mut doc,
+            &mut modified,
+            &mut history,
+        ));
+
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected");
+        };
+        assert!(modified);
+        assert_eq!(history.undo_depth(), 1);
+        assert_eq!(path_anchor_points(&path.path_data.to_bez_path()).len(), 3);
+        assert_eq!(app.point_selected, vec![1]);
+        assert!(app.point_context_anchor.is_none());
+
+        assert!(history.undo(&mut doc));
+        let SceneNodeKind::Path(path) = &doc.nodes[&node_id].kind else {
+            panic!("path node expected after undo");
+        };
+        assert_eq!(path.path_data.to_bez_path().elements(), bez.elements());
     }
 }

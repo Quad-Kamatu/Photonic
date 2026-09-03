@@ -62,6 +62,13 @@ pub struct AppPreferences {
     pub default_stroke_enabled: bool,
     pub default_stroke_color: [f32; 4],
     pub default_stroke_width: f32,
+    /// Typography applied to newly-created text objects. The Typography drawer
+    /// edits these values whenever no text object is selected.
+    #[serde(default)]
+    pub typography_defaults: TypographyDefaults,
+    /// Most recently applied font families, newest first.
+    #[serde(default)]
+    pub recent_font_families: Vec<String>,
 
     // BEHAVIOR
     pub console_open_on_start: bool,
@@ -151,6 +158,44 @@ pub struct AppPreferences {
     pub keymap: HashMap<String, KeyBinding>,
 }
 
+/// Persistent defaults for text created from the canvas or insert menus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypographyDefaults {
+    pub font_family: String,
+    pub font_size: f64,
+    pub font_weight: u16,
+    pub font_style: photonic_core::node::FontStyle,
+    pub align: photonic_core::node::TextAlign,
+    pub line_height: f64,
+    pub letter_spacing: f64,
+}
+
+impl Default for TypographyDefaults {
+    fn default() -> Self {
+        Self {
+            font_family: "sans-serif".into(),
+            font_size: 16.0,
+            font_weight: 400,
+            font_style: photonic_core::node::FontStyle::Normal,
+            align: photonic_core::node::TextAlign::Left,
+            line_height: 1.2,
+            letter_spacing: 0.0,
+        }
+    }
+}
+
+impl TypographyDefaults {
+    pub fn apply_to(&self, text: &mut photonic_core::node::TextNode) {
+        text.font_family = self.font_family.clone();
+        text.font_size = self.font_size.clamp(1.0, 1000.0);
+        text.font_weight = self.font_weight.clamp(100, 900);
+        text.font_style = self.font_style;
+        text.align = self.align;
+        text.line_height = self.line_height.clamp(0.5, 5.0);
+        text.letter_spacing = self.letter_spacing.clamp(-20.0, 50.0);
+    }
+}
+
 fn default_nudge_distance() -> f64 {
     1.0
 }
@@ -229,6 +274,8 @@ impl Default for AppPreferences {
             default_stroke_enabled: false,
             default_stroke_color: [0.0, 0.0, 0.0, 1.0],
             default_stroke_width: 1.0,
+            typography_defaults: TypographyDefaults::default(),
+            recent_font_families: Vec::new(),
             console_open_on_start: false,
             force_x11_backend: false,
             nudge_distance: 1.0,
@@ -401,5 +448,33 @@ mod tests {
         assert_eq!(imported.keymap, prefs.keymap);
         assert!(!imported.dark_mode);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn typography_defaults_are_backward_compatible_and_apply_to_new_text() {
+        let mut old_preferences =
+            serde_json::to_value(AppPreferences::default()).expect("preferences serialize");
+        let object = old_preferences
+            .as_object_mut()
+            .expect("preferences are a JSON object");
+        object.remove("typography_defaults");
+        object.remove("recent_font_families");
+
+        let loaded: AppPreferences =
+            serde_json::from_value(old_preferences).expect("older preferences deserialize");
+        assert_eq!(loaded.typography_defaults, TypographyDefaults::default());
+        assert!(loaded.recent_font_families.is_empty());
+
+        let mut defaults = TypographyDefaults::default();
+        defaults.font_family = "Abel".into();
+        defaults.font_size = 42.0;
+        defaults.font_weight = 700;
+        defaults.align = photonic_core::node::TextAlign::Center;
+        let mut text = photonic_core::node::TextNode::new("Default test");
+        defaults.apply_to(&mut text);
+        assert_eq!(text.font_family, "Abel");
+        assert_eq!(text.font_size, 42.0);
+        assert_eq!(text.font_weight, 700);
+        assert_eq!(text.align, photonic_core::node::TextAlign::Center);
     }
 }

@@ -199,7 +199,7 @@ pub static REGISTRY: &[CommandDef] = &[
     CommandDef {
         id: "edit.redo",
         label: "Redo",
-        default: Some(KeyBinding::ctrl(Key::R)),
+        default: Some(KeyBinding::ctrl_shift(Key::Z)),
     },
     CommandDef {
         id: "edit.copy",
@@ -374,6 +374,7 @@ pub static TOOL_COMMANDS: &[(CommandId, Tool)] = &[
     ("tool.grid", Tool::Grid),
     ("tool.polar_grid", Tool::PolarGrid),
     ("tool.pen", Tool::Pen),
+    ("tool.curvature_pen", Tool::CurvaturePen),
     ("tool.shape_builder", Tool::ShapeBuilder),
     ("tool.text", Tool::Text),
     ("tool.scissors", Tool::Scissors),
@@ -386,6 +387,7 @@ pub static TOOL_COMMANDS: &[(CommandId, Tool)] = &[
     ("tool.width", Tool::Width),
     ("tool.raster_brush", Tool::RasterBrush),
     ("tool.raster_eraser", Tool::RasterEraser),
+    ("tool.area_trace", Tool::AreaTrace),
 ];
 
 /// Resolve a tool-activation command id to its [`Tool`].
@@ -508,6 +510,29 @@ mod tests {
         for id in ids {
             assert!(seen.insert(id), "duplicate command id: {id}");
         }
+    }
+
+    #[test]
+    fn default_bindings_are_unique() {
+        let mut seen = std::collections::HashMap::new();
+        for def in REGISTRY {
+            let Some(binding) = def.default else {
+                continue;
+            };
+            assert!(
+                seen.insert(binding.to_storage_string(), def.id).is_none(),
+                "duplicate default shortcut for {}",
+                def.id
+            );
+        }
+    }
+
+    #[test]
+    fn redo_uses_standard_primary_shift_z() {
+        assert_eq!(
+            default_binding("edit.redo"),
+            Some(KeyBinding::ctrl_shift(Key::Z))
+        );
     }
 
     #[test]

@@ -1,14 +1,7 @@
 //! Pure-CPU document compositor — renders **all** node types in **true draw
 //! order** onto a pre-filled RGBA8 buffer.
 //!
-//! The GPU/headless path ([`crate::headless`]) composites in two separate
-//! planes: it first rasterises every vector (`Path`) node on the GPU, then
-//! composites every raster node on top in a second pass
-//! ([`composite_raster_nodes`](crate::headless)). That ordering is wrong when a
-//! vector node sits *between* two raster layers in the layer stack — the vector
-//! always lands above all rasters regardless of its real z-position.
-//!
-//! [`composite_document`] fixes that by walking `doc.nodes_in_draw_order()`
+//! [`composite_document`] walks `doc.nodes_in_draw_order()`
 //! **once**, in order, and drawing each node — path or raster — straight onto
 //! the shared buffer. A blue rectangle placed between a red raster (below) and a
 //! green raster (above) therefore composites in the correct order.
@@ -46,6 +39,29 @@ const SUB_WEIGHT: f32 = 0.25;
 /// Deterministic and panic-free: degenerate, non-finite, or out-of-bounds
 /// geometry is clipped or skipped, never panicked on.
 pub fn composite_document(base: &mut [u8], w: u32, h: u32, doc: &Document, view: &CanvasView) {
+    composite_document_impl(base, w, h, doc, view, false);
+}
+
+/// Live-editor variant of [`composite_document`]. Unlike export, the editor
+/// must display visible layers whose Print flag is disabled.
+pub fn composite_document_for_editor(
+    base: &mut [u8],
+    w: u32,
+    h: u32,
+    doc: &Document,
+    view: &CanvasView,
+) {
+    composite_document_impl(base, w, h, doc, view, true);
+}
+
+fn composite_document_impl(
+    base: &mut [u8],
+    w: u32,
+    h: u32,
+    doc: &Document,
+    view: &CanvasView,
+    include_non_print: bool,
+) {
     if w == 0 || h == 0 {
         return;
     }
@@ -77,7 +93,7 @@ pub fn composite_document(base: &mut [u8], w: u32, h: u32, doc: &Document, view:
         }
         // Non-print layers stay on the live canvas (windowed renderer) but are
         // excluded from this export/compositor path (Illustrator's Print option).
-        if !layer.print {
+        if !include_non_print && !layer.print {
             continue;
         }
         let nodes = doc.draw_nodes_in_layer(layer_id);
@@ -1010,6 +1026,29 @@ mod tests {
             red_only[0] > 200 && red_only[1] < 60 && red_only[2] < 60,
             "red-only area should be red, got {red_only:?}"
         );
+    }
+
+    #[test]
+    fn editor_composite_keeps_visible_non_print_layers() {
+        let mut doc = Document::new("t", 20.0, 20.0);
+        let layer_id = doc.layer_order[0];
+        doc.layers.get_mut(&layer_id).unwrap().print = false;
+        let mut path = PathNode::new(PathData::rect(0.0, 0.0, 20.0, 20.0));
+        path.fill = Fill::solid(Color::BLUE);
+        doc.add_node(
+            SceneNode::new("blue", layer_id, SceneNodeKind::Path(path)),
+            Some(layer_id),
+        );
+        let view = CanvasView::new(20, 20);
+        let mut exported = vec![255u8; 20 * 20 * 4];
+        let mut editor = exported.clone();
+
+        composite_document(&mut exported, 20, 20, &doc, &view);
+        composite_document_for_editor(&mut editor, 20, 20, &doc, &view);
+
+        let center = (10 * 20 + 10) * 4;
+        assert_eq!(&exported[center..center + 3], &[255, 255, 255]);
+        assert!(editor[center + 2] > 200 && editor[center] < 60);
     }
 
     /// Degenerate / extreme inputs must never panic.

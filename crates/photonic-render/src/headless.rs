@@ -227,7 +227,7 @@ impl HeadlessRenderer {
             .values()
             .any(|n| matches!(n.kind, SceneNodeKind::Text(_)))
         {
-            let mut font_system = glyphon::FontSystem::new();
+            let mut font_system = crate::new_font_system();
             outlined_doc = crate::outline_document_text(document, &mut font_system);
             &outlined_doc
         } else {

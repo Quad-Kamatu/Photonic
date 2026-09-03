@@ -52,6 +52,7 @@ const TOOLS: &[Tool] = &[
     Tool::Grid,
     Tool::PolarGrid,
     Tool::Pen,
+    Tool::CurvaturePen,
     Tool::ShapeBuilder,
     Tool::Text,
     Tool::Scissors,
@@ -61,6 +62,8 @@ const TOOLS: &[Tool] = &[
     Tool::Lasso,
     Tool::Pencil,
     Tool::Smooth,
+    Tool::Width,
+    Tool::AreaTrace,
     Tool::RasterBrush,
     Tool::RasterEraser,
 ];
@@ -89,6 +92,7 @@ fn tool_keywords(t: Tool) -> &'static [&'static str] {
         Tool::Grid => &["table", "mesh", "rows", "columns"],
         Tool::PolarGrid => &["radial", "circular", "concentric"],
         Tool::Pen => &["bezier", "path", "curve", "draw"],
+        Tool::CurvaturePen => &["smooth", "interpolate", "anchor", "curve", "path"],
         Tool::ShapeBuilder => &["merge", "combine", "boolean", "union"],
         Tool::Text => &["type", "label", "font", "write"],
         Tool::Scissors => &["cut", "split", "snip"],
@@ -107,6 +111,13 @@ fn tool_keywords(t: Tool) -> &'static [&'static str] {
         ],
         Tool::RasterBrush => &["paint", "pixel", "draw", "raster"],
         Tool::RasterEraser => &["erase", "rubber", "raster", "delete pixels"],
+        Tool::AreaTrace => &[
+            "image trace",
+            "vectorize",
+            "bitmap to vector",
+            "raster trace",
+            "convert image",
+        ],
     }
 }
 

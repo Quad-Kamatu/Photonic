@@ -307,7 +307,7 @@ pub async fn export_pdf(state: &AppState, args: ExportPdfArgs) -> ToolResult {
     // the live document (and its undo history) is untouched.
     let export_doc: std::borrow::Cow<photonic_core::document::Document> =
         if args.outline_text.unwrap_or(false) {
-            let mut font_system = glyphon::FontSystem::new();
+            let mut font_system = photonic_render::new_font_system();
             std::borrow::Cow::Owned(photonic_render::outline_document_text(
                 &doc,
                 &mut font_system,
@@ -2382,7 +2382,7 @@ mod export_pdf_real_path_tests {
         // `outline_document_text`; the center wordmark must come out LEFT-anchored
         // at its origin (x≈760), NOT shifted left by half its width. ──
         {
-            let mut fs = glyphon::FontSystem::new();
+            let mut fs = photonic_render::new_font_system();
             let outlined = photonic_render::outline_document_text(&doc, &mut fs);
             if let SceneNodeKind::Path(p) = &outlined.nodes.get(&wm_id).unwrap().kind {
                 if let Some(bb) = p.path_data.bounding_box() {

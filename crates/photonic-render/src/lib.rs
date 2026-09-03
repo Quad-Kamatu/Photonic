@@ -11,5 +11,6 @@ pub use canvas::CanvasView;
 pub use headless::{ExportBackground, ExportOptions, HeadlessRenderer};
 pub use renderer::PhotonicRenderer;
 pub use text_outline::{
-    layout_text_flat, outline_document_text, resolve_document_font, ResolvedFace,
+    layout_text_flat, load_photonic_fonts, new_font_system, outline_document_text,
+    photonic_font_cache_dir, resolve_document_font, ResolvedFace,
 };

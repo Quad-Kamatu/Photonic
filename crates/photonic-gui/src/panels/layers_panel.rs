@@ -20,6 +20,7 @@ fn draw_layer_node_row(
         return;
     };
     let is_selected = selected_id == Some(node_id);
+    let is_locked = doc.is_node_locked(node);
 
     // Reserve a paint slot for the hover highlight (filled behind the row).
     let hover_bg = ui.painter().add(egui::Shape::Noop);
@@ -52,20 +53,22 @@ fn draw_layer_node_row(
                         } else {
                             format!("{} {}", ph::FOLDER_SIMPLE, node.name)
                         };
-                        let label = RichText::new(name).color(if is_selected {
-                            Color32::from_rgb(184, 164, 255)
+                        let label = if is_locked {
+                            RichText::new(name).weak()
+                        } else if is_selected {
+                            RichText::new(name).color(Color32::from_rgb(184, 164, 255))
                         } else {
-                            Color32::from_rgb(144, 119, 224)
-                        });
+                            RichText::new(name).color(Color32::from_rgb(144, 119, 224))
+                        };
                         let r = ui.selectable_label(is_selected, label);
-                        if r.clicked() {
+                        if r.clicked() && !is_locked {
                             *action = Some(PanelAction::SelectNode { node_id });
                         }
                         r
                     })
                     .inner;
                 // Right-aligned, frameless ⋯ object options.
-                node_options_button(ui, node_id, action);
+                node_options_button(ui, doc, node_id, action);
                 name_resp
             });
             ui.data_mut(|d| d.insert_temp(open_id, open));
@@ -126,13 +129,20 @@ fn draw_layer_node_row(
                         } else {
                             format!("• {}", node.name)
                         };
+                        let name = if is_locked {
+                            format!("{} {}", ph::LOCK_SIMPLE, name)
+                        } else {
+                            name
+                        };
                         ui.selectable_label(is_selected, name)
                     });
                 if src.inner.clicked() {
-                    *action = Some(PanelAction::SelectNode { node_id });
+                    if !is_locked {
+                        *action = Some(PanelAction::SelectNode { node_id });
+                    }
                 }
                 // Right-aligned, frameless ⋯ object options.
-                node_options_button(ui, node_id, action);
+                node_options_button(ui, doc, node_id, action);
                 src.inner
             });
             let name_resp = row.inner;
@@ -178,11 +188,11 @@ fn draw_layer_node_row(
 
     // Right-click anywhere on the row → the same options menu as the ⋯ button.
     if let Some(nr) = &name_resp {
-        nr.context_menu(|ui| node_menu_items(ui, node_id, action));
+        nr.context_menu(|ui| node_menu_items(ui, doc, node_id, action));
     }
     response
         .interact(egui::Sense::click())
-        .context_menu(|ui| node_menu_items(ui, node_id, action));
+        .context_menu(|ui| node_menu_items(ui, doc, node_id, action));
 }
 
 /// True when the pointer is in the upper half of `rect` (or off-screen). Used to
@@ -228,9 +238,10 @@ fn draw_drop_indicator(ui: &Ui, rect: egui::Rect, above: bool) {
     painter.circle_filled(egui::pos2(rect.right() - 1.0, y), 3.0, color);
 }
 
-/// The shared body of the object/node options menu: z-order ops and "Collect in
-/// New Layer". Used by both the row's right-click menu and its ⋯ options button.
-fn node_menu_items(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAction>) {
+/// The shared body of the object/node options menu: owning-layer lock, z-order
+/// ops, and "Collect in New Layer". Used by both the row's right-click menu and
+/// its ⋯ options button.
+fn node_menu_items(ui: &mut Ui, doc: &Document, node_id: NodeId, action: &mut Option<PanelAction>) {
     if ui
         .button(format!("{} Options…", ph::SLIDERS_HORIZONTAL))
         .on_hover_text("Name, blend mode, opacity, visibility, lock — scoped to this object's type")
@@ -240,6 +251,10 @@ fn node_menu_items(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAction
         ui.close_menu();
     }
     ui.separator();
+    if let Some(node) = doc.nodes.get(&node_id) {
+        layer_lock_menu_item(ui, doc, node.layer_id, action);
+        ui.separator();
+    }
     if ui.button("Bring to Front").clicked() {
         *action = Some(PanelAction::ReorderNode {
             node_id,
@@ -279,7 +294,12 @@ fn node_menu_items(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAction
 
 /// The right-aligned, frameless "⋯" options button for an object/node row. Opens
 /// a popup of [`node_menu_items`], with outer right padding so it never clips.
-fn node_options_button(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAction>) {
+fn node_options_button(
+    ui: &mut Ui,
+    doc: &Document,
+    node_id: NodeId,
+    action: &mut Option<PanelAction>,
+) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.add_space(4.0);
         let resp = ui
@@ -296,7 +316,7 @@ fn node_options_button(ui: &mut Ui, node_id: NodeId, action: &mut Option<PanelAc
             egui::PopupCloseBehavior::CloseOnClick,
             |ui| {
                 ui.set_min_width(160.0);
-                node_menu_items(ui, node_id, action);
+                node_menu_items(ui, doc, node_id, action);
             },
         );
     });
@@ -375,6 +395,7 @@ fn draw_layers_tree(
         let lid = *layer_id;
 
         let is_layer_selected = selected_layer_ids.contains(&lid);
+        let is_layer_locked = doc.is_layer_locked(&lid);
         // Persisted disclosure state for this layer's object list.
         let open_id = egui::Id::new(("layer_open", lid));
         let mut open = ui.data_mut(|d| d.get_temp::<bool>(open_id).unwrap_or(true));
@@ -473,14 +494,19 @@ fn draw_layers_tree(
                         }
                         None
                     } else {
+                        let layer_name = if is_layer_locked {
+                            format!("{} {}", ph::LOCK_SIMPLE, layer.name)
+                        } else {
+                            layer.name.to_string()
+                        };
                         let layer_label = if layer.is_template {
-                            RichText::new(format!("{} [T]", layer.name))
+                            RichText::new(format!("{} [T]", layer_name))
                                 .italics()
                                 .weak()
                         } else if layer.visible {
-                            RichText::new(layer.name.to_string())
+                            RichText::new(layer_name)
                         } else {
-                            RichText::new(format!("{} (hidden)", layer.name)).weak()
+                            RichText::new(format!("{} (hidden)", layer_name)).weak()
                         };
                         let r = ui.selectable_label(is_layer_selected, layer_label);
                         if r.clicked() {
@@ -767,26 +793,15 @@ fn layer_menu_items(
             });
             ui.close_menu();
         }
-        let (lock_icon, lock_label) = if layer.locked {
-            (ph::LOCK_SIMPLE_OPEN, "Unlock Layer")
-        } else {
-            (ph::LOCK_SIMPLE, "Lock Layer")
-        };
-        if ui.button(format!("{} {}", lock_icon, lock_label)).clicked() {
-            *action = Some(PanelAction::SetLayerLocked {
-                layer_id: lid,
-                locked: !layer.locked,
-            });
-            ui.close_menu();
-        }
+        layer_lock_menu_item(ui, doc, lid, action);
         ui.separator();
-        // Delete — refuse when this is the only remaining layer.
-        let can_delete = doc.layer_order.len() > 1;
         if ui
-            .add_enabled(
-                can_delete,
-                egui::Button::new(format!("{} Delete Layer", ph::TRASH)),
-            )
+            .button(format!("{} Delete Layer", ph::TRASH))
+            .on_hover_text(if doc.layer_order.len() == 1 {
+                "Delete this layer and its contents, leaving a new empty layer"
+            } else {
+                "Delete this layer and everything it contains"
+            })
             .clicked()
         {
             *action = Some(PanelAction::DeleteLayer { layer_id: lid });
@@ -795,7 +810,44 @@ fn layer_menu_items(
     }
 }
 
-/// The pinned footer: the adjustment slide-up tray, the four layer-action
+/// Add the layer lock toggle shared by the layer header menu and the context
+/// menu for objects nested inside that layer. Template layers use the same
+/// entry point to leave template mode, since they are implicitly locked.
+fn layer_lock_menu_item(
+    ui: &mut Ui,
+    doc: &Document,
+    layer_id: LayerId,
+    action: &mut Option<PanelAction>,
+) {
+    let Some(layer) = doc.layers.get(&layer_id) else {
+        return;
+    };
+
+    let (icon, label) = if layer.is_template {
+        (ph::LOCK_SIMPLE_OPEN, "Unlock Template Layer")
+    } else if layer.locked {
+        (ph::LOCK_SIMPLE_OPEN, "Unlock Layer")
+    } else {
+        (ph::LOCK_SIMPLE, "Lock Layer")
+    };
+
+    if ui.button(format!("{} {}", icon, label)).clicked() {
+        *action = if layer.is_template {
+            Some(PanelAction::SetLayerTemplate {
+                layer_id,
+                is_template: false,
+            })
+        } else {
+            Some(PanelAction::SetLayerLocked {
+                layer_id,
+                locked: !layer.locked,
+            })
+        };
+        ui.close_menu();
+    }
+}
+
+/// The pinned footer: the adjustment slide-up tray, the layer-action
 /// buttons, and the object-count readout.
 fn draw_layers_footer(ui: &mut Ui, doc: &Document, action: &mut Option<PanelAction>) {
     // Slide-up tray drawn first so it appears *above* the buttons, rising up.
@@ -807,7 +859,7 @@ fn draw_layers_footer(ui: &mut Ui, doc: &Document, action: &mut Option<PanelActi
         draw_adjustment_tray(ui, t, action);
     }
 
-    // Action bar — the four layer actions as a segmented multi-button pill:
+    // Action bar — layer actions as a segmented multi-button pill:
     // icon-only at rest, each expands its label on hover.
     let items = [
         MultiButtonItem::new(
@@ -843,10 +895,11 @@ fn draw_layers_footer(ui: &mut Ui, doc: &Document, action: &mut Option<PanelActi
             1 => *action = Some(PanelAction::AddSublayer),
             2 => *action = Some(PanelAction::AddLayerMaskSmart),
             // Adjust → toggle the slide-up tray of adjustment presets.
-            _ => ui.data_mut(|d| {
+            3 => ui.data_mut(|d| {
                 let cur = d.get_temp::<bool>(adjust_tray_open_id()).unwrap_or(false);
                 d.insert_temp(adjust_tray_open_id(), !cur);
             }),
+            _ => {}
         }
     }
 

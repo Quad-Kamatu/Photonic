@@ -1,115 +1,138 @@
 use super::*;
 
 impl PhotonicApp {
-    /// Get (or build) the egui texture for a raster node's current pixels, with
-    /// its layer mask baked into the alpha. Re-uploads only when content changes.
-    fn raster_texture(
-        &mut self,
-        ctx: &egui::Context,
-        id: photonic_core::node::NodeId,
-        rn: &photonic_core::node::RasterNode,
-    ) -> egui::TextureId {
-        // FNV-1a content hash over pixels + mask (cheap change detection).
-        let mut hash: u64 = 0xcbf29ce484222325;
-        let feed = |bytes: &[u8], hash: &mut u64| {
-            for &b in bytes {
-                *hash ^= b as u64;
-                *hash = hash.wrapping_mul(0x100000001b3);
-            }
-        };
-        feed(&rn.image.pixels, &mut hash);
-        if let Some(m) = &rn.mask {
-            feed(&m.data, &mut hash);
-        }
-
-        if let Some(c) = self.raster_tex_cache.get(&id) {
-            if c.hash == hash {
-                return c.handle.id();
-            }
-        }
-
-        let w = rn.image.width as usize;
-        let h = rn.image.height as usize;
-        let mask_ok = rn
-            .mask
-            .as_ref()
-            .map(|m| m.data.len() == w * h)
-            .unwrap_or(false);
-        let mut pixels = Vec::with_capacity(w * h);
-        for i in 0..(w * h) {
-            let p = &rn.image.pixels[i * 4..i * 4 + 4];
-            let mut a = p[3];
-            if mask_ok {
-                let cov = rn.mask.as_ref().unwrap().data[i] as u16;
-                a = ((a as u16 * cov) / 255) as u8;
-            }
-            pixels.push(egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], a));
-        }
-        let color_img = egui::ColorImage {
-            size: [w.max(1), h.max(1)],
-            pixels,
-        };
-        let handle = ctx.load_texture(
-            format!("raster_{id}"),
-            color_img,
-            egui::TextureOptions::LINEAR,
-        );
-        let tex_id = handle.id();
-        self.raster_tex_cache
-            .insert(id, RasterTexCache { handle, hash });
-        tex_id
-    }
-
-    /// Paint all visible raster nodes as textured quads over the GPU vector
-    /// layer, transformed by each node's affine and the camera. Mirrors the
-    /// headless export compositor (raster composites over vectors).
-    pub(crate) fn paint_raster_nodes(
+    /// Paint a live, true-z-order composite for documents containing raster
+    /// data. The normal GPU scene splits vectors and egui raster textures into
+    /// separate planes, which cannot represent an interleaved layer stack.
+    pub(crate) fn paint_mixed_document(
         &mut self,
         ctx: &egui::Context,
         painter: &egui::Painter,
         doc: &Document,
         view: &CanvasView,
+        rect: egui::Rect,
     ) {
-        let raster_ids: Vec<photonic_core::node::NodeId> = doc
-            .nodes_in_draw_order()
-            .iter()
-            .filter(|n| {
-                n.visible && matches!(&n.kind, SceneNodeKind::Raster(r) if !r.is_adjustment_layer())
-            })
-            .map(|n| n.id)
-            .collect();
-        for id in raster_ids {
-            let Some(node) = doc.get_node(&id) else {
-                continue;
-            };
-            let SceneNodeKind::Raster(rn) = &node.kind else {
-                continue;
-            };
-            if node.opacity <= 0.0 || rn.image.width == 0 || rn.image.height == 0 {
-                continue;
+        if !doc
+            .nodes
+            .values()
+            .any(|node| matches!(node.kind, SceneNodeKind::Raster(_)))
+        {
+            self.mixed_scene_tex_cache = None;
+            return;
+        }
+
+        let ppp = ctx.pixels_per_point().max(0.1);
+        let w = (rect.width() * ppp).round().max(1.0) as u32;
+        let h = (rect.height() * ppp).round().max(1.0) as u32;
+
+        // Content + camera + viewport hash (FNV-1a). This keeps CPU rendering
+        // out of steady-state frames while invalidating during edits and pan/zoom.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |bytes: &[u8]| {
+            for &b in bytes {
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
             }
-            let tex = self.raster_texture(ctx, id, rn);
-            let (w, h) = (rn.image.width as f64, rn.image.height as f64);
-            let local = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
-            let uv = [
-                egui::pos2(0.0, 0.0),
-                egui::pos2(1.0, 0.0),
-                egui::pos2(1.0, 1.0),
-                egui::pos2(0.0, 1.0),
-            ];
-            let a = (node.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-            let tint = egui::Color32::from_white_alpha(a);
-            let mut mesh = egui::Mesh::with_texture(tex);
-            for (i, (lx, ly)) in local.iter().enumerate() {
-                let (dx, dy) = node.transform.apply(*lx, *ly);
-                let (sx, sy) = view.canvas_to_screen(dx, dy);
-                mesh.vertices.push(egui::epaint::Vertex {
-                    pos: egui::pos2(sx as f32, sy as f32),
-                    uv: uv[i],
-                    color: tint,
-                });
+        };
+        if let Ok(bytes) = serde_json::to_vec(doc) {
+            feed(&bytes);
+        }
+        for value in [
+            view.pan_x,
+            view.pan_y,
+            view.zoom,
+            rect.left() as f64,
+            rect.top() as f64,
+            rect.width() as f64,
+            rect.height() as f64,
+            ppp as f64,
+        ] {
+            feed(&value.to_bits().to_le_bytes());
+        }
+
+        if self.mixed_scene_tex_cache.as_ref().map(|c| c.hash) != Some(hash) {
+            // Match the GPU editor background, then lay down the white artboards
+            // before compositing scene nodes in document draw order.
+            let mut rgba = vec![0u8; w as usize * h as usize * 4];
+            for px in rgba.chunks_exact_mut(4) {
+                px.copy_from_slice(&[13, 13, 20, 255]);
             }
-            mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+
+            let mut local_view = CanvasView::new(w, h);
+            local_view.zoom = view.zoom * ppp as f64;
+            local_view.pan_x = (view.pan_x - rect.left() as f64) * ppp as f64;
+            local_view.pan_y = (view.pan_y - rect.top() as f64) * ppp as f64;
+
+            let boards: Vec<(f64, f64, f64, f64)> = if doc.artboards.is_empty() {
+                vec![(0.0, 0.0, doc.width, doc.height)]
+            } else {
+                doc.artboards
+                    .iter()
+                    .map(|a| (a.x, a.y, a.width, a.height))
+                    .collect()
+            };
+            for (x, y, bw, bh) in boards {
+                let (sx0, sy0) = local_view.canvas_to_screen(x, y);
+                let (sx1, sy1) = local_view.canvas_to_screen(x + bw, y + bh);
+                let x0 = sx0.floor().max(0.0).min(w as f64) as u32;
+                let y0 = sy0.floor().max(0.0).min(h as f64) as u32;
+                let x1 = sx1.ceil().max(0.0).min(w as f64) as u32;
+                let y1 = sy1.ceil().max(0.0).min(h as f64) as u32;
+                for py in y0..y1 {
+                    let row = (py * w * 4) as usize;
+                    for px in x0..x1 {
+                        let i = row + px as usize * 4;
+                        rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+            }
+
+            // The CPU compositor consumes paths and rasters. Outline text in a
+            // clone so text remains present underneath this full-scene overlay.
+            let has_text = doc
+                .nodes
+                .values()
+                .any(|node| matches!(node.kind, SceneNodeKind::Text(_)));
+            let outlined;
+            let render_doc = if has_text {
+                let font_system = self
+                    .mixed_scene_font_system
+                    .get_or_insert_with(photonic_render::new_font_system);
+                outlined = photonic_render::outline_document_text(doc, font_system);
+                &outlined
+            } else {
+                doc
+            };
+            photonic_render::compositor::composite_document_for_editor(
+                &mut rgba,
+                w,
+                h,
+                render_doc,
+                &local_view,
+            );
+
+            let pixels = rgba
+                .chunks_exact(4)
+                .map(|px| egui::Color32::from_rgba_unmultiplied(px[0], px[1], px[2], px[3]))
+                .collect();
+            let handle = ctx.load_texture(
+                "photonic_mixed_scene",
+                egui::ColorImage {
+                    size: [w as usize, h as usize],
+                    pixels,
+                },
+                egui::TextureOptions::LINEAR,
+            );
+            self.mixed_scene_tex_cache = Some(MixedSceneTexCache { handle, hash });
+        }
+
+        if let Some(cache) = &self.mixed_scene_tex_cache {
+            let mut mesh = egui::Mesh::with_texture(cache.handle.id());
+            mesh.add_rect_with_uv(
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
             painter.add(egui::Shape::mesh(mesh));
         }
     }
@@ -273,7 +296,7 @@ impl PhotonicApp {
             self.raster_stroke_orig = doc.get_node(&nid).cloned().map(|n| (nid, n));
         }
 
-        if (response.dragged() || response.drag_started()) {
+        if response.dragged() || response.drag_started() {
             if let Some(pos) = response.interact_pointer_pos() {
                 // Screen → canvas → node-local pixel coordinates.
                 let (cx, cy) = view.screen_to_canvas(pos.x as f64, pos.y as f64);
@@ -469,6 +492,13 @@ impl PhotonicApp {
         bytes: &[u8],
         source: Option<&std::path::Path>,
     ) {
+        let target_layer = doc
+            .active_layer_id
+            .or_else(|| doc.layer_order.last().copied());
+        if target_layer.is_none_or(|id| doc.is_layer_locked(&id)) {
+            self.file_status = Some("Place image blocked: the active layer is locked".into());
+            return;
+        }
         let image = match photonic_core::raster::image::RasterImage::from_encoded(bytes) {
             Ok(i) => i,
             Err(e) => {

@@ -293,6 +293,8 @@ pub(crate) fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         Tool::Grid => "Grid Options",
         Tool::PolarGrid => "Polar Grid Options",
         Tool::RoundedRect => "Rounded Rect Options",
+        Tool::Pen => "Pen Options",
+        Tool::CurvaturePen => "Curvature Pen Options",
         Tool::Select => "Select Shortcuts",
         Tool::ShapeBuilder => "Shape Builder",
         Tool::DirectSelect => "Direct Select",
@@ -312,6 +314,8 @@ pub(crate) fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
         | Tool::Grid
         | Tool::PolarGrid
         | Tool::RoundedRect
+        | Tool::Pen
+        | Tool::CurvaturePen
         | Tool::Select
         | Tool::ShapeBuilder
         | Tool::DirectSelect
@@ -381,6 +385,18 @@ pub(crate) fn draw_data_visualization(ui: &mut Ui, ctx: &mut PropPanelCtx) {
                             Tool::RoundedRect => {
                                 ui.label("Corner radius");
                                 ui.add(egui::Slider::new(rounded_rect_radius, 0.0..=200.0).suffix("px"));
+                            }
+                            Tool::Pen => {
+                                ui.label(RichText::new("Click → corner anchor").weak().small());
+                                ui.label(RichText::new("Click + drag → smooth anchor with handles").weak().small());
+                                ui.label(RichText::new("Click first anchor or double-click → finish").weak().small());
+                                ui.label(RichText::new("Esc → cancel path").weak().small());
+                            }
+                            Tool::CurvaturePen => {
+                                ui.label(RichText::new("Click to place on-curve anchors").weak().small());
+                                ui.label(RichText::new("The path stays smooth through every anchor").weak().small());
+                                ui.label(RichText::new("Click first anchor or double-click → finish").weak().small());
+                                ui.label(RichText::new("Esc → cancel path").weak().small());
                             }
                             Tool::Select => {
                                 ui.label(RichText::new("Ctrl+]  Bring Forward").weak().small());
